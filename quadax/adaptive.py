@@ -35,11 +35,11 @@ def quadgk(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        fun(x, *args) -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
-        Lower and upper limits of integration.
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
-        Extra arguments passed to fun, and possibly a, b.
+        Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
@@ -64,25 +64,19 @@ def quadgk(
         Final state of the algorithm. Only returned if full_output=True
         The entries are:
 
-        'neval'
-            The number of function evaluations.
-        'ninter'
-            The number, K, of sub-intervals produced in the subdivision process.
-        'a_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the left end points of the (remapped) sub-intervals in the partition of
-            the integration range.
-        'b_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the right end points of the (remapped) sub-intervals.
-        'r_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the integral approximations on the sub-intervals.
-        'e_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the moduli of the absolute error estimates on the sub-intervals.
+        - 'neval' : (int) The number of function evaluations.
+        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
+          process.
+        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
+          of which are the left end points of the (remapped) sub-intervals in the
+          partition of the integration range.
+        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the right end points of the (remapped) sub-intervals.
+        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the integral approximations on the sub-intervals.
+        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the moduli of the absolute error estimates on the sub-intervals.
 
-            TODO: other entries
     """
     out = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadgk, n=order
@@ -114,7 +108,7 @@ def adaptive_quadrature(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        fun(x, *args) -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration.
     args : tuple, optional
@@ -132,14 +126,13 @@ def adaptive_quadrature(
         algorithm.
     rule : callable
         Local quadrature rule to use. It should have a signature of the form
-        rule(fun, a, b, **kwargs) -> out, where out is array-like with 4 elements:
+        ``rule(fun, a, b, **kwargs)`` -> out, where out is array-like with 4 elements:
 
-            1. Estimate of the integral of fun from a to b
-            2. Estimate of the absolute error in the integral (ie, from a
-              nested scheme).
-            3. Estimate of the integral of abs(fun) from a to b
-            4. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun>
-              is the mean value of fun over the interval.
+            #. Estimate of the integral of fun from a to b
+            #. Estimate of the absolute error in the integral (ie, from nested scheme).
+            #. Estimate of the integral of abs(fun) from a to b
+            #. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun> is
+               the mean value of fun over the interval.
 
     Returns
     -------
@@ -151,25 +144,21 @@ def adaptive_quadrature(
         Final state of the algorithm. Only returned if full_output=True
         The entries are:
 
-        'neval'
-            The number of calls to ``rule``.
-        'ninter'
-            The number, K, of sub-intervals produced in the subdivision process.
-        'a_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the left end points of the (remapped) sub-intervals in the partition of
-            the integration range.
-        'b_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the right end points of the (remapped) sub-intervals.
-        'r_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the integral approximations on the sub-intervals.
-        'e_arr'
-            A rank-1 array of length max_ninter, the first K elements of which are
-            the moduli of the absolute error estimates on the sub-intervals.
+        The entries are:
 
-            TODO: other entries
+        - 'neval' : (int) The number of function evaluations.
+        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
+          process.
+        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
+          of which are the left end points of the (remapped) sub-intervals in the
+          partition of the integration range.
+        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the right end points of the (remapped) sub-intervals.
+        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the integral approximations on the sub-intervals.
+        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the moduli of the absolute error estimates on the sub-intervals.
+
     """
     vfunc = jax.jit(jnp.vectorize(lambda x: fun(x, *args)))
     vfunc = map_interval(vfunc, a, b)

@@ -43,25 +43,6 @@ def trapezoid(y, x=None, dx=1.0, axis=-1):
         then the result is a float. If `n` is greater than 1, then the result
         is an `n`-1 dimensional array.
 
-    See Also
-    --------
-    cumulative_trapezoid, simpson, romb
-
-    Notes
-    -----
-    Image [2]_ illustrates trapezoidal rule -- y-axis locations of points
-    will be taken from `y` array, by default x-axis distances between
-    points will be 1.0, alternatively they can be provided with `x` array
-    or with `dx` scalar.  Return value will be equal to combined area under
-    the red lines.
-
-    References
-    ----------
-    .. [1] Wikipedia page: https://en.wikipedia.org/wiki/Trapezoidal_rule
-
-    .. [2] Illustration image:
-           https://en.wikipedia.org/wiki/File:Composite_trapezoidal_rule_illustration.png
-
     Examples
     --------
     Use the trapezoidal rule on evenly spaced points:
