@@ -51,8 +51,8 @@ For full details of various options see the `API documentation <https://quadax.r
     :target: https://github.com/f0uriest/quadax/blob/master/LICENSE
     :alt: License
 
-.. |DOI| image:: https://zenodo.org/badge/706703896.svg
-    :target: https://zenodo.org/doi/10.5281/zenodo.10028967
+.. |DOI| image:: https://zenodo.org/badge/709132830.svg
+    :target: https://zenodo.org/doi/10.5281/zenodo.10035983
     :alt: DOI
 
 .. |Docs| image:: https://img.shields.io/readthedocs/quadax?logo=Read-the-Docs
