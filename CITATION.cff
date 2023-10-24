@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: quadax
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file. To cite a specific version of quadax,
+  please cite the correct version from Zenodo at
+  https://zenodo.org/doi/10.5281/zenodo.10028967
+type: software
+authors:
+  - given-names: Rory
+    family-names: Conlin
+    email: wconlin@princeton.edu
+    affiliation: Princeton University
+    orcid: 'https://orcid.org/0000-0001-8366-2111'
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.10028967
+    description: 'Master DOI for quadax, points to latest release.'
+  - type: url
+    value: 'https://github.com/f0uriest/quadax'
+    description: 'Github repository for quadax'
+repository-code: 'https://github.com/f0uriest/quadax'
+url: 'https://quadax.readthedocs.io'
+repository-artifact: 'https://pypi.org/project/quadax/'
+license: MIT
