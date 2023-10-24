@@ -1,9 +1,10 @@
+"""Functions for globally h-adaptive quadrature."""
+
 import jax
 import jax.numpy as jnp
 
 from .fixed_qk import fixed_quadgk
 from .utils import map_interval
-
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -40,7 +41,8 @@ def quadgk(
     args : tuple, optional
         Extra arguments passed to fun, and possibly a, b.
     full_output : bool, optional
-        If True, return the full state of the integrator. See below for more information.
+        If True, return the full state of the integrator. See below for more
+        information.
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
@@ -118,7 +120,8 @@ def adaptive_quadrature(
     args : tuple, optional
         Extra arguments passed to fun, and possibly a, b.
     full_output : bool, optional
-        If True, return the full state of the integrator. See below for more information.
+        If True, return the full state of the integrator. See below for more
+        information.
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
@@ -132,7 +135,8 @@ def adaptive_quadrature(
         rule(fun, a, b, **kwargs) -> out, where out is array-like with 4 elements:
 
             1. Estimate of the integral of fun from a to b
-            2. Estimate of the absolute error in the integral (ie, from a nested scheme).
+            2. Estimate of the absolute error in the integral (ie, from a
+              nested scheme).
             3. Estimate of the integral of abs(fun) from a to b
             4. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun>
               is the mean value of fun over the interval.

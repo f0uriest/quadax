@@ -1,7 +1,9 @@
+"""Quadrature of functions using known sample values."""
+
 import jax.numpy as jnp
 
 
-def tupleset(t, i, value):
+def _tupleset(t, i, value):
     l = list(t)
     l[i] = value
     return tuple(l)
@@ -180,8 +182,8 @@ def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
             )
 
     nd = len(y.shape)
-    slice1 = tupleset((slice(None),) * nd, axis, slice(1, None))
-    slice2 = tupleset((slice(None),) * nd, axis, slice(None, -1))
+    slice1 = _tupleset((slice(None),) * nd, axis, slice(1, None))
+    slice2 = _tupleset((slice(None),) * nd, axis, slice(None, -1))
     res = jnp.cumsum(d * (y[slice1] + y[slice2]) / 2.0, axis=axis)
 
     if initial is not None:
@@ -203,9 +205,9 @@ def _basic_simpson(y, start, stop, x, dx, axis):
         start = 0
     step = 2
     slice_all = (slice(None),) * nd
-    slice0 = tupleset(slice_all, axis, slice(start, stop, step))
-    slice1 = tupleset(slice_all, axis, slice(start + 1, stop + 1, step))
-    slice2 = tupleset(slice_all, axis, slice(start + 2, stop + 2, step))
+    slice0 = _tupleset(slice_all, axis, slice(start, stop, step))
+    slice1 = _tupleset(slice_all, axis, slice(start + 1, stop + 1, step))
+    slice2 = _tupleset(slice_all, axis, slice(start + 2, stop + 2, step))
 
     if x is None:  # Even-spaced Simpson's rule.
         result = jnp.sum(y[slice0] + 4.0 * y[slice1] + y[slice2], axis=axis)
@@ -214,8 +216,8 @@ def _basic_simpson(y, start, stop, x, dx, axis):
         # Account for possibly different spacings.
         #    Simpson's rule changes a bit.
         h = jnp.diff(x, axis=axis)
-        sl0 = tupleset(slice_all, axis, slice(start, stop, step))
-        sl1 = tupleset(slice_all, axis, slice(start + 1, stop + 1, step))
+        sl0 = _tupleset(slice_all, axis, slice(start, stop, step))
+        sl1 = _tupleset(slice_all, axis, slice(start + 1, stop + 1, step))
         h0 = h[sl0].astype(float)
         h1 = h[sl1].astype(float)
         hsum = h0 + h1
@@ -293,8 +295,8 @@ def simpson(y, x=None, dx=1.0, axis=-1):
             # need at least 3 points in integration axis to form parabolic
             # segment. If there are two points then any of 'avg', 'first',
             # 'last' should give the same result.
-            slice1 = tupleset(slice_all, axis, -1)
-            slice2 = tupleset(slice_all, axis, -2)
+            slice1 = _tupleset(slice_all, axis, -1)
+            slice2 = _tupleset(slice_all, axis, -2)
             if x is not None:
                 last_dx = x[slice1] - x[slice2]
             val += 0.5 * last_dx * (y[slice1] + y[slice2])
@@ -303,15 +305,15 @@ def simpson(y, x=None, dx=1.0, axis=-1):
             # use Simpson's rule on first intervals
             result = _basic_simpson(y, 0, N - 3, x, dx, axis)
 
-            slice1 = tupleset(slice_all, axis, -1)
-            slice2 = tupleset(slice_all, axis, -2)
-            slice3 = tupleset(slice_all, axis, -3)
+            slice1 = _tupleset(slice_all, axis, -1)
+            slice2 = _tupleset(slice_all, axis, -2)
+            slice3 = _tupleset(slice_all, axis, -3)
 
             h = jnp.asfarray([dx, dx])
             if x is not None:
                 # grab the last two spacings from the appropriate axis
-                hm2 = tupleset(slice_all, axis, slice(-2, -1, 1))
-                hm1 = tupleset(slice_all, axis, slice(-1, None, 1))
+                hm2 = _tupleset(slice_all, axis, slice(-2, -1, 1))
+                hm1 = _tupleset(slice_all, axis, slice(-1, None, 1))
 
                 diffs = jnp.diff(x, axis=axis)
                 h = [

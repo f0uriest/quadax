@@ -1,4 +1,7 @@
+"""Romberg integration aka adaptive trapezoid with Richardson extrapolation."""
+
 from collections import namedtuple
+
 import jax
 import jax.numpy as jnp
 

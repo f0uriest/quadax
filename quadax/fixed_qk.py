@@ -1,6 +1,10 @@
+"""Fixed order quadrature."""
+
 import functools
-import jax.numpy as jnp
+
 import jax
+import jax.numpy as jnp
+
 from .quad_weights import quad_weights
 
 

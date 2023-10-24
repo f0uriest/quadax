@@ -1,3 +1,5 @@
+"""Quadrature nodes and weights."""
+
 import numpy as np
 
 konrod_15_weights = np.array(

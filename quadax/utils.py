@@ -1,5 +1,7 @@
-import jax.numpy as jnp
+"""Utility functions for parsing inputs, mapping coordinates etc."""
+
 import jax
+import jax.numpy as jnp
 
 
 def _x_map_linear(x, a, b):
@@ -34,7 +36,7 @@ def _x_map_ninfb(x, a, b):
 
 
 def map_interval(fun, a, b):
-    """Map a function over an arbitrary interval [a, b] to the interval [-1, 1]"""
+    """Map a function over an arbitrary interval [a, b] to the interval [-1, 1]."""
     sgn = (-1) ** (a > b)
     a, b = jnp.minimum(a, b), jnp.maximum(a, b)
 

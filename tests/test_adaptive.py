@@ -1,15 +1,14 @@
-import pytest
-from jax.config import config as jax_config
+"""Tests for adaptive quadrature routines."""
 
-jax_config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+import numpy as np
+import pytest
+import scipy
+from jax.config import config as jax_config
 
 from quadax import quadgk, quadts, romberg
 
-
-import numpy as np
-import jax.numpy as jnp
-import scipy
-
+jax_config.update("jax_enable_x64", True)
 
 example_problems = [
     # problem 0
@@ -88,6 +87,8 @@ example_problems = [
 
 
 class TestQuadGK:
+    """Tests for Gauss-Konrod quadrature."""
+
     def _base(self, i, fudge=None, **kwargs):
         if fudge is None:
             fudge = {}
@@ -114,53 +115,66 @@ class TestQuadGK:
             )
 
     def test_prob0(self):
+        """Test for example problem #0."""
         self._base(0, order=21)
 
     def test_prob1(self):
+        """Test for example problem #1."""
         self._base(1, order=31)
 
     def test_prob2(self):
+        """Test for example problem #2."""
         self._base(2, order=41)
 
     def test_prob3(self):
+        """Test for example problem #3."""
         self._base(3, order=51)
 
     def test_prob4(self):
+        """Test for example problem #4."""
         self._base(4, order=61)
 
     def test_prob5(self):
+        """Test for example problem #5."""
         self._base(5, order=21)
 
     @pytest.mark.xfail
     def test_prob6(self):
+        """Test for example problem #6."""
         self._base(6, {1e-8: 100}, order=15, max_ninter=100)
 
     def test_prob7(self):
+        """Test for example problem #7."""
         self._base(7, {1e-12: 100}, order=61)
 
     def test_prob8(self):
+        """Test for example problem #8."""
         self._base(8, {1e-12: 10}, order=51)
 
     def test_prob9(self):
+        """Test for example problem #9."""
         self._base(9, {1e-8: 100, 1e-12: 1e5}, order=15, max_ninter=100)
 
     def test_prob10(self):
-        self._base(
-            10,
-            order=15,
-        )
+        """Test for example problem #10."""
+        self._base(10, order=15)
 
     def test_prob11(self):
+        """Test for example problem #11."""
         self._base(11, {1e-8: 100, 1e-12: 1e5}, order=21)
 
     def test_prob12(self):
+        """Test for example problem #12."""
         self._base(12, order=15)
 
     def test_prob13(self):
+        """Test for example problem #13."""
         self._base(13, order=31)
 
 
 class TestQuadTS:
+    """Tests for tanh-sinh quadrature with adaptive refinement."""
+
     def _base(self, i, fudge=None, **kwargs):
         if fudge is None:
             fudge = {}
@@ -180,49 +194,65 @@ class TestQuadTS:
             )
 
     def test_prob0(self):
+        """Test for example problem #0."""
         self._base(0)
 
     def test_prob1(self):
+        """Test for example problem #1."""
         self._base(1)
 
     def test_prob2(self):
+        """Test for example problem #2."""
         self._base(2)
 
     def test_prob3(self):
+        """Test for example problem #3."""
         self._base(3)
 
     def test_prob4(self):
+        """Test for example problem #4."""
         self._base(4)
 
     def test_prob5(self):
+        """Test for example problem #5."""
         self._base(5)
 
     def test_prob6(self):
+        """Test for example problem #6."""
         self._base(6, {1e-8: 10, 1e-12: 1e5})
 
     def test_prob7(self):
+        """Test for example problem #7."""
         self._base(7)
 
     def test_prob8(self):
+        """Test for example problem #8."""
         self._base(8)
 
     def test_prob9(self):
+        """Test for example problem #9."""
         self._base(9, {1e-8: 10, 1e-12: 1e5})
 
     def test_prob10(self):
+        """Test for example problem #10."""
         self._base(10)
 
     def test_prob11(self):
+        """Test for example problem #11."""
         self._base(11, {1e-8: 10, 1e-12: 1e5}, divmax=25)
 
     def test_prob12(self):
+        """Test for example problem #12."""
         self._base(12)
 
     def test_prob13(self):
+        """Test for example problem #13."""
         self._base(13)
 
 
 class TestRomberg:
+    """Tests for Romberg's method (only for well behaved integrands)."""
+
     def _base(self, i, fudge=None):
         if fudge is None:
             fudge = {}
@@ -240,23 +270,29 @@ class TestRomberg:
             )
 
     def test_prob0(self):
+        """Test for example problem #0."""
         self._base(0)
 
     def test_prob1(self):
+        """Test for example problem #1."""
         self._base(1)
 
     def test_prob2(self):
+        """Test for example problem #2."""
         self._base(2)
 
     def test_prob3(self):
+        """Test for example problem #3."""
         self._base(3)
 
     # these two are finite but infinite derivative at endpoints so we expect to
     # struggle a bit.
     def test_prob4(self):
+        """Test for example problem #4."""
         self._base(4, {1e-4: 100, 1e-8: 1e5, 1e-12: 1e7})
 
     def test_prob5(self):
+        """Test for example problem #5."""
         self._base(5, {1e-4: 10, 1e-8: 1e5, 1e-12: 1e7})
 
     # 6-9 : romberg can't handle singularities, even if they are integrable.

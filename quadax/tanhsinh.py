@@ -1,12 +1,15 @@
+"""Integration using tanh-sinh method."""
+
 from collections import namedtuple
 
-import jax.numpy as jnp
 import jax
+import jax.numpy as jnp
 
 from .utils import map_interval
 
 
 def tanhsinh_transform(fun):
+    """Transform a function by mapping with tanh-sinh."""
     xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
     wk = lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
     func = lambda t: fun(xk(t)) * wk(t)
@@ -14,13 +17,18 @@ def tanhsinh_transform(fun):
 
 
 def get_tmax(xmax):
+    """Inverse of tanh-sinh transform."""
     tanhinv = jax.jit(lambda x: 1 / 2 * jnp.log((1 + x) / (1 - x)))
     sinhinv = jax.jit(lambda x: jnp.log(x + jnp.sqrt(x**2 + 1)))
     return sinhinv(2 / jnp.pi * tanhinv(xmax))
 
 
 def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
-    """
+    """Global adaptive quadrature using tanh-sinh (aka double exponential) method.
+
+    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+
+    Differentiation wrt args is done via Liebniz rule.
 
     Parameters
     ----------
@@ -50,7 +58,8 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * table : (ndarray, size(dixmax+1)) Estimate of the integral form each level of discretization.
+        * table : (ndarray, size(dixmax+1)) Estimate of the integral form each level
+          of discretization.
 
     """
     func = jnp.vectorize(lambda x: fun(x, *args))
@@ -67,7 +76,7 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
     tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
 
     a, b = -tmax, tmax
-    result = jnp.zeros((divmax + 1))
+    result = jnp.zeros(divmax + 1)
     result = result.at[0].set((b - a) / 2 * (func(a) + func(b)))
     neval = 2
     err = jnp.inf
