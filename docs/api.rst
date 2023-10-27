@@ -6,6 +6,10 @@ quadgk
 ******
 .. autofunction:: quadax.quadgk
 
+quadcc
+******
+.. autofunction:: quadax.quadcc
+
 quadts
 ******
 .. autofunction:: quadax.quadts

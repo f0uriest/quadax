@@ -5,7 +5,7 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 
-from .utils import map_interval
+from .utils import map_interval, wrap_func
 
 
 def romberg(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
@@ -13,6 +13,13 @@ def romberg(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
 
     Returns the integral of `fun` (a function of one variable)
     over the interval (`a`, `b`).
+
+    Good for non-smooth or piecewise smooth integrands.
+
+    Not recommended for infinite intervals, or functions with singularities.
+
+    Algorithm is copied from SciPy, but in practice tends to underestimate the error
+    for even mildly bad integrands, sometimes by several orders of magnitude.
 
     Parameters
     ----------
@@ -46,12 +53,10 @@ def romberg(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
           each level of discretization and each extrapolation step.
 
     """
-    vfunc = jax.jit(jnp.vectorize(lambda x: fun(x, *args)))
     # map a, b -> [-1, 1]
-    vfunc = map_interval(vfunc, a, b)
-    eps = jnp.finfo(jnp.array(1.0)).eps
-    # avoid evaluating at endpoints to avoid possible singularities
-    a, b = -1 + eps, 1 - eps
+    fun = map_interval(fun, a, b)
+    vfunc = wrap_func(fun, args)
+    a, b = -1, 1
 
     result = jnp.zeros((divmax + 1, divmax + 1))
     result = result.at[0, 0].set(vfunc(a) + vfunc(b))

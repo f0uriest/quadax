@@ -5,14 +5,14 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 
-from .utils import map_interval
+from .utils import map_interval, wrap_func
 
 
 def tanhsinh_transform(fun):
     """Transform a function by mapping with tanh-sinh."""
     xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
     wk = lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
-    func = lambda t: fun(xk(t)) * wk(t)
+    func = lambda t, *args: fun(xk(t), *args) * wk(t)
     return jax.jit(func)
 
 
@@ -26,9 +26,11 @@ def get_tmax(xmax):
 def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
     """Global adaptive quadrature using tanh-sinh (aka double exponential) method.
 
-    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+    Integrate fun from a to b using a p-adaptive scheme with error estimate.
 
-    Differentiation wrt args is done via Liebniz rule.
+    Performs well for functions with singularities at the endpoints or integration
+    over infinite intervals. May be slightly less efficient than ``quadgk`` or
+    ``quadcc`` for smooth integrands.
 
     Parameters
     ----------
@@ -62,12 +64,11 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
           of discretization.
 
     """
-    func = jnp.vectorize(lambda x: fun(x, *args))
     # map a, b -> [-1, 1]
-    func = map_interval(func, a, b)
+    fun = map_interval(fun, a, b)
     # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
-    func = tanhsinh_transform(func)
-
+    fun = tanhsinh_transform(fun)
+    func = wrap_func(fun, args)
     # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
     # we don't want to include the endpoint that maps to x==1 to avoid
     # possible singularities, so we find the largest t s.t. x(t) < 1

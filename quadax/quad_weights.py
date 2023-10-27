@@ -736,35 +736,70 @@ gauss_30_weights = np.array(
 )
 
 
-quad_weights = {
+gk_weights = {
     15: {
-        "konrod_weights": konrod_15_weights,
-        "konrod_nodes": konrod_15_nodes,
-        "gauss_weights": gauss_7_weights,
+        "wk": konrod_15_weights,
+        "xk": konrod_15_nodes,
+        "wg": gauss_7_weights,
     },
     21: {
-        "konrod_weights": konrod_21_weights,
-        "konrod_nodes": konrod_21_nodes,
-        "gauss_weights": gauss_10_weights,
+        "wk": konrod_21_weights,
+        "xk": konrod_21_nodes,
+        "wg": gauss_10_weights,
     },
     31: {
-        "konrod_weights": konrod_31_weights,
-        "konrod_nodes": konrod_31_nodes,
-        "gauss_weights": gauss_15_weights,
+        "wk": konrod_31_weights,
+        "xk": konrod_31_nodes,
+        "wg": gauss_15_weights,
     },
     41: {
-        "konrod_weights": konrod_41_weights,
-        "konrod_nodes": konrod_41_nodes,
-        "gauss_weights": gauss_20_weights,
+        "wk": konrod_41_weights,
+        "xk": konrod_41_nodes,
+        "wg": gauss_20_weights,
     },
     51: {
-        "konrod_weights": konrod_51_weights,
-        "konrod_nodes": konrod_51_nodes,
-        "gauss_weights": gauss_25_weights,
+        "wk": konrod_51_weights,
+        "xk": konrod_51_nodes,
+        "wg": gauss_25_weights,
     },
     61: {
-        "konrod_weights": konrod_61_weights,
-        "konrod_nodes": konrod_61_nodes,
-        "gauss_weights": gauss_30_weights,
+        "wk": konrod_61_weights,
+        "xk": konrod_61_nodes,
+        "wg": gauss_30_weights,
     },
 }
+
+
+def _cc_get_weights(N):
+    """Compute Clenshaw-Curtis nodes and weights for order N. N must be even."""
+    d = 2 / (1 - (np.arange(0, N + 1, 2)) ** 2)
+    d[0] /= 2
+    d[-1] /= 2
+    k = np.arange(N // 2 + 1)
+    n = np.arange(N // 2 + 1)
+    D = 2 / N * np.cos(k[:, None] * n[None, :] * np.pi / (N // 2))
+    D = np.where((n == 0) | (n == N // 2), D * 1 / 2, D)
+    w = D.T @ d
+    t = np.arange(0, 1 + N // 2) * np.pi / N
+    x = np.cos(t)
+    return x, w
+
+
+# generate weights for N = powers of 2
+cc_weights = {}
+for i in range(1, 8):
+    N = int(2 * 2**i)
+    x, w = _cc_get_weights(N)
+    cc_weights[N] = {
+        "xc": x,
+        "wc": w,
+    }
+
+# error formula uses weights from order N/2
+for i in range(2, 8):
+    N = int(2 * 2**i)
+    cc_weights[N]["we"] = np.array(
+        [cc_weights[N / 2]["wc"], np.zeros_like(cc_weights[N / 2]["wc"])]
+    ).flatten(order="F")[:-1]
+
+del cc_weights[4]

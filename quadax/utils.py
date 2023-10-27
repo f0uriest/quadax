@@ -40,7 +40,7 @@ def map_interval(fun, a, b):
     sgn = (-1) ** (a > b)
     a, b = jnp.minimum(a, b), jnp.maximum(a, b)
 
-    # bitmask to select mapping case
+    # bit mask to select mapping case
     # 0 : both sides finite
     # 1 : a = -inf, b finite
     # 2 : a finite, b = inf
@@ -48,11 +48,11 @@ def map_interval(fun, a, b):
     bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
 
     @jax.jit
-    def fun_mapped(x):
+    def fun_mapped(x, *args):
         x, w = jax.lax.switch(
             bitmask, [_x_map_linear, _x_map_ninfb, _x_map_ainf, _x_map_ninfinf], x, a, b
         )
-        return sgn * w * fun(x)
+        return sgn * w * fun(x, *args)
 
     return fun_mapped
 
@@ -60,36 +60,55 @@ def map_interval(fun, a, b):
 messages = {
     0: "Algorithm terminated normally, desired tolerances assumed reached",
     1: (
-        """
-        Maximum number of subdivisions allowed has been achieved. One can allow more
-        subdivisions by increasing the value of max_ninter. However,if this yields no
-        improvement it is advised to analyze the integrand in order to determine the
-        integration difficulties. If the position of a local difficulty can be
-        determined (e.g. singularity, discontinuity within the interval) one will
-        probably gain from splitting up the interval at this point and calling the
-        integrator on the sub-ranges. If possible, an appropriate special-purpose
-        integrator should be used, which is designed for handling the type of
-        difficulty involved.
-        """
+        "Maximum number of subdivisions allowed has been achieved. One can allow more "
+        + "subdivisions by increasing the value of max_ninter. However,if this yields "
+        + "no improvement it is advised to analyze the integrand in order to determine "
+        + "the integration difficulties. If the position of a local difficulty can be "
+        + "determined (e.g. singularity, discontinuity within the interval) one will "
+        + "probably gain from splitting up the interval at this point and calling the "
+        + "integrator on the sub-ranges. If possible, an appropriate special-purpose "
+        + "integrator should be used, which is designed for handling the type of "
+        + "difficulty involved."
     ),
     2: (
-        """
-        The occurrence of roundoff error is detected, which prevents the requested
-        tolerance from being achieved. The error may be under-estimated.
-        """
+        "The occurrence of roundoff error is detected, which prevents the requested "
+        + "tolerance from being achieved. The error may be under-estimated."
     ),
     3: (
-        """
-        Extremely bad integrand behavior occurs at some points of the integration
-        interval.
-        """
+        "Extremely bad integrand behavior occurs at some points of the integration "
+        + "interval."
     ),
     4: (
-        """
-        The algorithm does not converge. Roundoff error is detected in the
-        extrapolation table. It is assumed that the requested tolerance cannot be
-        achieved, and that the returned result is the best which can be obtained.
-        """
+        "The algorithm does not converge. Roundoff error is detected in the "
+        + "extrapolation table. It is assumed that the requested tolerance cannot be "
+        + "achieved, and that the returned result is the best which can be obtained."
     ),
     5: "The integral is probably divergent, or slowly convergent.",
 }
+
+
+def _decode_status(status):
+    if status == 0:
+        msg = messages[0]
+    else:
+        status = "{:05b}".format(status)[::-1]
+        msg = ""
+        for s, m in zip(status, messages.values()):
+            if int(s):
+                msg += m + "\n\n"
+    return msg
+
+
+STATUS = {i: _decode_status(i) for i in range(int(2**5))}
+
+
+def wrap_func(fun, args):
+    """Vectorize, jit, and mask out inf/nan."""
+
+    @jax.jit
+    @jnp.vectorize
+    def wrapped(x):
+        f = fun(x, *args)
+        return jnp.where(jnp.isfinite(f), f, 0.0)
+
+    return wrapped

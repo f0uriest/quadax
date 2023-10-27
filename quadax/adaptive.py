@@ -3,8 +3,8 @@
 import jax
 import jax.numpy as jnp
 
-from .fixed_qk import fixed_quadgk
-from .utils import map_interval
+from .fixed_order import fixed_quadcc, fixed_quadgk
+from .utils import map_interval, wrap_func
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -29,7 +29,9 @@ def quadgk(
 
     Integrate fun from a to b using a h-adaptive scheme with error estimate.
 
-    Differentiation wrt args is done via Liebniz rule.
+    Basically the same as ``scipy.integrate.quad`` but without extrapolation. A good
+    general purpose integrator for most reasonably well behaved functions over finite
+    or infinite intervals.
 
     Parameters
     ----------
@@ -86,6 +88,79 @@ def quadgk(
     return out
 
 
+def quadcc(
+    fun,
+    a,
+    b,
+    args=(),
+    full_output=False,
+    epsabs=1.4e-8,
+    epsrel=1.4e-8,
+    max_ninter=50,
+    order=32,
+):
+    """Global adaptive quadrature using Clenshaw-Curtis rule.
+
+    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+
+    A good general purpose integrator for most reasonably well behaved functions over
+    finite or infinite intervals.
+
+    Parameters
+    ----------
+    fun : callable
+        Function to integrate, should have a signature of the form
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
+    a, b : float
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    args : tuple, optional
+        Extra arguments passed to fun.
+    full_output : bool, optional
+        If True, return the full state of the integrator. See below for more
+        information.
+    epsabs, epsrel : float, optional
+        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
+        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
+        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        numerical approximation.
+    max_ninter : int, optional
+        An upper bound on the number of sub-intervals used in the adaptive
+        algorithm.
+    n : {8, 16, 32, 64, 128, 256}
+        Order of local integration rule.
+
+    Returns
+    -------
+    y : float
+        The integral of fun from `a` to `b`.
+    err : float
+        An estimate of the absolute error in the result.
+    state : dict
+        Final state of the algorithm. Only returned if full_output=True
+        The entries are:
+
+        - 'neval' : (int) The number of function evaluations.
+        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
+          process.
+        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
+          of which are the left end points of the (remapped) sub-intervals in the
+          partition of the integration range.
+        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the right end points of the (remapped) sub-intervals.
+        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the integral approximations on the sub-intervals.
+        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
+          which are the moduli of the absolute error estimates on the sub-intervals.
+
+    """
+    out = adaptive_quadrature(
+        fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadcc, n=order
+    )
+    if full_output:
+        out[2]["neval"] *= order
+    return out
+
+
 def adaptive_quadrature(
     fun,
     a,
@@ -102,7 +177,7 @@ def adaptive_quadrature(
 
     Integrate fun from a to b using an adaptive scheme with error estimate.
 
-    Differentiation wrt args is done via Liebniz rule.
+    Differentiation wrt args is done via Leibniz rule.
 
     Parameters
     ----------
@@ -160,11 +235,10 @@ def adaptive_quadrature(
           which are the moduli of the absolute error estimates on the sub-intervals.
 
     """
-    vfunc = jax.jit(jnp.vectorize(lambda x: fun(x, *args)))
-    vfunc = map_interval(vfunc, a, b)
+    fun = map_interval(fun, a, b)
+    vfunc = wrap_func(fun, args)
 
     f = vfunc(jnp.array([0.5 * (a + b)]))  # call it once to get dtype info
-    uflow = jnp.finfo(f.dtype).tiny
     epmach = jnp.finfo(f.dtype).eps
     a, b = -1, 1
 
@@ -196,13 +270,11 @@ def adaptive_quadrature(
     state["s_arr"] = state["s_arr"].at[0].set(result)
 
     # check for roundoff error - error too big but relative error is small
-    state["status"] += (
-        2**ROUNDOFF
-        * ROUNDOFF
-        * ((abserr <= (100.0 * epmach * intabs)) & (abserr > state["err_bnd"]))
+    state["status"] += 2**ROUNDOFF * (
+        (abserr <= (100.0 * epmach * intabs)) & (abserr > state["err_bnd"])
     )
     # check for max intervals exceeded
-    state["status"] += 2**MAX_NINTER * MAX_NINTER * (max_ninter == 0)
+    state["status"] += 2**MAX_NINTER * (max_ninter == 0)
 
     def condfun(state):
         return (
@@ -246,23 +318,16 @@ def adaptive_quadrature(
         ) & (erro12 >= 0.99 * jnp.max(state["e_arr"]))
         # are errors getting larger as we go to smaller intervals?
         state["roundoff2"] += (n > 10) & (erro12 > jnp.max(state["e_arr"]))
-        state["status"] += (
-            2**ROUNDOFF
-            * ROUNDOFF
-            * ((state["roundoff1"] >= 10) | (state["roundoff2"] >= 20))
+        state["status"] += 2**ROUNDOFF * (
+            (state["roundoff1"] >= 10) | (state["roundoff2"] >= 20)
         )
 
         # test for max number of intervals
-        state["status"] += 2**MAX_NINTER * MAX_NINTER * (n == max_ninter)
+        state["status"] += 2**MAX_NINTER * (n == max_ninter)
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
-        state["status"] += (
-            2**BAD_INTEGRAND
-            * BAD_INTEGRAND
-            * (
-                jnp.maximum(jnp.abs(a1), jnp.abs(b2))
-                <= (1.0 + 100.0 * epmach) * (jnp.abs(a2) + 1000.0 * uflow)
-            )
+        state["status"] += 2**BAD_INTEGRAND * (
+            jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach)
         )
 
         # update the arrays of interval starts/ends etc
