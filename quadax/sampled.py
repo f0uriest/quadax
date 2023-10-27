@@ -290,7 +290,7 @@ def simpson(y, x=None, dx=1.0, axis=-1):
             slice2 = _tupleset(slice_all, axis, -2)
             slice3 = _tupleset(slice_all, axis, -3)
 
-            h = jnp.asfarray([dx, dx])
+            h = jnp.asarray([dx, dx])
             if x is not None:
                 # grab the last two spacings from the appropriate axis
                 hm2 = _tupleset(slice_all, axis, slice(-2, -1, 1))
