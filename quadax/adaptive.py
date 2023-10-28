@@ -1,10 +1,12 @@
 """Functions for globally h-adaptive quadrature."""
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 
 from .fixed_order import fixed_quadcc, fixed_quadgk
-from .utils import map_interval, wrap_func
+from .utils import QuadratureInfo, map_interval, wrap_func
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -14,6 +16,7 @@ NO_CONVERGE = 4
 DIVERGENT = 5
 
 
+@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def quadgk(
     fun,
     a,
@@ -60,34 +63,39 @@ def quadgk(
     -------
     y : float
         The integral of fun from `a` to `b`.
-    err : float
-        An estimate of the absolute error in the result.
-    state : dict
-        Final state of the algorithm. Only returned if full_output=True
-        The entries are:
+    info : QuadratureInfo
+        Named tuple with the following fields:
 
-        - 'neval' : (int) The number of function evaluations.
-        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
-          process.
-        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
-          of which are the left end points of the (remapped) sub-intervals in the
-          partition of the integration range.
-        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the right end points of the (remapped) sub-intervals.
-        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the integral approximations on the sub-intervals.
-        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the moduli of the absolute error estimates on the sub-intervals.
+        * err : (float) Estimate of the error in the approximation.
+        * neval : (int) Total number of function evaluations.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
+
+            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+            subdivision process.
+            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the left end points of the (remapped) sub-intervals
+            in the partition of the integration range.
+            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the right end points of the (remapped) sub-intervals.
+            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the integral approximations on the sub-intervals.
+            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the moduli of the absolute error estimates on the
+            sub-intervals.
 
     """
-    out = adaptive_quadrature(
+    y, info = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadgk, n=order
     )
-    if full_output:
-        out[2]["neval"] *= order
-    return out
+    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    return y, info
 
 
+@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def quadcc(
     fun,
     a,
@@ -133,32 +141,36 @@ def quadcc(
     -------
     y : float
         The integral of fun from `a` to `b`.
-    err : float
-        An estimate of the absolute error in the result.
-    state : dict
-        Final state of the algorithm. Only returned if full_output=True
-        The entries are:
+    info : QuadratureInfo
+        Named tuple with the following fields:
 
-        - 'neval' : (int) The number of function evaluations.
-        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
-          process.
-        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
-          of which are the left end points of the (remapped) sub-intervals in the
-          partition of the integration range.
-        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the right end points of the (remapped) sub-intervals.
-        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the integral approximations on the sub-intervals.
-        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the moduli of the absolute error estimates on the sub-intervals.
+        * err : (float) Estimate of the error in the approximation.
+        * neval : (int) Total number of function evaluations.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
+
+            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+            subdivision process.
+            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the left end points of the (remapped) sub-intervals
+            in the partition of the integration range.
+            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the right end points of the (remapped) sub-intervals.
+            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the integral approximations on the sub-intervals.
+            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the moduli of the absolute error estimates on the
+            sub-intervals.
 
     """
-    out = adaptive_quadrature(
+    y, info = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadcc, n=order
     )
-    if full_output:
-        out[2]["neval"] *= order
-    return out
+    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    return y, info
 
 
 def adaptive_quadrature(
@@ -166,7 +178,7 @@ def adaptive_quadrature(
     a,
     b,
     args=(),
-    return_state=False,
+    full_output=False,
     epsabs=1.4e-8,
     epsrel=1.4e-8,
     max_ninter=50,
@@ -185,9 +197,9 @@ def adaptive_quadrature(
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
-        Lower and upper limits of integration.
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
-        Extra arguments passed to fun, and possibly a, b.
+        Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
@@ -209,30 +221,36 @@ def adaptive_quadrature(
             #. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun> is
                the mean value of fun over the interval.
 
+    kwargs : dict
+        Additional keyword arguments passed to ``rule``.
+
     Returns
     -------
     y : float
         The integral of fun from `a` to `b`.
-    err : float
-        An estimate of the absolute error in the result.
-    state : dict
-        Final state of the algorithm. Only returned if full_output=True
-        The entries are:
+    info : QuadratureInfo
+        Named tuple with the following fields:
 
-        The entries are:
+        * err : (float) Estimate of the error in the approximation.
+        * neval : (int) Total number of rule evaluations.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
 
-        - 'neval' : (int) The number of function evaluations.
-        - 'ninter' : (int) The number, K, of sub-intervals produced in the subdivision
-          process.
-        - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements
-          of which are the left end points of the (remapped) sub-intervals in the
-          partition of the integration range.
-        - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the right end points of the (remapped) sub-intervals.
-        - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the integral approximations on the sub-intervals.
-        - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K elements of
-          which are the moduli of the absolute error estimates on the sub-intervals.
+            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+            subdivision process.
+            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the left end points of the (remapped) sub-intervals
+            in the partition of the integration range.
+            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the right end points of the (remapped) sub-intervals.
+            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the integral approximations on the sub-intervals.
+            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the moduli of the absolute error estimates on the
+            sub-intervals.
 
     """
     fun = map_interval(fun, a, b)
@@ -353,11 +371,38 @@ def adaptive_quadrature(
         state = jax.lax.cond(error2 > error1, error2big, error1big, state)
         return state
 
-    while condfun(state):
-        state = bodyfun(state)
+    state = jax.lax.while_loop(condfun, bodyfun, state)
 
-    result = jnp.sum(state["r_arr"])
-    abserr = state["err_sum"]
-    out = (result, abserr)
-    out += (state,) if return_state else ()
-    return out
+    y = jnp.sum(state["r_arr"])
+    err = state["err_sum"]
+    neval = state["neval"]
+    status = state["status"]
+    info = state if full_output else None
+    out = QuadratureInfo(err, neval, status, info)
+    return y, out
+
+
+@quadcc.defjvp
+def _quadcc_jvp(fun, primals, tangents):
+    a, b, args = primals[:3]
+    adot, bdot, argsdot = tangents[:3]
+    f1, info1 = quadcc(fun, *primals)
+
+    def df(x, *args):
+        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
+
+    f2, info2 = quadcc(df, *primals)
+    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
+
+
+@quadgk.defjvp
+def _quadgk_jvp(fun, primals, tangents):
+    a, b, args = primals[:3]
+    adot, bdot, argsdot = tangents[:3]
+    f1, info1 = quadgk(fun, *primals)
+
+    def df(x, *args):
+        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
+
+    f2, info2 = quadgk(df, *primals)
+    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)

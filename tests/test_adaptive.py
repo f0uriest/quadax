@@ -92,7 +92,7 @@ class TestQuadGK:
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
-        y, err, info = quadgk(
+        y, info = quadgk(
             prob["fun"],
             prob["a"],
             prob["b"],
@@ -101,9 +101,9 @@ class TestQuadGK:
             full_output=True,
             **kwargs,
         )
-        assert info["status"] == status
+        assert info.status == status
         if status == 0:
-            assert err < max(tol, tol * y)
+            assert info.err < max(tol, tol * y)
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -203,7 +203,7 @@ class TestQuadCC:
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
-        y, err, info = quadcc(
+        y, info = quadcc(
             prob["fun"],
             prob["a"],
             prob["b"],
@@ -212,9 +212,9 @@ class TestQuadCC:
             full_output=True,
             **kwargs,
         )
-        assert info["status"] == status
+        assert info.status == status
         if status == 0:
-            assert err < max(tol, tol * y)
+            assert info.err < max(tol, tol * y)
         np.testing.assert_allclose(
             y,
             prob["val"],

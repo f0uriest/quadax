@@ -1,5 +1,7 @@
 """Utility functions for parsing inputs, mapping coordinates etc."""
 
+from typing import NamedTuple, Union
+
 import jax
 import jax.numpy as jnp
 
@@ -112,3 +114,27 @@ def wrap_func(fun, args):
         return jnp.where(jnp.isfinite(f), f, 0.0)
 
     return wrapped
+
+
+class QuadratureInfo(NamedTuple):
+    """Information about quadrature.
+
+    Parameters
+    ----------
+    err : float
+        Estimate of the error in the quadrature result.
+    neval : int
+        Number of evaluations of the integrand.
+    status : int
+        Flag indicating reason for termination. status of 0 means normal termination,
+        any other value indicates a possible error. A human readable message can be
+        obtained by ``print(quadax.STATUS[status])``
+    info : dict or None
+        Other information returned by the algorithm. See specific algorithm for
+        details. Only present if ``full_output`` is True.
+    """
+
+    err: float
+    neval: int
+    status: int
+    info: Union[dict, None]

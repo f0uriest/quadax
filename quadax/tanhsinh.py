@@ -1,11 +1,11 @@
 """Integration using tanh-sinh method."""
 
-from collections import namedtuple
+from functools import partial
 
 import jax
 import jax.numpy as jnp
 
-from .utils import map_interval, wrap_func
+from .utils import QuadratureInfo, map_interval, wrap_func
 
 
 def tanhsinh_transform(fun):
@@ -23,7 +23,10 @@ def get_tmax(xmax):
     return sinhinv(2 / jnp.pi * tanhinv(xmax))
 
 
-def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
+@partial(jax.custom_jvp, nondiff_argnums=(0,))
+def quadts(
+    fun, a, b, args=(), full_output=False, epsabs=1.4e-8, epsrel=1.4e-8, divmax=20
+):
     """Global adaptive quadrature using tanh-sinh (aka double exponential) method.
 
     Integrate fun from a to b using a p-adaptive scheme with error estimate.
@@ -35,13 +38,15 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
     Parameters
     ----------
     fun : callable
-        Function to be integrated.
-    a : float
-        Lower limit of integration.
-    b : float
-        Upper limit of integration.
+        Function to integrate, should have a signature of the form
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
+    a, b : float
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple
         additional arguments passed to fun
+    full_output : bool, optional
+        If True, return the full state of the integrator. See below for more
+        information.
     epsabs, epsrel : float
         Absolute and relative tolerances. If I1 and I2 are two
         successive approximations to the integral, algorithm terminates
@@ -55,13 +60,19 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
     -------
     y  : float
         Approximation to the integral
-    info : namedtuple
-        Extra information:
+    info : QuadratureInfo
+        Named tuple with the following fields:
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * table : (ndarray, size(dixmax+1)) Estimate of the integral form each level
-          of discretization.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
+
+            - table : (ndarray, size(dixmax+1)) Estimate of the integral from each level
+              of discretization.
 
     """
     # map a, b -> [-1, 1]
@@ -106,6 +117,21 @@ def quadts(fun, a, b, args=(), epsabs=1e-8, epsrel=1e-8, divmax=20):
 
     result, n, neval, err = jax.lax.while_loop(ncond, nloop, state)
 
-    quadts_info = namedtuple("quadts_info", "err neval table")
-    info = quadts_info(err, neval, result)
-    return result[n - 1], info
+    y = result[n - 1]
+    status = 2 * (err > jnp.maximum(epsabs, epsrel * y))
+    info = result if full_output else None
+    out = QuadratureInfo(err, neval, status, info)
+    return y, out
+
+
+@quadts.defjvp
+def _quadts_jvp(fun, primals, tangents):
+    a, b, args = primals[:3]
+    adot, bdot, argsdot = tangents[:3]
+    f1, info1 = quadts(fun, *primals)
+
+    def df(x, *args):
+        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
+
+    f2, info2 = quadts(df, *primals)
+    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
