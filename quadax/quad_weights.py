@@ -770,6 +770,9 @@ gk_weights = {
 }
 
 
+##### clenshaw-curtis nodes and weights
+
+
 def _cc_get_weights(N):
     """Compute Clenshaw-Curtis nodes and weights for order N. N must be even."""
     d = 2 / (1 - (np.arange(0, N + 1, 2)) ** 2)
@@ -803,3 +806,38 @@ for i in range(2, 8):
     ).flatten(order="F")[:-1]
 
 del cc_weights[4]
+
+
+##### tanh-sinh weights for trapezoidal rule
+ts_weights = {}
+
+_xts = lambda t: np.tanh(np.pi / 2 * np.sinh(t))
+_wts = lambda t: np.pi / 2 * np.cosh(t) / np.cosh(np.pi / 2 * np.sinh(t)) ** 2
+
+
+def _get_tmax(xmax):
+    # Inverse of tanh-sinh transform.
+    tanhinv = lambda x: 1 / 2 * np.log((1 + x) / (1 - x))
+    sinhinv = lambda x: np.log(x + np.sqrt(x**2 + 1))
+    return sinhinv(2 / np.pi * tanhinv(xmax))
+
+
+tmax = _get_tmax(np.array(1.0) - 10 * np.finfo(np.array(1.0).dtype).eps)
+a, b = -tmax, tmax
+
+
+for N in [41, 61, 81, 101]:
+    t1 = np.linspace(a, b, N)
+    t2 = np.linspace(a, b, N // 2 + 1)
+    assert np.all(t1[::2] == t2)
+
+    x1 = _xts(t1)
+    w1 = _wts(t1)
+    w2 = _wts(t2)
+    ts_weights[N] = {
+        "xt": x1,
+        "wt": w1 * np.diff(t1)[0],
+        "we": w2 * np.diff(t2)[0],
+    }
+    ts_weights[N]["wt"] *= 2 / ts_weights[N]["wt"].sum()
+    ts_weights[N]["we"] *= 2 / ts_weights[N]["we"].sum()

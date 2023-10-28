@@ -6,7 +6,7 @@ import pytest
 import scipy
 from jax.config import config as jax_config
 
-from quadax import quadcc, quadgk, quadts, romberg
+from quadax import quadcc, quadgk, quadts, romberg, rombergts
 
 jax_config.update("jax_enable_x64", True)
 
@@ -98,7 +98,6 @@ class TestQuadGK:
             prob["b"],
             epsabs=tol,
             epsrel=tol,
-            full_output=True,
             **kwargs,
         )
         assert info.status == status
@@ -209,7 +208,6 @@ class TestQuadCC:
             prob["b"],
             epsabs=tol,
             epsrel=tol,
-            full_output=True,
             **kwargs,
         )
         assert info.status == status
@@ -309,11 +307,121 @@ class TestQuadCC:
 
 
 class TestQuadTS:
+    """Tests for adaptive tanh-sinh quadrature."""
+
+    def _base(self, i, tol, fudge=1, **kwargs):
+        prob = example_problems[i]
+        status = kwargs.pop("status", 0)
+        y, info = quadts(
+            prob["fun"],
+            prob["a"],
+            prob["b"],
+            epsabs=tol,
+            epsrel=tol,
+            **kwargs,
+        )
+        assert info.status == status
+        if status == 0:
+            assert info.err < max(tol, tol * y)
+        np.testing.assert_allclose(
+            y,
+            prob["val"],
+            rtol=fudge * tol,
+            atol=fudge * tol,
+            err_msg=f"problem {i}, tol={tol}",
+        )
+
+    def test_prob0(self):
+        """Test for example problem #0."""
+        self._base(0, 1e-4)
+        self._base(0, 1e-8)
+        self._base(0, 1e-12)
+
+    def test_prob1(self):
+        """Test for example problem #1."""
+        self._base(1, 1e-4)
+        self._base(1, 1e-8)
+        self._base(1, 1e-12)
+
+    def test_prob2(self):
+        """Test for example problem #2."""
+        self._base(2, 1e-4, order=41)
+        self._base(2, 1e-8, order=41)
+        self._base(2, 1e-12, order=41)
+
+    def test_prob3(self):
+        """Test for example problem #3."""
+        self._base(3, 1e-4, order=61)
+        self._base(3, 1e-8, order=61)
+        self._base(3, 1e-12, order=61)
+
+    def test_prob4(self):
+        """Test for example problem #4."""
+        self._base(4, 1e-4, order=81)
+        self._base(4, 1e-8, order=81)
+        self._base(4, 1e-12, order=81)
+
+    def test_prob5(self):
+        """Test for example problem #5."""
+        self._base(5, 1e-4, order=101)
+        self._base(5, 1e-8, order=101)
+        self._base(5, 1e-12, order=101)
+
+    def test_prob6(self):
+        """Test for example problem #6."""
+        self._base(6, 1e-4)
+        self._base(6, 1e-8)
+        self._base(6, 1e-12, 1e4)
+
+    def test_prob7(self):
+        """Test for example problem #7."""
+        self._base(7, 1e-4)
+        self._base(7, 1e-8)
+        self._base(7, 1e-12)
+
+    def test_prob8(self):
+        """Test for example problem #8."""
+        self._base(8, 1e-4)
+        self._base(8, 1e-8)
+        self._base(8, 1e-12)
+
+    def test_prob9(self):
+        """Test for example problem #9."""
+        self._base(9, 1e-4)
+        self._base(9, 1e-8, 10)
+        self._base(9, 1e-12, 1e4)
+
+    def test_prob10(self):
+        """Test for example problem #10."""
+        self._base(10, 1e-4)
+        self._base(10, 1e-8)
+        self._base(10, 1e-12)
+
+    def test_prob11(self):
+        """Test for example problem #11."""
+        self._base(11, 1e-4)
+        self._base(11, 1e-8)
+        self._base(11, 1e-12, 1e4)
+
+    def test_prob12(self):
+        """Test for example problem #12."""
+        self._base(12, 1e-4)
+        self._base(12, 1e-8)
+        self._base(12, 1e-12)
+
+    def test_prob13(self):
+        """Test for example problem #13."""
+        self._base(13, 1e-4)
+        self._base(13, 1e-8)
+        self._base(13, 1e-12)
+
+
+class TestRombergTS:
     """Tests for tanh-sinh quadrature with adaptive refinement."""
 
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
-        y, info = quadts(
+        y, info = rombergts(
             prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
         )
         assert info.err < max(tol, tol * y)
@@ -365,7 +473,7 @@ class TestQuadTS:
         """Test for example problem #6."""
         self._base(6, 1e-4)
         self._base(6, 1e-8, 10)
-        self._base(6, 1e-12, 1e5)
+        self._base(6, 1e-12, 1e5, divmax=22)
 
     def test_prob7(self):
         """Test for example problem #7."""

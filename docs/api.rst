@@ -18,6 +18,10 @@ romberg
 *******
 .. autofunction:: quadax.romberg
 
+rombergts
+*********
+.. autofunction:: quadax.rombergts
+
 adaptive_quadrature
 *******************
 .. autofunction:: quadax.adaptive_quadrature

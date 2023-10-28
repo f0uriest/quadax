@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.config import config as jax_config
 
-from quadax import quadcc, quadgk, quadts, romberg
+from quadax import quadcc, quadgk, quadts, romberg, rombergts
 
 jax_config.update("jax_enable_x64", True)
 
@@ -105,6 +105,30 @@ class TestQuadCCJVP:
         self._base(1, 1e-4)
 
 
+class TestQuadTSJVP:
+    """Tests for derivatives of quadts."""
+
+    def _base(self, i, tol, **kwargs):
+
+        prob = example_problems[i]
+
+        def integrate(args):
+            y, err = quadts(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            return y
+
+        jacfd = finite_difference(integrate, prob["args"])
+        jacadf = jax.jacfwd(integrate)(prob["args"])[0]
+        np.testing.assert_allclose(jacfd, jacadf, atol=tol, rtol=tol)
+
+    def test_prob0(self):
+        """Test for derivative of integral of log."""
+        self._base(0, 1e-4)
+
+    def test_prob1(self):
+        """Test for derivative of integral of gaussian."""
+        self._base(1, 1e-4)
+
+
 class TestRombergJVP:
     """Tests for derivatives of romberg."""
 
@@ -129,15 +153,15 @@ class TestRombergJVP:
         self._base(1, 1e-4)
 
 
-class TestQuadTSJVP:
-    """Tests for derivatives of quadts."""
+class TestRombergTSJVP:
+    """Tests for derivatives of rombergts."""
 
     def _base(self, i, tol, **kwargs):
 
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = quadts(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = rombergts(prob["fun"], prob["a"], prob["b"], args, **kwargs)
             print("y=", y)
             print("e=", err)
             return y

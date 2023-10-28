@@ -5,7 +5,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .fixed_order import fixed_quadcc, fixed_quadgk
+from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
 from .utils import QuadratureInfo, map_interval, wrap_func
 
 NORMAL_EXIT = 0
@@ -74,16 +74,16 @@ def quadgk(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+          * 'ninter' : (int) The number, K, of sub-intervals produced in the
             subdivision process.
-            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the left end points of the (remapped) sub-intervals
             in the partition of the integration range.
-            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the right end points of the (remapped) sub-intervals.
-            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the integral approximations on the sub-intervals.
-            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
@@ -152,22 +152,100 @@ def quadcc(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+          * 'ninter' : (int) The number, K, of sub-intervals produced in the
             subdivision process.
-            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the left end points of the (remapped) sub-intervals
             in the partition of the integration range.
-            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the right end points of the (remapped) sub-intervals.
-            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the integral approximations on the sub-intervals.
-            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
     """
     y, info = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadcc, n=order
+    )
+    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    return y, info
+
+
+@partial(jax.custom_jvp, nondiff_argnums=(0,))
+def quadts(
+    fun,
+    a,
+    b,
+    args=(),
+    full_output=False,
+    epsabs=1.4e-8,
+    epsrel=1.4e-8,
+    max_ninter=50,
+    order=61,
+):
+    """Global adaptive quadrature using trapezoidal tanh-sinh rule.
+
+    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+
+    Especially good for integrands with singular behavior at an endpoint.
+
+    Parameters
+    ----------
+    fun : callable
+        Function to integrate, should have a signature of the form
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
+    a, b : float
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    args : tuple, optional
+        Extra arguments passed to fun.
+    full_output : bool, optional
+        If True, return the full state of the integrator. See below for more
+        information.
+    epsabs, epsrel : float, optional
+        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
+        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
+        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        numerical approximation.
+    max_ninter : int, optional
+        An upper bound on the number of sub-intervals used in the adaptive
+        algorithm.
+    n : {41, 61, 81, 101}
+        Order of local integration rule.
+
+    Returns
+    -------
+    y : float
+        The integral of fun from `a` to `b`.
+    info : QuadratureInfo
+        Named tuple with the following fields:
+
+        * err : (float) Estimate of the error in the approximation.
+        * neval : (int) Total number of function evaluations.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
+
+          * 'ninter' : (int) The number, K, of sub-intervals produced in the
+            subdivision process.
+          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the left end points of the (remapped) sub-intervals
+            in the partition of the integration range.
+          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the right end points of the (remapped) sub-intervals.
+          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the integral approximations on the sub-intervals.
+          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the moduli of the absolute error estimates on the
+            sub-intervals.
+
+
+    """
+    y, info = adaptive_quadrature(
+        fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadts, n=order
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -239,16 +317,16 @@ def adaptive_quadrature(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-            - 'ninter' : (int) The number, K, of sub-intervals produced in the
+          * 'ninter' : (int) The number, K, of sub-intervals produced in the
             subdivision process.
-            - 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the left end points of the (remapped) sub-intervals
             in the partition of the integration range.
-            - 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the right end points of the (remapped) sub-intervals.
-            - 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the integral approximations on the sub-intervals.
-            - 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
@@ -405,4 +483,17 @@ def _quadgk_jvp(fun, primals, tangents):
         return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
 
     f2, info2 = quadgk(df, *primals)
+    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
+
+
+@quadts.defjvp
+def _quadts_jvp(fun, primals, tangents):
+    a, b, args = primals[:3]
+    adot, bdot, argsdot = tangents[:3]
+    f1, info1 = quadts(fun, *primals)
+
+    def df(x, *args):
+        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
+
+    f2, info2 = quadts(df, *primals)
     return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
