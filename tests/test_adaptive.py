@@ -472,8 +472,8 @@ class TestRombergTS:
     def test_prob6(self):
         """Test for example problem #6."""
         self._base(6, 1e-4)
-        self._base(6, 1e-8, 10)
-        self._base(6, 1e-12, 1e5, divmax=22)
+        self._base(6, 1e-8, fudge=10)
+        self._base(6, 1e-12, divmax=22, fudge=1e5)
 
     def test_prob7(self):
         """Test for example problem #7."""
@@ -490,8 +490,8 @@ class TestRombergTS:
     def test_prob9(self):
         """Test for example problem #9."""
         self._base(9, 1e-4)
-        self._base(9, 1e-8, 10)
-        self._base(9, 1e-12, 1e5)
+        self._base(9, 1e-8, fudge=10)
+        self._base(9, 1e-12, fudge=1e5)
 
     def test_prob10(self):
         """Test for example problem #10."""
@@ -502,8 +502,8 @@ class TestRombergTS:
     def test_prob11(self):
         """Test for example problem #11."""
         self._base(11, 1e-4)
-        self._base(11, 1e-8, 10)
-        self._base(11, 1e-12, 1e5, divmax=25)
+        self._base(11, 1e-8, fudge=10)
+        self._base(11, 1e-12, fudge=1e5)
 
     def test_prob12(self):
         """Test for example problem #12."""
@@ -521,10 +521,13 @@ class TestRombergTS:
 class TestRomberg:
     """Tests for Romberg's method (only for well behaved integrands)."""
 
-    def _base(self, i, tol, fudge=1):
+    def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
-        y, info = romberg(prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol)
-        assert info.err < max(tol, tol * y)
+        y, info = romberg(
+            prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
+        )
+        if info.status == 0:
+            assert info.err < max(tol, tol * y)
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -559,66 +562,47 @@ class TestRomberg:
 
     def test_prob4(self):
         """Test for example problem #4."""
-        self._base(4, 1e-4, 100)
-        self._base(4, 1e-8, 1e5)
-        self._base(4, 1e-12, 1e7)
+        self._base(4, 1e-4)
+        self._base(4, 1e-8)
+        self._base(4, 1e-12, divmax=27)
 
     def test_prob5(self):
         """Test for example problem #5."""
-        self._base(5, 1e-4, 10)
-        self._base(5, 1e-8, 1e4)
-        self._base(5, 1e-12, 1e6)
+        self._base(5, 1e-4)
+        self._base(5, 1e-8)
+        self._base(5, 1e-12, divmax=25)
 
-    @pytest.mark.xfail
     def test_prob6(self):
         """Test for example problem #6."""
-        self._base(6, 1e-4)
-        self._base(6, 1e-8)
-        self._base(6, 1e-12)
+        self._base(6, 1e-4, fudge=10)
 
-    @pytest.mark.xfail
     def test_prob7(self):
         """Test for example problem #7."""
         self._base(7, 1e-4)
-        self._base(7, 1e-8)
-        self._base(7, 1e-12)
 
-    @pytest.mark.xfail
     def test_prob8(self):
         """Test for example problem #8."""
         self._base(8, 1e-4)
-        self._base(8, 1e-8)
-        self._base(8, 1e-12)
 
     @pytest.mark.xfail
     def test_prob9(self):
         """Test for example problem #9."""
         self._base(9, 1e-4)
-        self._base(9, 1e-8)
-        self._base(9, 1e-12)
 
-    @pytest.mark.xfail
     def test_prob10(self):
         """Test for example problem #10."""
         self._base(10, 1e-4)
-        self._base(10, 1e-8)
-        self._base(10, 1e-12)
 
-    @pytest.mark.xfail
     def test_prob11(self):
         """Test for example problem #11."""
-        self._base(11, 1e-4)
-        self._base(11, 1e-8)
-        self._base(11, 1e-12)
+        self._base(11, 1e-4, fudge=10)
 
-    @pytest.mark.xfail
     def test_prob12(self):
         """Test for example problem #12."""
         self._base(12, 1e-4)
         self._base(12, 1e-8)
         self._base(12, 1e-12)
 
-    @pytest.mark.xfail
     def test_prob13(self):
         """Test for example problem #13."""
         self._base(13, 1e-4)

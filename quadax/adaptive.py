@@ -84,6 +84,13 @@ def quadgk(
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
+    Notes
+    -----
+    Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
+    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
+    ``order`` points, so using higher order methods will generally be more efficient on
+    GPU/TPU.
+
     """
     y, info = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadgk, n=order
@@ -161,6 +168,13 @@ def quadcc(
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
+    Notes
+    -----
+    Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
+    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
+    ``order`` points, so using higher order methods will generally be more efficient on
+    GPU/TPU.
+
     """
     y, info = adaptive_quadrature(
         fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadcc, n=order
@@ -237,6 +251,12 @@ def quadts(
             elements of which are the moduli of the absolute error estimates on the
             sub-intervals.
 
+    Notes
+    -----
+    Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
+    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
+    ``order`` points, so using higher order methods will generally be more efficient on
+    GPU/TPU.
 
     """
     y, info = adaptive_quadrature(

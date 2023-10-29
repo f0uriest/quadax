@@ -30,7 +30,6 @@ def romberg(
     epsabs=1.4e-8,
     epsrel=1.4e-8,
     divmax=20,
-    extrap=True,
 ):
     """Romberg integration of a callable function or method.
 
@@ -40,9 +39,6 @@ def romberg(
     Good for non-smooth or piecewise smooth integrands.
 
     Not recommended for infinite intervals, or functions with singularities.
-
-    Algorithm is copied from SciPy, but in practice tends to underestimate the error
-    for even mildly bad integrands, sometimes by several orders of magnitude.
 
     Parameters
     ----------
@@ -61,11 +57,9 @@ def romberg(
         successive approximations to the integral, algorithm terminates
         when abs(I1-I2) < max(epsabs, epsrel*|I2|)
     divmax : int, optional
-        Maximum order of extrapolation. Default is 10.
+        Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
         most 2**divmax + 1
-    extrap : bool, optional
-        Whether to perform Richardson extrapolation.
 
     Returns
     -------
@@ -85,6 +79,14 @@ def romberg(
           * table : (ndarray, size(dixmax+1, divmax+1)) Estimate of the integral
             from each level of discretization and each step of extrapolation.
 
+    Notes
+    -----
+    Due to limitations on dynamically sized arrays in JAX, this algorithm is fully
+    sequential and does not vectorize integrand evaluations, so may not be the most
+    efficient on GPU/TPU.
+
+    Also, it is currently only forward mode differentiable.
+
     """
     # map a, b -> [-1, 1]
     fun = map_interval(fun, a, b)
@@ -102,11 +104,14 @@ def romberg(
         return (n < divmax + 1) & (err > jnp.maximum(epsabs, epsrel * result[n, n]))
 
     def nloop(state):
+        # loop over outer number of subdivisions
         result, n, neval, err = state
         h = (b - a) / 2**n
         s = 0.0
 
         def sloop(i, s):
+            # loop to evaluate fun. Can't be vectorized due to different number
+            # of evals per nloop step
             s += vfunc(a + h * (2 * i - 1))
             return s
 
@@ -118,12 +123,8 @@ def romberg(
 
         def mloop(m, result):
             # richardson extrapolation
-            temp = (
-                1
-                / (4.0**m - 1.0)
-                * ((4.0**m) * result[n, m - 1] - result[n - 1, m - 1])
-            )
-            result = result.at[n, m].set(temp)
+            temp = 1 / (4.0**m - 1.0) * (result[n, m - 1] - result[n - 1, m - 1])
+            result = result.at[n, m].set(result[n, m - 1] + temp)
             return result
 
         result = jax.lax.fori_loop(1, n + 1, mloop, result)
@@ -168,7 +169,7 @@ def rombergts(
         successive approximations to the integral, algorithm terminates
         when abs(I1-I2) < max(epsabs, epsrel*|I2|)
     divmax : int, optional
-        Maximum order of extrapolation. Default is 10.
+        Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
         most 2**divmax + 1
 
@@ -189,6 +190,14 @@ def rombergts(
 
           * table : (ndarray, size(dixmax+1, divmax+1)) Estimate of the integral
             from each level of discretization and each step of extrapolation.
+
+    Notes
+    -----
+    Due to limitations on dynamically sized arrays in JAX, this algorithm is fully
+    sequential and does not vectorize integrand evaluations, so may not be the most
+    efficient on GPU/TPU.
+
+    Also, it is currently only forward mode differentiable.
 
     """
     # map a, b -> [-1, 1]
