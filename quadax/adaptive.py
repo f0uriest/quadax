@@ -1,12 +1,10 @@
 """Functions for globally h-adaptive quadrature."""
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 
 from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
-from .utils import QuadratureInfo, map_interval, wrap_func
+from .utils import QuadratureInfo, bounded_while_loop, map_interval, wrap_func
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -16,7 +14,6 @@ NO_CONVERGE = 4
 DIVERGENT = 5
 
 
-@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def quadgk(
     fun,
     a,
@@ -95,7 +92,6 @@ def quadgk(
     return y, info
 
 
-@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def quadcc(
     fun,
     a,
@@ -173,7 +169,6 @@ def quadcc(
     return y, info
 
 
-@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def quadts(
     fun,
     a,
@@ -449,7 +444,7 @@ def adaptive_quadrature(
         state = jax.lax.cond(error2 > error1, error2big, error1big, state)
         return state
 
-    state = jax.lax.while_loop(condfun, bodyfun, state)
+    state = bounded_while_loop(condfun, bodyfun, state, max_ninter + 1)
 
     y = jnp.sum(state["r_arr"])
     err = state["err_sum"]
@@ -458,42 +453,3 @@ def adaptive_quadrature(
     info = state if full_output else None
     out = QuadratureInfo(err, neval, status, info)
     return y, out
-
-
-@quadcc.defjvp
-def _quadcc_jvp(fun, primals, tangents):
-    a, b, args = primals[:3]
-    adot, bdot, argsdot = tangents[:3]
-    f1, info1 = quadcc(fun, *primals)
-
-    def df(x, *args):
-        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
-
-    f2, info2 = quadcc(df, *primals)
-    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
-
-
-@quadgk.defjvp
-def _quadgk_jvp(fun, primals, tangents):
-    a, b, args = primals[:3]
-    adot, bdot, argsdot = tangents[:3]
-    f1, info1 = quadgk(fun, *primals)
-
-    def df(x, *args):
-        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
-
-    f2, info2 = quadgk(df, *primals)
-    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
-
-
-@quadts.defjvp
-def _quadts_jvp(fun, primals, tangents):
-    a, b, args = primals[:3]
-    adot, bdot, argsdot = tangents[:3]
-    f1, info1 = quadts(fun, *primals)
-
-    def df(x, *args):
-        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
-
-    f2, info2 = quadts(df, *primals)
-    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)

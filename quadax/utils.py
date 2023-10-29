@@ -138,3 +138,14 @@ class QuadratureInfo(NamedTuple):
     neval: int
     status: int
     info: Union[dict, None]
+
+
+def bounded_while_loop(condfun, bodyfun, init_val, bound):
+    """While loop for bounded number of iterations, implemented using cond and scan."""
+    # could do some fancy stuff with checkpointing here like in equinox but the loops
+    # in quadax usually only do ~100 iterations max so probably not worth it.
+
+    def scanfun(state, *args):
+        return jax.lax.cond(condfun(state), bodyfun, lambda x: x, state), None
+
+    return jax.lax.scan(scanfun, init_val, None, bound)[0]

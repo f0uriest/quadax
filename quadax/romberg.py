@@ -1,11 +1,9 @@
 """Romberg integration aka adaptive trapezoid with Richardson extrapolation."""
 
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 
-from .utils import QuadratureInfo, map_interval, wrap_func
+from .utils import QuadratureInfo, bounded_while_loop, map_interval, wrap_func
 
 
 def tanhsinh_transform(fun):
@@ -23,7 +21,6 @@ def get_tmax(xmax):
     return sinhinv(2 / jnp.pi * tanhinv(xmax))
 
 
-@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def romberg(
     fun,
     a,
@@ -120,40 +117,28 @@ def romberg(
         neval += (2**n) // 2
 
         def mloop(m, result):
-            temp = 1 / (4.0**m - 1.0) * (result[n, m - 1] - result[n - 1, m - 1])
-            result = result.at[n, m].set(result[n, m - 1] + temp)
+            # richardson extrapolation
+            temp = (
+                1
+                / (4.0**m - 1.0)
+                * ((4.0**m) * result[n, m - 1] - result[n - 1, m - 1])
+            )
+            result = result.at[n, m].set(temp)
             return result
 
-        if extrap:
-            result = jax.lax.fori_loop(1, n + 1, mloop, result)
-            err = abs(result[n, n] - result[n, n - 1])
-        else:
-            err = abs(result[n, 0] - result[n - 1, 0])
+        result = jax.lax.fori_loop(1, n + 1, mloop, result)
+        err = abs(result[n, n] - result[n - 1, n - 1])
         return result, n + 1, neval, err
 
-    result, n, neval, err = jax.lax.while_loop(ncond, nloop, state)
+    result, n, neval, err = bounded_while_loop(ncond, nloop, state, divmax + 1)
 
-    y = result[n - 1, n - 1] if extrap else result[n - 1, 0]
+    y = result[n - 1, n - 1]
     status = 2 * (err > jnp.maximum(epsabs, epsrel * y))
     info = result if full_output else None
     out = QuadratureInfo(err, neval, status, info)
     return y, out
 
 
-@romberg.defjvp
-def _romberg_jvp(fun, primals, tangents):
-    a, b, args = primals[:3]
-    adot, bdot, argsdot = tangents[:3]
-    f1, info1 = romberg(fun, *primals)
-
-    def df(x, *args):
-        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
-
-    f2, info2 = romberg(df, *primals)
-    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
-
-
-@partial(jax.custom_jvp, nondiff_argnums=(0,))
 def rombergts(
     fun, a, b, args=(), full_output=False, epsabs=1.4e-8, epsrel=1.4e-8, divmax=20
 ):
@@ -218,17 +203,4 @@ def rombergts(
     # inverse of tanh-sinh transformation for x = 1-eps
     tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
     a, b = -tmax, tmax
-    return romberg(func, a, b, (), full_output, epsabs, epsrel, divmax, extrap=False)
-
-
-@rombergts.defjvp
-def _rombergts_jvp(fun, primals, tangents):
-    a, b, args = primals[:3]
-    adot, bdot, argsdot = tangents[:3]
-    f1, info1 = rombergts(fun, *primals)
-
-    def df(x, *args):
-        return jax.jvp(fun, (x, *args), (jnp.zeros_like(x), *argsdot))[1]
-
-    f2, info2 = rombergts(df, *primals)
-    return (f1, info1), (fun(b, *args) * bdot - fun(a, *args) * adot + f2, info2)
+    return romberg(func, a, b, (), full_output, epsabs, epsrel, divmax)

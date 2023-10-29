@@ -57,7 +57,7 @@ def finite_difference(f, x, eps=1e-8):
     return J
 
 
-class TestQuadGKJVP:
+class TestQuadGKJac:
     """Tests for derivatives of quadgk."""
 
     def _base(self, i, tol, **kwargs):
@@ -70,7 +70,10 @@ class TestQuadGKJVP:
 
         jacfd = finite_difference(integrate, prob["args"])
         jacadf = jax.jacfwd(integrate)(prob["args"])[0]
+        jacadr = jax.jacrev(integrate)(prob["args"])[0]
         np.testing.assert_allclose(jacfd, jacadf, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacfd, jacadr, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacadr, jacadf, atol=1e-14, rtol=1e-14)
 
     def test_prob0(self):
         """Test for derivative of integral of log."""
@@ -81,7 +84,7 @@ class TestQuadGKJVP:
         self._base(1, 1e-4)
 
 
-class TestQuadCCJVP:
+class TestQuadCCJac:
     """Tests for derivatives of quadcc."""
 
     def _base(self, i, tol, **kwargs):
@@ -94,7 +97,10 @@ class TestQuadCCJVP:
 
         jacfd = finite_difference(integrate, prob["args"])
         jacadf = jax.jacfwd(integrate)(prob["args"])[0]
+        jacadr = jax.jacrev(integrate)(prob["args"])[0]
         np.testing.assert_allclose(jacfd, jacadf, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacfd, jacadr, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacadr, jacadf, atol=1e-14, rtol=1e-14)
 
     def test_prob0(self):
         """Test for derivative of integral of log."""
@@ -105,7 +111,7 @@ class TestQuadCCJVP:
         self._base(1, 1e-4)
 
 
-class TestQuadTSJVP:
+class TestQuadTSJac:
     """Tests for derivatives of quadts."""
 
     def _base(self, i, tol, **kwargs):
@@ -118,7 +124,10 @@ class TestQuadTSJVP:
 
         jacfd = finite_difference(integrate, prob["args"])
         jacadf = jax.jacfwd(integrate)(prob["args"])[0]
+        jacadr = jax.jacrev(integrate)(prob["args"])[0]
         np.testing.assert_allclose(jacfd, jacadf, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacfd, jacadr, atol=tol, rtol=tol)
+        np.testing.assert_allclose(jacadr, jacadf, atol=1e-14, rtol=1e-14)
 
     def test_prob0(self):
         """Test for derivative of integral of log."""
@@ -129,7 +138,7 @@ class TestQuadTSJVP:
         self._base(1, 1e-4)
 
 
-class TestRombergJVP:
+class TestRombergJac:
     """Tests for derivatives of romberg."""
 
     def _base(self, i, tol, **kwargs):
@@ -153,7 +162,7 @@ class TestRombergJVP:
         self._base(1, 1e-4)
 
 
-class TestRombergTSJVP:
+class TestRombergTSJac:
     """Tests for derivatives of rombergts."""
 
     def _base(self, i, tol, **kwargs):
