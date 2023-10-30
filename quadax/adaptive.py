@@ -24,6 +24,7 @@ def quadgk(
     epsrel=1.4e-8,
     max_ninter=50,
     order=21,
+    norm=jnp.inf,
 ):
     """Global adaptive quadrature using Gauss-Konrod rule.
 
@@ -37,7 +38,7 @@ def quadgk(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
@@ -55,10 +56,14 @@ def quadgk(
         algorithm.
     order : {15, 21, 31, 41, 51, 61}
         Order of local integration rule.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
 
     Returns
     -------
-    y : float
+    y : float, Array
         The integral of fun from `a` to `b`.
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -93,7 +98,17 @@ def quadgk(
 
     """
     y, info = adaptive_quadrature(
-        fixed_quadgk, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
+        fixed_quadgk,
+        fun,
+        a,
+        b,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        max_ninter,
+        n=order,
+        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -109,6 +124,7 @@ def quadcc(
     epsrel=1.4e-8,
     max_ninter=50,
     order=32,
+    norm=jnp.inf,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -121,7 +137,7 @@ def quadcc(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
@@ -139,10 +155,14 @@ def quadcc(
         algorithm.
     order : {8, 16, 32, 64, 128, 256}
         Order of local integration rule.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
 
     Returns
     -------
-    y : float
+    y : float, Array
         The integral of fun from `a` to `b`.
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -177,7 +197,17 @@ def quadcc(
 
     """
     y, info = adaptive_quadrature(
-        fixed_quadcc, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
+        fixed_quadcc,
+        fun,
+        a,
+        b,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        max_ninter,
+        n=order,
+        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -193,6 +223,7 @@ def quadts(
     epsrel=1.4e-8,
     max_ninter=50,
     order=61,
+    norm=jnp.inf,
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -204,7 +235,7 @@ def quadts(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
@@ -222,10 +253,14 @@ def quadts(
         algorithm.
     order : {41, 61, 81, 101}
         Order of local integration rule.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
 
     Returns
     -------
-    y : float
+    y : float, Array
         The integral of fun from `a` to `b`.
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -260,7 +295,17 @@ def quadts(
 
     """
     y, info = adaptive_quadrature(
-        fixed_quadts, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
+        fixed_quadts,
+        fun,
+        a,
+        b,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        max_ninter,
+        n=order,
+        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -276,6 +321,7 @@ def adaptive_quadrature(
     epsabs=1.4e-8,
     epsrel=1.4e-8,
     max_ninter=50,
+    norm=jnp.inf,
     **kwargs
 ):
     """Global adaptive quadrature.
@@ -288,7 +334,7 @@ def adaptive_quadrature(
     ----------
     rule : callable
         Local quadrature rule to use. It should have a signature of the form
-        ``rule(fun, a, b, **kwargs)`` -> out, where out is array-like with 4 elements:
+        ``rule(fun, a, b, **kwargs)`` -> out, where out is a tuple with 4 elements:
 
             #. Estimate of the integral of fun from a to b
             #. Estimate of the absolute error in the integral (ie, from nested scheme).
@@ -298,7 +344,7 @@ def adaptive_quadrature(
 
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple, optional
@@ -314,12 +360,16 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
     Returns
     -------
-    y : float
+    y : float, Array
         The integral of fun from `a` to `b`.
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -346,28 +396,30 @@ def adaptive_quadrature(
             sub-intervals.
 
     """
-    fun = map_interval(fun, a, b)
+    _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
+    fun, a, b = map_interval(fun, a, b)
     vfunc = wrap_func(fun, args)
-
-    f = vfunc(jnp.array([0.5 * (a + b)]))  # call it once to get dtype info
+    f = jax.eval_shape(vfunc, (a + b / 2))
     epmach = jnp.finfo(f.dtype).eps
-    a, b = -1, 1
+    shape = f.shape
 
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
     state["ninter"] = 0
-    state["r_arr"] = jnp.zeros(max_ninter)  # local results from each interval
+    state["r_arr"] = jnp.zeros((max_ninter, *shape))  # local results from each interval
     state["e_arr"] = jnp.zeros(max_ninter)  # local error est. from each interval
     state["a_arr"] = jnp.zeros(max_ninter)  # start of each interval
     state["b_arr"] = jnp.zeros(max_ninter)  # end of each interval
-    state["s_arr"] = jnp.zeros(max_ninter)  # global est. of I from n intervals
+    state["s_arr"] = jnp.zeros(
+        (max_ninter, *shape)
+    )  # global est. of I from n intervals
     state["a_arr"] = state["a_arr"].at[0].set(a)
     state["b_arr"] = state["b_arr"].at[0].set(b)
     state["roundoff1"] = 0  # for keeping track of roundoff errors
     state["roundoff2"] = 0  # for keeping track of roundoff errors
     state["status"] = 0  # error flag
     state["err_bnd"] = 0.0  # error bound we're trying to reach
-    state["area"] = 0.0  # current best estimate for I
+    state["area"] = jnp.zeros(shape)  # current best estimate for I
     state["err_sum"] = jnp.inf  # current estimate for error in I
 
     result, abserr, intabs, intmmn = rule(vfunc, a, b, (), **kwargs)
@@ -375,14 +427,14 @@ def adaptive_quadrature(
     state["neval"] += 1
     state["area"] = result
     state["err_sum"] = abserr
-    state["err_bnd"] = jnp.maximum(epsabs, epsrel * jnp.abs(result))
+    state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(result))
     state["r_arr"] = state["r_arr"].at[0].set(result)
     state["e_arr"] = state["e_arr"].at[0].set(abserr)
     state["s_arr"] = state["s_arr"].at[0].set(result)
 
     # check for roundoff error - error too big but relative error is small
     state["status"] += 2**ROUNDOFF * (
-        (abserr <= (100.0 * epmach * intabs)) & (abserr > state["err_bnd"])
+        (abserr <= (100.0 * epmach * _norm(intabs))) & (abserr > state["err_bnd"])
     )
     # check for max intervals exceeded
     state["status"] += 2**MAX_NINTER * (max_ninter == 0)
@@ -420,12 +472,12 @@ def adaptive_quadrature(
         state["r_arr"] = state["r_arr"].at[i].set(area1)
         state["r_arr"] = state["r_arr"].at[n].set(area2)
         state["s_arr"] = state["s_arr"].at[n].set(state["area"])
-        state["err_bnd"] = jnp.maximum(epsabs, epsrel * jnp.abs(state["area"]))
+        state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
 
         # test for roundoff error
         # is the area estimate not changing and error not getting smaller?
         state["roundoff1"] += (
-            jnp.abs(state["r_arr"][i] - area12) <= 0.1e-4 * jnp.abs(area12)
+            _norm(state["r_arr"][i] - area12) <= 0.1e-4 * _norm(area12)
         ) & (erro12 >= 0.99 * jnp.max(state["e_arr"]))
         # are errors getting larger as we go to smaller intervals?
         state["roundoff2"] += (n > 10) & (erro12 > jnp.max(state["e_arr"]))
@@ -466,7 +518,7 @@ def adaptive_quadrature(
 
     state = bounded_while_loop(condfun, bodyfun, state, max_ninter + 1)
 
-    y = jnp.sum(state["r_arr"])
+    y = jnp.sum(state["r_arr"], axis=0)
     err = state["err_sum"]
     neval = state["neval"]
     status = state["status"]

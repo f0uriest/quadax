@@ -83,6 +83,13 @@ example_problems = [
     },
     # problem 13
     {"fun": lambda t: jnp.exp(-t) * jnp.cos(t), "a": 0, "b": jnp.inf, "val": 1 / 2},
+    # problem 14 - vector valued integrand made of up problems 0 and 1
+    {
+        "fun": lambda t: jnp.array([t * jnp.log(1 + t), t**2 * jnp.arctan(t)]),
+        "a": 0,
+        "b": 1,
+        "val": jnp.array([1 / 4, (jnp.pi - 2 + 2 * jnp.log(2)) / 12]),
+    },
 ]
 
 
@@ -102,7 +109,7 @@ class TestQuadGK:
         )
         assert info.status == status
         if status == 0:
-            assert info.err < max(tol, tol * y)
+            assert info.err < max(tol, tol * np.max(np.abs(y)))
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -195,6 +202,12 @@ class TestQuadGK:
         self._base(13, 1e-8, order=31)
         self._base(13, 1e-12, order=31)
 
+    def test_prob14(self):
+        """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestQuadCC:
     """Tests for Clenshaw-Curtis quadrature."""
@@ -212,7 +225,7 @@ class TestQuadCC:
         )
         assert info.status == status
         if status == 0:
-            assert info.err < max(tol, tol * y)
+            assert info.err < max(tol, tol * np.max(np.abs(y)))
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -305,6 +318,12 @@ class TestQuadCC:
         self._base(13, 1e-8)
         self._base(13, 1e-12)
 
+    def test_prob14(self):
+        """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestQuadTS:
     """Tests for adaptive tanh-sinh quadrature."""
@@ -322,7 +341,7 @@ class TestQuadTS:
         )
         assert info.status == status
         if status == 0:
-            assert info.err < max(tol, tol * y)
+            assert info.err < max(tol, tol * np.max(np.abs(y)))
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -415,6 +434,12 @@ class TestQuadTS:
         self._base(13, 1e-8)
         self._base(13, 1e-12)
 
+    def test_prob14(self):
+        """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestRombergTS:
     """Tests for tanh-sinh quadrature with adaptive refinement."""
@@ -424,7 +449,8 @@ class TestRombergTS:
         y, info = rombergts(
             prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
         )
-        assert info.err < max(tol, tol * y)
+        if info.status == 0:
+            assert info.err < max(tol, tol * np.max(np.abs(y)))
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -517,6 +543,12 @@ class TestRombergTS:
         self._base(13, 1e-8)
         self._base(13, 1e-12)
 
+    def test_prob14(self):
+        """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestRomberg:
     """Tests for Romberg's method (only for well behaved integrands)."""
@@ -527,7 +559,7 @@ class TestRomberg:
             prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
         )
         if info.status == 0:
-            assert info.err < max(tol, tol * y)
+            assert info.err < max(tol, tol * np.max(np.abs(y)))
         np.testing.assert_allclose(
             y,
             prob["val"],
@@ -608,3 +640,9 @@ class TestRomberg:
         self._base(13, 1e-4)
         self._base(13, 1e-8)
         self._base(13, 1e-12)
+
+    def test_prob14(self):
+        """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)

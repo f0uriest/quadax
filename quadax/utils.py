@@ -1,5 +1,6 @@
 """Utility functions for parsing inputs, mapping coordinates etc."""
 
+from functools import partial
 from typing import NamedTuple, Union
 
 import jax
@@ -38,7 +39,25 @@ def _x_map_ninfb(x, a, b):
 
 
 def map_interval(fun, a, b):
-    """Map a function over an arbitrary interval [a, b] to the interval [-1, 1]."""
+    """Map a function over an arbitrary interval [a, b] to the interval [-1, 1].
+
+    Transform a function such that integral(fun) on [a,b] is the same as
+    integral(tfun) on [ta, tb]
+
+    Parameters
+    ----------
+    fun : callable
+        Integrand to transform.
+    a, b : float
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+
+    Returns
+    -------
+    tfun : callable
+        Transformed integrand.
+    ta, tb : float
+        New lower and upper limits of integration
+    """
     sgn = (-1) ** (a > b)
     a, b = jnp.minimum(a, b), jnp.maximum(a, b)
 
@@ -56,7 +75,51 @@ def map_interval(fun, a, b):
         )
         return sgn * w * fun(x, *args)
 
-    return fun_mapped
+    return fun_mapped, -1, 1
+
+
+def tanhsinh_transform(fun, a, b):
+    """Transform a function by mapping with tanh-sinh.
+
+    Transform a function such that integral(fun) on [a,b] is the same as
+    integral(tfun) on [ta, tb]
+
+    Parameters
+    ----------
+    fun : callable
+        Integrand to transform.
+    a, b : float
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+
+    Returns
+    -------
+    tfun : callable
+        Transformed integrand.
+    ta, tb : float
+        New lower and upper limits of integration
+    """
+    # map a, b -> [-1, 1]
+    fun, a, b = map_interval(fun, a, b)
+
+    # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
+    xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
+    wk = lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+    func = lambda t, *args: fun(xk(t), *args) * wk(t)
+
+    # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
+    # we don't want to include the endpoint that maps to x==1 to avoid
+    # possible singularities, so we find the largest t s.t. x(t) < 1
+    # and use that as our interval
+    def get_tmax(xmax):
+        """Inverse of tanh-sinh transform."""
+        tanhinv = lambda x: 1 / 2 * jnp.log((1 + x) / (1 - x))
+        sinhinv = lambda x: jnp.log(x + jnp.sqrt(x**2 + 1))
+        return sinhinv(2 / jnp.pi * tanhinv(xmax))
+
+    # inverse of tanh-sinh transformation for x = 1-eps
+    tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
+    a, b = -tmax, tmax
+    return jax.jit(func), a, b
 
 
 messages = {
@@ -106,9 +169,12 @@ STATUS = {i: _decode_status(i) for i in range(int(2**5))}
 
 def wrap_func(fun, args):
     """Vectorize, jit, and mask out inf/nan."""
+    f = jax.eval_shape(fun, jnp.array(0.0), *args)
+    # need to make sure we get the correct shape for array valued integrands
+    outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
     @jax.jit
-    @jnp.vectorize
+    @partial(jnp.vectorize, signature="()->" + outsig)
     def wrapped(x):
         f = fun(x, *args)
         return jnp.where(jnp.isfinite(f), f, 0.0)

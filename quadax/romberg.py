@@ -3,22 +3,13 @@
 import jax
 import jax.numpy as jnp
 
-from .utils import QuadratureInfo, bounded_while_loop, map_interval, wrap_func
-
-
-def tanhsinh_transform(fun):
-    """Transform a function by mapping with tanh-sinh."""
-    xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-    wk = lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
-    func = lambda t, *args: fun(xk(t), *args) * wk(t)
-    return jax.jit(func)
-
-
-def get_tmax(xmax):
-    """Inverse of tanh-sinh transform."""
-    tanhinv = jax.jit(lambda x: 1 / 2 * jnp.log((1 + x) / (1 - x)))
-    sinhinv = jax.jit(lambda x: jnp.log(x + jnp.sqrt(x**2 + 1)))
-    return sinhinv(2 / jnp.pi * tanhinv(xmax))
+from .utils import (
+    QuadratureInfo,
+    bounded_while_loop,
+    map_interval,
+    tanhsinh_transform,
+    wrap_func,
+)
 
 
 def romberg(
@@ -30,6 +21,7 @@ def romberg(
     epsabs=1.4e-8,
     epsrel=1.4e-8,
     divmax=20,
+    norm=jnp.inf,
 ):
     """Romberg integration of a callable function or method.
 
@@ -44,7 +36,7 @@ def romberg(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple
@@ -60,10 +52,14 @@ def romberg(
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
         most 2**divmax + 1
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
 
     Returns
     -------
-    y  : float
+    y  : float, Array
         Approximation to the integral
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -76,7 +72,7 @@ def romberg(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1)) Estimate of the integral
+          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation.
 
     Notes
@@ -88,12 +84,13 @@ def romberg(
     Also, it is currently only forward mode differentiable.
 
     """
+    _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
+    f = jax.eval_shape(fun, (a + b / 2), *args)
     # map a, b -> [-1, 1]
-    fun = map_interval(fun, a, b)
+    fun, a, b = map_interval(fun, a, b)
     vfunc = wrap_func(fun, args)
-    a, b = -1, 1
 
-    result = jnp.zeros((divmax + 1, divmax + 1))
+    result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     result = result.at[0, 0].set(vfunc(a) + vfunc(b))
     neval = 2
     err = jnp.inf
@@ -101,13 +98,15 @@ def romberg(
 
     def ncond(state):
         result, n, neval, err = state
-        return (n < divmax + 1) & (err > jnp.maximum(epsabs, epsrel * result[n, n]))
+        return (n < divmax + 1) & (
+            err > jnp.maximum(epsabs, epsrel * _norm(result[n, n]))
+        )
 
     def nloop(state):
         # loop over outer number of subdivisions
         result, n, neval, err = state
         h = (b - a) / 2**n
-        s = 0.0
+        s = jnp.zeros(f.shape, f.dtype)
 
         def sloop(i, s):
             # loop to evaluate fun. Can't be vectorized due to different number
@@ -128,20 +127,28 @@ def romberg(
             return result
 
         result = jax.lax.fori_loop(1, n + 1, mloop, result)
-        err = abs(result[n, n] - result[n - 1, n - 1])
+        err = _norm(result[n, n] - result[n - 1, n - 1])
         return result, n + 1, neval, err
 
     result, n, neval, err = bounded_while_loop(ncond, nloop, state, divmax + 1)
 
     y = result[n - 1, n - 1]
-    status = 2 * (err > jnp.maximum(epsabs, epsrel * y))
+    status = 2 * (err > jnp.maximum(epsabs, epsrel * _norm(y)))
     info = result if full_output else None
     out = QuadratureInfo(err, neval, status, info)
     return y, out
 
 
 def rombergts(
-    fun, a, b, args=(), full_output=False, epsabs=1.4e-8, epsrel=1.4e-8, divmax=20
+    fun,
+    a,
+    b,
+    args=(),
+    full_output=False,
+    epsabs=1.4e-8,
+    epsrel=1.4e-8,
+    divmax=20,
+    norm=jnp.inf,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -156,7 +163,7 @@ def rombergts(
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple
@@ -172,10 +179,15 @@ def rombergts(
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
         most 2**divmax + 1
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
+
 
     Returns
     -------
-    y  : float
+    y  : float, Array
         Approximation to the integral
     info : QuadratureInfo
         Named tuple with the following fields:
@@ -188,7 +200,7 @@ def rombergts(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1)) Estimate of the integral
+          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation.
 
     Notes
@@ -200,16 +212,5 @@ def rombergts(
     Also, it is currently only forward mode differentiable.
 
     """
-    # map a, b -> [-1, 1]
-    fun = map_interval(fun, a, b)
-    # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
-    fun = tanhsinh_transform(fun)
-    func = wrap_func(fun, args)
-    # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
-    # we don't want to include the endpoint that maps to x==1 to avoid
-    # possible singularities, so we find the largest t s.t. x(t) < 1
-    # and use that as our interval
-    # inverse of tanh-sinh transformation for x = 1-eps
-    tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
-    a, b = -tmax, tmax
-    return romberg(func, a, b, (), full_output, epsabs, epsrel, divmax)
+    fun, a, b = tanhsinh_transform(fun, a, b)
+    return romberg(fun, a, b, args, full_output, epsabs, epsrel, divmax, norm)
