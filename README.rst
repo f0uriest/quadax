@@ -39,8 +39,9 @@ Usage
 
     f = lambda t: t * jnp.log(1 + t)
 
-    y, err = quadgk(fun, 0, 1, epsabs=1e-14, epsrel=1e-14)
-
+    epsabs = epsrel = 1e-14
+    y, info = quadgk(fun, 0, 1, epsabs=epsabs, epsrel=epsrel)
+    assert info.err < max(epsabs, epsrel*abs(y))
     np.testing.assert_allclose(y, 1/4, rtol=1e-14, atol=1e-14)
 
 

@@ -93,7 +93,7 @@ def quadgk(
 
     """
     y, info = adaptive_quadrature(
-        fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadgk, n=order
+        fixed_quadgk, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -137,7 +137,7 @@ def quadcc(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    n : {8, 16, 32, 64, 128, 256}
+    order : {8, 16, 32, 64, 128, 256}
         Order of local integration rule.
 
     Returns
@@ -177,7 +177,7 @@ def quadcc(
 
     """
     y, info = adaptive_quadrature(
-        fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadcc, n=order
+        fixed_quadcc, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -220,7 +220,7 @@ def quadts(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    n : {41, 61, 81, 101}
+    order : {41, 61, 81, 101}
         Order of local integration rule.
 
     Returns
@@ -260,13 +260,14 @@ def quadts(
 
     """
     y, info = adaptive_quadrature(
-        fun, a, b, args, full_output, epsabs, epsrel, max_ninter, fixed_quadts, n=order
+        fixed_quadts, fun, a, b, args, full_output, epsabs, epsrel, max_ninter, n=order
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
 
 
 def adaptive_quadrature(
+    rule,
     fun,
     a,
     b,
@@ -275,17 +276,26 @@ def adaptive_quadrature(
     epsabs=1.4e-8,
     epsrel=1.4e-8,
     max_ninter=50,
-    rule=None,
     **kwargs
 ):
     """Global adaptive quadrature.
 
-    Integrate fun from a to b using an adaptive scheme with error estimate.
-
-    Differentiation wrt args is done via Leibniz rule.
+    This is a lower level routine allowing for custom local quadrature rules. For most
+    applications the higher order methods ``quadgk``, ``quadcc``, ``quadts`` are
+    preferable.
 
     Parameters
     ----------
+    rule : callable
+        Local quadrature rule to use. It should have a signature of the form
+        ``rule(fun, a, b, **kwargs)`` -> out, where out is array-like with 4 elements:
+
+            #. Estimate of the integral of fun from a to b
+            #. Estimate of the absolute error in the integral (ie, from nested scheme).
+            #. Estimate of the integral of abs(fun) from a to b
+            #. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun> is
+               the mean value of fun over the interval.
+
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float. Should be JAX transformable.
@@ -304,16 +314,6 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    rule : callable
-        Local quadrature rule to use. It should have a signature of the form
-        ``rule(fun, a, b, **kwargs)`` -> out, where out is array-like with 4 elements:
-
-            #. Estimate of the integral of fun from a to b
-            #. Estimate of the absolute error in the integral (ie, from nested scheme).
-            #. Estimate of the integral of abs(fun) from a to b
-            #. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun> is
-               the mean value of fun over the interval.
-
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 

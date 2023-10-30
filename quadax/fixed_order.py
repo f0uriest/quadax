@@ -10,17 +10,17 @@ from .utils import wrap_func
 
 
 @functools.partial(jax.jit, static_argnums=(0, 4))
-def fixed_quadgk(fun, a, b, args, n=21):
+def fixed_quadgk(fun, a, b, args=(), n=21):
     """Integrate a function from a to b using a fixed order Gauss-Konrod rule.
 
-    Integration is performed using and order n Konrod rule with error estimated
+    Integration is performed using an order n Konrod rule with error estimated
     using an embedded n//2 order Gauss rule.
 
     Parameters
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        fun(x, *args) -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Must be finite.
     args : tuple, optional
@@ -89,17 +89,17 @@ def fixed_quadgk(fun, a, b, args, n=21):
     return jax.lax.cond(a == b, truefun, falsefun)
 
 
-def fixed_quadcc(fun, a, b, args, n=32):
+def fixed_quadcc(fun, a, b, args=(), n=32):
     """Integrate a function from a to b using a fixed order Clenshaw-Curtis rule.
 
-    Integration is performed using and order n rule with error estimated
+    Integration is performed using an order n rule with error estimated
     using an embedded n//2 order rule.
 
     Parameters
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        fun(x, *args) -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Must be finite.
     args : tuple, optional
@@ -171,17 +171,17 @@ def fixed_quadcc(fun, a, b, args, n=32):
     return jax.lax.cond(a == b, truefun, falsefun)
 
 
-def fixed_quadts(fun, a, b, args, n=61):
+def fixed_quadts(fun, a, b, args=(), n=61):
     """Integrate a function from a to b using a fixed order tanh-sinh rule.
 
-    Integration is performed using and order n rule with error estimated
+    Integration is performed using an order n rule with error estimated
     using an embedded n//2 order rule.
 
     Parameters
     ----------
     fun : callable
         Function to integrate, should have a signature of the form
-        fun(x, *args) -> float. Should be JAX transformable.
+        ``fun(x, *args)`` -> float. Should be JAX transformable.
     a, b : float
         Lower and upper limits of integration. Must be finite.
     args : tuple, optional

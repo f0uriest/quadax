@@ -2,38 +2,51 @@
 API Documentation
 =================
 
-quadgk
-******
-.. autofunction:: quadax.quadgk
+.. currentmodule:: quadax
 
-quadcc
-******
-.. autofunction:: quadax.quadcc
+Adaptive integration of a callable function or method
+-----------------------------------------------------
 
-quadts
-******
-.. autofunction:: quadax.quadts
+.. autosummary::
+    :toctree: _api/
+    :recursive:
 
-romberg
-*******
-.. autofunction:: quadax.romberg
+    quadgk    -- General purpose integration using Gauss-Konrod scheme
+    quadcc    -- General purpose integration using Clenshaw-Curtis scheme
+    quadts    -- General purpose integration using tanh-sinh (aka double exponential) scheme
+    romberg   -- Adaptive trapezoidal integration with Richardson extrapolation
+    rombergts -- Adaptive tanh-sinh integration with Richardson extrapolation
 
-rombergts
-*********
-.. autofunction:: quadax.rombergts
 
-adaptive_quadrature
-*******************
-.. autofunction:: quadax.adaptive_quadrature
+Fixed order integration of a callable function or method
+--------------------------------------------------------
 
-trapezoid
-*********
-.. autofunction:: quadax.trapezoid
+.. autosummary::
+    :toctree: _api/
+    :recursive:
 
-cumulative_trapezoid
-********************
-.. autofunction:: quadax.cumulative_trapezoid
+    fixed_quadgk    -- Fixed order integration over finite interval using Gauss-Konrod scheme
+    fixed_quadcc    -- Fixed order integration over finite interval using Clenshaw-Curtis scheme
+    fixed_quadts    -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
 
-simpson
-*******
-.. autofunction:: quadax.simpson
+
+Integrating function from sampled values
+----------------------------------------
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+
+    trapezoid            -- Use trapezoidal rule to approximate definite integral.
+    cumulative_trapezoid -- Use trapezoidal rule to approximate indefinite integral.
+    simpson              -- Use Simpson's rule to compute integral from samples.
+
+
+Low level routines and wrappers
+-------------------------------
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+
+    adaptive_quadrature -- Custom h-adaptive quadrature using user specified local rule.
