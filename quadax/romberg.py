@@ -6,6 +6,7 @@ import jax.numpy as jnp
 from .utils import (
     QuadratureInfo,
     bounded_while_loop,
+    errorif,
     map_interval,
     tanhsinh_transform,
     wrap_func,
@@ -14,8 +15,7 @@ from .utils import (
 
 def romberg(
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -25,8 +25,7 @@ def romberg(
 ):
     """Romberg integration of a callable function or method.
 
-    Returns the integral of `fun` (a function of one variable)
-    over the interval (`a`, `b`).
+    Returns the integral of `fun` (a function of one variable) over `interval`.
 
     Good for non-smooth or piecewise smooth integrands.
 
@@ -37,7 +36,7 @@ def romberg(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
+    interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple
         additional arguments passed to fun
@@ -84,11 +83,17 @@ def romberg(
     Also, it is currently only forward mode differentiable.
 
     """
+    errorif(
+        len(interval) != 2,
+        NotImplementedError,
+        "Romberg integration with breakpoints not supported",
+    )
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-    f = jax.eval_shape(fun, (a + b / 2), *args)
     # map a, b -> [-1, 1]
-    fun, a, b = map_interval(fun, a, b)
+    fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
+    a, b = interval
+    f = jax.eval_shape(vfunc, (a + b / 2))
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     result = result.at[0, 0].set(vfunc(a) + vfunc(b))
@@ -141,8 +146,7 @@ def romberg(
 
 def rombergts(
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -152,8 +156,7 @@ def rombergts(
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
-    Returns the integral of `fun` (a function of one variable)
-    over the interval (`a`, `b`).
+    Returns the integral of `fun` (a function of one variable) over `interval`.
 
     Performs well for functions with singularities at the endpoints or integration
     over infinite intervals. May be slightly less efficient than ``quadgk`` or
@@ -164,7 +167,7 @@ def rombergts(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
+    interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
     args : tuple
         additional arguments passed to fun
@@ -212,5 +215,5 @@ def rombergts(
     Also, it is currently only forward mode differentiable.
 
     """
-    fun, a, b = tanhsinh_transform(fun, a, b)
-    return romberg(fun, a, b, args, full_output, epsabs, epsrel, divmax, norm)
+    fun, interval = tanhsinh_transform(fun, interval)
+    return romberg(fun, interval, args, full_output, epsabs, epsrel, divmax, norm)

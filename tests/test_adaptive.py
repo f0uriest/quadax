@@ -12,82 +12,73 @@ jax_config.update("jax_enable_x64", True)
 
 example_problems = [
     # problem 0
-    {"fun": lambda t: t * jnp.log(1 + t), "a": 0, "b": 1, "val": 1 / 4},
+    {"fun": lambda t: t * jnp.log(1 + t), "interval": [0, 1], "val": 1 / 4},
     # problem 1
     {
         "fun": lambda t: t**2 * jnp.arctan(t),
-        "a": 0,
-        "b": 1,
+        "interval": [0, 1],
         "val": (jnp.pi - 2 + 2 * jnp.log(2)) / 12,
     },
     # problem 2
     {
         "fun": lambda t: jnp.exp(t) * jnp.cos(t),
-        "a": 0,
-        "b": jnp.pi / 2,
+        "interval": [0, jnp.pi / 2],
         "val": (jnp.exp(jnp.pi / 2) - 1) / 2,
     },
     # problem 3
     {
         "fun": lambda t: jnp.arctan(jnp.sqrt(2 + t**2))
         / ((1 + t**2) * jnp.sqrt(2 + t**2)),
-        "a": 0,
-        "b": 1,
+        "interval": [0, 1],
         "val": 5 * jnp.pi**2 / 96,
     },
     # problem 4
-    {"fun": lambda t: jnp.sqrt(t) * jnp.log(t), "a": 0, "b": 1, "val": -4 / 9},
+    {"fun": lambda t: jnp.sqrt(t) * jnp.log(t), "interval": [0, 1], "val": -4 / 9},
     # problem 5
-    {"fun": lambda t: jnp.sqrt(1 - t**2), "a": 0, "b": 1, "val": jnp.pi / 4},
+    {"fun": lambda t: jnp.sqrt(1 - t**2), "interval": [0, 1], "val": jnp.pi / 4},
     # problem 6
     {
         "fun": lambda t: jnp.sqrt(t) / jnp.sqrt(1 - t**2),
-        "a": 0,
-        "b": 1,
+        "interval": [0, 1],
         "val": 2
         * jnp.sqrt(jnp.pi)
         * scipy.special.gamma(3 / 4)
         / scipy.special.gamma(1 / 4),
     },
     # problem 7
-    {"fun": lambda t: jnp.log(t) ** 2, "a": 0, "b": 1, "val": 2},
+    {"fun": lambda t: jnp.log(t) ** 2, "interval": [0, 1], "val": 2},
     # problem 8
     {
         "fun": lambda t: jnp.log(jnp.cos(t)),
-        "a": 0,
-        "b": jnp.pi / 2,
+        "interval": [0, jnp.pi / 2],
         "val": -jnp.pi * jnp.log(2) / 2,
     },
     # problem 9
     {
         "fun": lambda t: jnp.sqrt(jnp.tan(t)),
-        "a": 0,
-        "b": jnp.pi / 2,
+        "interval": [0, jnp.pi / 2],
         "val": jnp.pi * jnp.sqrt(2) / 2,
     },
     # problem 10
-    {"fun": lambda t: 1 / (1 + t**2), "a": 0, "b": jnp.inf, "val": jnp.pi / 2},
+    {"fun": lambda t: 1 / (1 + t**2), "interval": [0, jnp.inf], "val": jnp.pi / 2},
     # problem 11
     {
         "fun": lambda t: jnp.exp(-t) / jnp.sqrt(t),
-        "a": 0,
-        "b": jnp.inf,
+        "interval": [0, jnp.inf],
         "val": jnp.sqrt(jnp.pi),
     },
     # problem 12
     {
         "fun": lambda t: jnp.exp(-(t**2) / 2),
-        "a": -jnp.inf,
-        "b": jnp.inf,
+        "interval": [-jnp.inf, jnp.inf],
         "val": jnp.sqrt(2 * jnp.pi),
     },
     # problem 13
-    {"fun": lambda t: jnp.exp(-t) * jnp.cos(t), "a": 0, "b": jnp.inf, "val": 1 / 2},
+    {"fun": lambda t: jnp.exp(-t) * jnp.cos(t), "interval": [0, jnp.inf], "val": 1 / 2},
     # problem 14 - vector valued integrand made of up problems 0 and 1
     {
         "fun": lambda t: jnp.array([t * jnp.log(1 + t), t**2 * jnp.arctan(t)]),
-        "a": 0,
-        "b": 1,
+        "interval": [0, 1],
         "val": jnp.array([1 / 4, (jnp.pi - 2 + 2 * jnp.log(2)) / 12]),
     },
 ]
@@ -101,8 +92,7 @@ class TestQuadGK:
         status = kwargs.pop("status", 0)
         y, info = quadgk(
             prob["fun"],
-            prob["a"],
-            prob["b"],
+            prob["interval"],
             epsabs=tol,
             epsrel=tol,
             **kwargs,
@@ -217,8 +207,7 @@ class TestQuadCC:
         status = kwargs.pop("status", 0)
         y, info = quadcc(
             prob["fun"],
-            prob["a"],
-            prob["b"],
+            prob["interval"],
             epsabs=tol,
             epsrel=tol,
             **kwargs,
@@ -333,8 +322,7 @@ class TestQuadTS:
         status = kwargs.pop("status", 0)
         y, info = quadts(
             prob["fun"],
-            prob["a"],
-            prob["b"],
+            prob["interval"],
             epsabs=tol,
             epsrel=tol,
             **kwargs,
@@ -447,7 +435,7 @@ class TestRombergTS:
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
         y, info = rombergts(
-            prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
+            prob["fun"], prob["interval"], epsabs=tol, epsrel=tol, **kwargs
         )
         if info.status == 0:
             assert info.err < max(tol, tol * np.max(np.abs(y)))
@@ -556,7 +544,7 @@ class TestRomberg:
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]
         y, info = romberg(
-            prob["fun"], prob["a"], prob["b"], epsabs=tol, epsrel=tol, **kwargs
+            prob["fun"], prob["interval"], epsabs=tol, epsrel=tol, **kwargs
         )
         if info.status == 0:
             assert info.err < max(tol, tol * np.max(np.abs(y)))

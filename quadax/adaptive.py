@@ -16,8 +16,7 @@ DIVERGENT = 5
 
 def quadgk(
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -28,7 +27,9 @@ def quadgk(
 ):
     """Global adaptive quadrature using Gauss-Konrod rule.
 
-    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+    Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
+    error estimate. Breakpoints can be specified in `interval` where integration
+    difficulty may occur.
 
     Basically the same as ``scipy.integrate.quad`` but without extrapolation. A good
     general purpose integrator for most reasonably well behaved functions over finite
@@ -39,8 +40,9 @@ def quadgk(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
@@ -49,7 +51,7 @@ def quadgk(
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
         numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
@@ -100,8 +102,7 @@ def quadgk(
     y, info = adaptive_quadrature(
         fixed_quadgk,
         fun,
-        a,
-        b,
+        interval,
         args,
         full_output,
         epsabs,
@@ -116,8 +117,7 @@ def quadgk(
 
 def quadcc(
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -128,7 +128,9 @@ def quadcc(
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
-    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+    Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
+    error estimate. Breakpoints can be specified in `interval` where integration
+    difficulty may occur.
 
     A good general purpose integrator for most reasonably well behaved functions over
     finite or infinite intervals.
@@ -138,8 +140,9 @@ def quadcc(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
@@ -148,7 +151,7 @@ def quadcc(
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
         numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
@@ -199,8 +202,7 @@ def quadcc(
     y, info = adaptive_quadrature(
         fixed_quadcc,
         fun,
-        a,
-        b,
+        interval,
         args,
         full_output,
         epsabs,
@@ -215,8 +217,7 @@ def quadcc(
 
 def quadts(
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -227,7 +228,9 @@ def quadts(
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
-    Integrate fun from a to b using a h-adaptive scheme with error estimate.
+    Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
+    error estimate. Breakpoints can be specified in `interval` where integration
+    difficulty may occur.
 
     Especially good for integrands with singular behavior at an endpoint.
 
@@ -236,8 +239,9 @@ def quadts(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
@@ -246,7 +250,7 @@ def quadts(
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
         numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
@@ -297,8 +301,7 @@ def quadts(
     y, info = adaptive_quadrature(
         fixed_quadts,
         fun,
-        a,
-        b,
+        interval,
         args,
         full_output,
         epsabs,
@@ -314,8 +317,7 @@ def quadts(
 def adaptive_quadrature(
     rule,
     fun,
-    a,
-    b,
+    interval,
     args=(),
     full_output=False,
     epsabs=1.4e-8,
@@ -345,8 +347,9 @@ def adaptive_quadrature(
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
@@ -355,7 +358,7 @@ def adaptive_quadrature(
     epsabs, epsrel : float, optional
         Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
         obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` from `a` to `b`, and ``result`` is the
+        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
         numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
@@ -397,8 +400,9 @@ def adaptive_quadrature(
 
     """
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-    fun, a, b = map_interval(fun, a, b)
+    fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
+    a, b = interval
     f = jax.eval_shape(vfunc, (a + b / 2))
     epmach = jnp.finfo(f.dtype).eps
     shape = f.shape

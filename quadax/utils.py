@@ -7,59 +7,102 @@ import jax
 import jax.numpy as jnp
 
 
-def _x_map_linear(x, a, b):
+def errorif(cond, err=ValueError, msg=""):
+    """Raise an error if condition is met.
+
+    Similar to assert but allows wider range of Error types, rather than
+    just AssertionError.
+    """
+    if cond:
+        raise err(msg)
+
+
+def _map_linear(t, a, b):
+    """Map a point t in [-1, 1] to x in [a, b]."""
     c = (b - a) / 2
     d = (b + a) / 2
-    x = d + c * x
+    x = d + c * t
     w = c
     return x.squeeze(), w.squeeze()
 
 
-def _x_map_ninfinf(x, a, b):
-    x2 = x * x
-    px1 = 1 - x2
-    spx1 = 1 / px1**0.5
-    x = x * spx1
-    w = spx1 / px1
+def _map_linear_inv(x, a, b):
+    """Map a point x in [a, b] to t in [-1, 1]."""
+    c = (b - a) / 2
+    d = (b + a) / 2
+    t = (x - d) / c
+    return t.squeeze()
+
+
+def _map_ninfinf(t, a, b):
+    """Map a point t in [-1, 1] to x in [-inf, inf]."""
+    x = t / jnp.sqrt(1 - t**2)
+    w = 1 / jnp.sqrt(1 - t**2) ** 3
     return x.squeeze(), w.squeeze()
 
 
-def _x_map_ainf(x, a, b):
-    u = 2 / (x + 1)
-    x = a - 1 + u
-    w = 0.5 * u**2
+def _map_ninfinf_inv(x, a, b):
+    """Map a point x in [-inf, inf] to t in [-1, 1]."""
+    t = x / jnp.sqrt(x**2 + 1)
+    return t.squeeze()
+
+
+def _map_ainf(t, a, b):
+    """Map a point t in [-1, 1] to x in [a, inf]."""
+    x = a - 1 + 2 / (1 - t)
+    w = 2 / (1 - t) ** 2
     return x.squeeze(), w.squeeze()
 
 
-def _x_map_ninfb(x, a, b):
-    u = 2 / (x + 1)
-    x = b + 1 - u
-    w = 0.5 * u**2
+def _map_ainf_inv(x, a, b):
+    """Map a point x in [a, inf] to t in [-1, 1]."""
+    t = (a - x + 1) / (a - x - 1)
+    return t.squeeze()
+
+
+def _map_ninfb(t, a, b):
+    """Map a point t in [-1, 1] to x in [-inf, b]."""
+    x = b + 1 - 2 / (t + 1)
+    w = 2 / (t + 1) ** 2
     return x.squeeze(), w.squeeze()
 
 
-def map_interval(fun, a, b):
+def _map_ninfb_inv(x, a, b):
+    """Map a point x in [-inf, b] to t in [-1, 1]."""
+    t = (x - b + 1) / (b - x + 1)
+    return t.squeeze()
+
+
+def map_interval(fun, interval):
     """Map a function over an arbitrary interval [a, b] to the interval [-1, 1].
 
-    Transform a function such that integral(fun) on [a,b] is the same as
-    integral(tfun) on [ta, tb]
+    Transform a function such that integral(fun) on interval is the same as
+    integral(fun_t) on interval_t
 
     Parameters
     ----------
     fun : callable
         Integrand to transform.
-    a, b : float
-        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
 
     Returns
     -------
-    tfun : callable
+    fun_t : callable
         Transformed integrand.
-    ta, tb : float
-        New lower and upper limits of integration
+    interval_t : float
+        New lower and upper limits of integration with possible breakpoints.
     """
+    interval = jnp.asarray(interval)
+    a, b = interval[0], interval[-1]
     sgn = (-1) ** (a > b)
     a, b = jnp.minimum(a, b), jnp.maximum(a, b)
+    # catch breakpoints that are outside the domain, replace with endpoints
+    # this creates intervals of 0 length which will be ignored later
+    interval = jnp.where(interval < a, a, interval)
+    interval = jnp.where(interval > b, b, interval)
+    interval = jnp.sort(interval)
 
     # bit mask to select mapping case
     # 0 : both sides finite
@@ -67,39 +110,49 @@ def map_interval(fun, a, b):
     # 2 : a finite, b = inf
     # 3 : both infinite
     bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
+    mapfuns = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
+    mapfuns_inv = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
 
     @jax.jit
-    def fun_mapped(x, *args):
-        x, w = jax.lax.switch(
-            bitmask, [_x_map_linear, _x_map_ninfb, _x_map_ainf, _x_map_ninfinf], x, a, b
-        )
+    def fun_mapped(t, *args):
+        x, w = jax.lax.switch(bitmask, mapfuns, t, a, b)
         return sgn * w * fun(x, *args)
 
-    return fun_mapped, -1, 1
+    # map original breakpoints to new domain
+    interval_t = jax.lax.switch(bitmask, mapfuns_inv, interval, a, b)
+    # +/-inf gets mapped to +/-1 but numerically evaluates to nan so we replace that.
+    interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
+    interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
+    return fun_mapped, interval_t
 
 
-def tanhsinh_transform(fun, a, b):
+def tanhsinh_transform(fun, interval):
     """Transform a function by mapping with tanh-sinh.
 
-    Transform a function such that integral(fun) on [a,b] is the same as
-    integral(tfun) on [ta, tb]
+    Transform a function such that integral(fun) on interval is the same as
+    integral(fun_t) on interval_t
 
     Parameters
     ----------
     fun : callable
         Integrand to transform.
-    a, b : float
+    interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
 
     Returns
     -------
-    tfun : callable
+    fun_t : callable
         Transformed integrand.
-    ta, tb : float
-        New lower and upper limits of integration
+    interval_t : float
+        New lower and upper limits.
     """
+    errorif(
+        len(interval) != 2,
+        NotImplementedError,
+        "tanh-sinh transformation with breakpoints not supported",
+    )
     # map a, b -> [-1, 1]
-    fun, a, b = map_interval(fun, a, b)
+    fun, interval = map_interval(fun, interval)
 
     # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
     xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
@@ -118,8 +171,8 @@ def tanhsinh_transform(fun, a, b):
 
     # inverse of tanh-sinh transformation for x = 1-eps
     tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
-    a, b = -tmax, tmax
-    return jax.jit(func), a, b
+    interval_t = jnp.array([-tmax, tmax])
+    return jax.jit(func), interval_t
 
 
 messages = {

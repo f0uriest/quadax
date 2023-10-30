@@ -17,15 +17,13 @@ example_problems = [
     # problem 0
     {
         "fun": lambda t, c: jnp.log(c * t).squeeze(),
-        "a": 1,
-        "b": 3,
+        "interval": [1, 3],
         "args": (np.array([3.12]),),
     },
     # problem 1
     {
         "fun": lambda t, m_s: jnp.exp(-((t - m_s[0]) ** 2) / m_s[1] ** 2).squeeze(),
-        "a": -2,
-        "b": 3,
+        "interval": [-2, 3],
         "args": (np.array([1.23, 0.67]),),
     },
 ]
@@ -65,7 +63,7 @@ class TestQuadGKJac:
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = quadgk(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = quadgk(prob["fun"], prob["interval"], args, **kwargs)
             return y
 
         jacfd = finite_difference(integrate, prob["args"])
@@ -92,7 +90,7 @@ class TestQuadCCJac:
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = quadcc(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = quadcc(prob["fun"], prob["interval"], args, **kwargs)
             return y
 
         jacfd = finite_difference(integrate, prob["args"])
@@ -119,7 +117,7 @@ class TestQuadTSJac:
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = quadts(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = quadts(prob["fun"], prob["interval"], args, **kwargs)
             return y
 
         jacfd = finite_difference(integrate, prob["args"])
@@ -146,7 +144,7 @@ class TestRombergJac:
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = romberg(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = romberg(prob["fun"], prob["interval"], args, **kwargs)
             return y
 
         jacfd = finite_difference(integrate, prob["args"])
@@ -170,7 +168,7 @@ class TestRombergTSJac:
         prob = example_problems[i]
 
         def integrate(args):
-            y, err = rombergts(prob["fun"], prob["a"], prob["b"], args, **kwargs)
+            y, err = rombergts(prob["fun"], prob["interval"], args, **kwargs)
             print("y=", y)
             print("e=", err)
             return y
