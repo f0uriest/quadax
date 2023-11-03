@@ -8,18 +8,20 @@ quadax
 
 quadax is a library for numerical quadrature and integration using JAX.
 
+- ``vmap``able, ``jit``able, differentiable.
+- Scalar or vector valued integrands.
+- Finite or infinite domains with discontinuities or singularities within the domain of integration.
 - Globally adaptive Gauss-Konrod and Clenshaw-Curtis quadrature for smooth integrands (similar to ``scipy.integrate.quad``)
 - Adaptive tanh-sinh quadrature for singular or near singular integrands.
 - Quadrature from sampled values using trapezoidal and Simpsons methods.
 
 Coming soon:
 
-- Specifying breakpoints in the domain
-- Custom JVP/VJP rules
-- N-D quadrature (cubature) via iterated 1-D rules
-- Sparse grids
+- Custom JVP/VJP rules (currently AD works by differentiating the loop which isn't the most efficient.)
+- N-D quadrature (cubature)
 - QMC methods
 - Integration with weight functions
+- Sparse grids (maybe, need to play with data structures and JAX)
 
 Installation
 ============
@@ -44,7 +46,8 @@ Usage
     f = lambda t: t * jnp.log(1 + t)
 
     epsabs = epsrel = 1e-14
-    y, info = quadgk(fun, 0, 1, epsabs=epsabs, epsrel=epsrel)
+    a, b = 0, 1
+    y, info = quadgk(fun, [a, b], epsabs=epsabs, epsrel=epsrel)
     assert info.err < max(epsabs, epsrel*abs(y))
     np.testing.assert_allclose(y, 1/4, rtol=1e-14, atol=1e-14)
 

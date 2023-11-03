@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 
 from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
-from .utils import QuadratureInfo, bounded_while_loop, map_interval, wrap_func
+from .utils import QuadratureInfo, bounded_while_loop, errorif, map_interval, wrap_func
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -324,7 +324,7 @@ def adaptive_quadrature(
     epsrel=1.4e-8,
     max_ninter=50,
     norm=jnp.inf,
-    **kwargs
+    **kwargs,
 ):
     """Global adaptive quadrature.
 
@@ -399,17 +399,21 @@ def adaptive_quadrature(
             sub-intervals.
 
     """
+    errorif(
+        max_ninter < len(interval) - 1,
+        ValueError,
+        f"max_ninter={max_ninter} is not enough for {len(interval)-1} breakpoints",
+    )
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
-    a, b = interval
-    f = jax.eval_shape(vfunc, (a + b / 2))
+    f = jax.eval_shape(vfunc, (interval[0] + interval[-1] / 2))
     epmach = jnp.finfo(f.dtype).eps
     shape = f.shape
 
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
-    state["ninter"] = 0
+    state["ninter"] = len(interval) - 1  # current number of intervals
     state["r_arr"] = jnp.zeros((max_ninter, *shape))  # local results from each interval
     state["e_arr"] = jnp.zeros(max_ninter)  # local error est. from each interval
     state["a_arr"] = jnp.zeros(max_ninter)  # start of each interval
@@ -417,31 +421,42 @@ def adaptive_quadrature(
     state["s_arr"] = jnp.zeros(
         (max_ninter, *shape)
     )  # global est. of I from n intervals
-    state["a_arr"] = state["a_arr"].at[0].set(a)
-    state["b_arr"] = state["b_arr"].at[0].set(b)
+    state["a_arr"] = state["a_arr"].at[: state["ninter"]].set(interval[:-1])
+    state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
     state["roundoff1"] = 0  # for keeping track of roundoff errors
     state["roundoff2"] = 0  # for keeping track of roundoff errors
     state["status"] = 0  # error flag
     state["err_bnd"] = 0.0  # error bound we're trying to reach
     state["area"] = jnp.zeros(shape)  # current best estimate for I
-    state["err_sum"] = jnp.inf  # current estimate for error in I
+    state["err_sum"] = 0.0  # current estimate for error in I
 
-    result, abserr, intabs, intmmn = rule(vfunc, a, b, (), **kwargs)
+    def init_body(i, state_):
+        state, intabs_ = state_
+        a = state["a_arr"][i]
+        b = state["b_arr"][i]
+        result, abserr, intabs, intmmn = rule(vfunc, a, b, (), **kwargs)
 
-    state["neval"] += 1
-    state["area"] = result
-    state["err_sum"] = abserr
-    state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(result))
-    state["r_arr"] = state["r_arr"].at[0].set(result)
-    state["e_arr"] = state["e_arr"].at[0].set(abserr)
-    state["s_arr"] = state["s_arr"].at[0].set(result)
+        intabs_ += intabs
+        state["neval"] += 1
+        state["area"] += result
+        state["err_sum"] += abserr
+        state["r_arr"] = state["r_arr"].at[i].set(result)
+        state["e_arr"] = state["e_arr"].at[i].set(abserr)
+        state["s_arr"] = state["s_arr"].at[i].set(state["area"])
+        return state, intabs_
 
+    state, intabs_ = jax.lax.fori_loop(
+        0, state["ninter"], init_body, (state, jnp.zeros(shape))
+    )
+    state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
     # check for roundoff error - error too big but relative error is small
     state["status"] += 2**ROUNDOFF * (
-        (abserr <= (100.0 * epmach * _norm(intabs))) & (abserr > state["err_bnd"])
+        (state["err_sum"] <= (100.0 * epmach * _norm(intabs_)))
+        & (state["err_sum"] > state["err_bnd"])
     )
+
     # check for max intervals exceeded
-    state["status"] += 2**MAX_NINTER * (max_ninter == 0)
+    state["status"] += 2**MAX_NINTER * (state["ninter"] >= max_ninter)
 
     def condfun(state):
         return (
@@ -490,7 +505,7 @@ def adaptive_quadrature(
         )
 
         # test for max number of intervals
-        state["status"] += 2**MAX_NINTER * (n == max_ninter)
+        state["status"] += 2**MAX_NINTER * (state["ninter"] >= max_ninter)
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
         state["status"] += 2**BAD_INTEGRAND * (

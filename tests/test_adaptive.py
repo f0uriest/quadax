@@ -81,6 +81,12 @@ example_problems = [
         "interval": [0, 1],
         "val": jnp.array([1 / 4, (jnp.pi - 2 + 2 * jnp.log(2)) / 12]),
     },
+    # problem 15 - intergral with breakpoints
+    {
+        "fun": lambda t: jnp.log((t - 1) ** 2),
+        "interval": [0, 1, 2],
+        "val": -4,
+    },
 ]
 
 
@@ -178,7 +184,7 @@ class TestQuadGK:
         """Test for example problem #11."""
         self._base(11, 1e-4, order=21)
         self._base(11, 1e-8, 100, order=21)
-        self._base(11, 1e-12, 1e4, order=21, status=8)
+        self._base(11, 1e-12, 1e4, order=21, status=8, max_ninter=100)
 
     def test_prob12(self):
         """Test for example problem #12."""
@@ -194,6 +200,12 @@ class TestQuadGK:
 
     def test_prob14(self):
         """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
+    def test_prob15(self):
+        """Test for example problem #15."""
         self._base(14, 1e-4)
         self._base(14, 1e-8)
         self._base(14, 1e-12)
@@ -313,6 +325,12 @@ class TestQuadCC:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob15(self):
+        """Test for example problem #15."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestQuadTS:
     """Tests for adaptive tanh-sinh quadrature."""
@@ -428,6 +446,12 @@ class TestQuadTS:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob15(self):
+        """Test for example problem #15."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestRombergTS:
     """Tests for tanh-sinh quadrature with adaptive refinement."""
@@ -537,6 +561,12 @@ class TestRombergTS:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob15(self):
+        """Test for example problem #15."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
 
 class TestRomberg:
     """Tests for Romberg's method (only for well behaved integrands)."""
@@ -631,6 +661,12 @@ class TestRomberg:
 
     def test_prob14(self):
         """Test for example problem #14."""
+        self._base(14, 1e-4)
+        self._base(14, 1e-8)
+        self._base(14, 1e-12)
+
+    def test_prob15(self):
+        """Test for example problem #15."""
         self._base(14, 1e-4)
         self._base(14, 1e-8)
         self._base(14, 1e-12)
