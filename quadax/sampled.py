@@ -92,12 +92,16 @@ def trapezoid(y, x=None, dx=1.0, axis=-1):
     >>> trapezoid(a, axis=1)
     array([2.,  8.])
     """
-    # Future-proofing, in case JAX moves from trapz to trapezoid for the same
-    # reasons as SciPy
-    if hasattr(jnp, "trapezoid"):
-        return jnp.trapezoid(y, x=x, dx=dx, axis=axis)
+    if x is None:
+        y_arr, dx_array = jnp.asarray(y), jnp.asarray(dx)
     else:
-        return jnp.trapz(y, x=x, dx=dx, axis=axis)
+        y_arr, x_arr = jnp.asarray(y), jnp.asarray(x)
+        if x_arr.ndim == 1:
+            dx_array = jnp.diff(x_arr)
+        else:
+            dx_array = jnp.moveaxis(jnp.diff(x_arr, axis=axis), axis, -1)
+    y_arr = jnp.moveaxis(y_arr, axis, -1)
+    return 0.5 * (dx_array * (y_arr[..., 1:] + y_arr[..., :-1])).sum(-1)
 
 
 def cumulative_trapezoid(y, x=None, dx=1.0, axis=-1, initial=None):
