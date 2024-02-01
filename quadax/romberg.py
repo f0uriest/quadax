@@ -8,6 +8,7 @@ from .utils import (
     bounded_while_loop,
     errorif,
     map_interval,
+    setdefault,
     tanhsinh_transform,
     wrap_func,
 )
@@ -18,8 +19,8 @@ def romberg(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     divmax=20,
     norm=jnp.inf,
 ):
@@ -46,7 +47,8 @@ def romberg(
     epsabs, epsrel : float
         Absolute and relative tolerances. If I1 and I2 are two
         successive approximations to the integral, algorithm terminates
-        when abs(I1-I2) < max(epsabs, epsrel*|I2|)
+        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is square root of
+        machine precision.
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
@@ -88,6 +90,8 @@ def romberg(
         NotImplementedError,
         "Romberg integration with breakpoints not supported",
     )
+    epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
+    epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
     # map a, b -> [-1, 1]
     fun, interval = map_interval(fun, interval)
@@ -149,8 +153,8 @@ def rombergts(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     divmax=20,
     norm=jnp.inf,
 ):
@@ -177,7 +181,8 @@ def rombergts(
     epsabs, epsrel : float
         Absolute and relative tolerances. If I1 and I2 are two
         successive approximations to the integral, algorithm terminates
-        when abs(I1-I2) < max(epsabs, epsrel*|I2|)
+        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is square root of
+        machine precision.
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
