@@ -30,22 +30,9 @@ jobs:
           python -m pytest -v --durations=0 --cov-report xml:cov.xml --cov-config=setup.cfg --cov=quadax/ --db ./prof.db
       - name: save coverage file and plot comparison results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: unit_test_artifact
           path: |
             ./cov.xml
             ./prof.db
-      - name: Upload coverage
-        id : codecov
-        uses: Wandalen/wretry.action@v1.3.0
-        with:
-          action: codecov/codecov-action@v3
-          with: |
-            token: ${{ secrets.CODECOV_TOKEN }}
-            name: codecov-umbrella
-            files: ./cov.xml
-            fail_ci_if_error: true
-            verbose: true
-          attempt_limit: 10
-          attempt_delay: 60000 # ms, 1 min
