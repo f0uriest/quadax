@@ -3,11 +3,11 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.config import config as jax_config
+from jax import config
 
 from quadax import cumulative_trapezoid, simpson, trapezoid
 
-jax_config.update("jax_enable_x64", True)
+config.update("jax_enable_x64", True)
 
 rng = np.random.default_rng(0)
 A0 = 0.5 - rng.random(10)
