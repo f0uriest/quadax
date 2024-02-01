@@ -4,7 +4,14 @@ import jax
 import jax.numpy as jnp
 
 from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
-from .utils import QuadratureInfo, bounded_while_loop, errorif, map_interval, wrap_func
+from .utils import (
+    QuadratureInfo,
+    bounded_while_loop,
+    errorif,
+    map_interval,
+    setdefault,
+    wrap_func,
+)
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -19,8 +26,8 @@ def quadgk(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     max_ninter=50,
     order=21,
     norm=jnp.inf,
@@ -49,10 +56,10 @@ def quadgk(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
-        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
-        numerical approximation.
+        Absolute and relative error tolerance. Default is square root of
+        machine precision. Algorithm tries to obtain an accuracy of
+        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
+        `fun` over `interval`, and ``result`` is the numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -120,8 +127,8 @@ def quadcc(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     max_ninter=50,
     order=32,
     norm=jnp.inf,
@@ -149,10 +156,10 @@ def quadcc(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
-        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
-        numerical approximation.
+        Absolute and relative error tolerance. Default is square root of
+        machine precision. Algorithm tries to obtain an accuracy of
+        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
+        `fun` over `interval`, and ``result`` is the numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -220,8 +227,8 @@ def quadts(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     max_ninter=50,
     order=61,
     norm=jnp.inf,
@@ -248,10 +255,10 @@ def quadts(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
-        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
-        numerical approximation.
+        Absolute and relative error tolerance. Default is square root of
+        machine precision. Algorithm tries to obtain an accuracy of
+        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
+        `fun` over `interval`, and ``result`` is the numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -320,8 +327,8 @@ def adaptive_quadrature(
     interval,
     args=(),
     full_output=False,
-    epsabs=1.4e-8,
-    epsrel=1.4e-8,
+    epsabs=None,
+    epsrel=None,
     max_ninter=50,
     norm=jnp.inf,
     **kwargs,
@@ -356,10 +363,10 @@ def adaptive_quadrature(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is 1.4e-8. Algorithm tries to
-        obtain an accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))``
-        where ``i`` = integral of `fun` over `interval`, and ``result`` is the
-        numerical approximation.
+        Absolute and relative error tolerance. Default is square root of
+        machine precision. Algorithm tries to obtain an accuracy of
+        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
+        `fun` over `interval`, and ``result`` is the numerical approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -404,6 +411,8 @@ def adaptive_quadrature(
         ValueError,
         f"max_ninter={max_ninter} is not enough for {len(interval)-1} breakpoints",
     )
+    epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
+    epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)

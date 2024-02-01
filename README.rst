@@ -43,13 +43,13 @@ Usage
     import numpy as np
     from quadax import quadgk
 
-    f = lambda t: t * jnp.log(1 + t)
+    fun = lambda t: t * jnp.log(1 + t)
 
-    epsabs = epsrel = 1e-14
+    epsabs = epsrel = 1e-5 # by default jax uses 32 bit, higher accuracy requires going to 64 bit
     a, b = 0, 1
     y, info = quadgk(fun, [a, b], epsabs=epsabs, epsrel=epsrel)
     assert info.err < max(epsabs, epsrel*abs(y))
-    np.testing.assert_allclose(y, 1/4, rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(y, 1/4, rtol=epsrel, atol=epsabs)
 
 
 For full details of various options see the `API documentation <https://quadax.readthedocs.io/en/latest/api.html>`__

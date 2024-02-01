@@ -268,3 +268,12 @@ def bounded_while_loop(condfun, bodyfun, init_val, bound):
         return jax.lax.cond(condfun(state), bodyfun, lambda x: x, state), None
 
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
+
+
+def setdefault(val, default, cond=None):
+    """Return val if condition is met, otherwise default.
+
+    If cond is None, then it checks if val is not None, returning val
+    or default accordingly.
+    """
+    return val if cond or (cond is None and val is not None) else default
