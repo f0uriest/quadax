@@ -1,21 +1,9 @@
-name: Unit tests
+name: Weekly tests
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-  pull_request:
-    branches:
-      - main
-    paths-ignore:
-      - 'docs/**'
-      - 'devtools/**'
+  schedule:
+      - cron: '17 9 * * 1'
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   unit_tests:
