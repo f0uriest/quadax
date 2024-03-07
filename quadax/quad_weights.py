@@ -768,3 +768,116 @@ gk_weights = {
         "wg": gauss_30_weights,
     },
 }
+
+
+##### clenshaw-curtis nodes and weights
+
+
+def _cc_get_weights(N):
+    """Compute Clenshaw-Curtis nodes and weights for order N. N must be even."""
+    d = 2 / (1 - (np.arange(0, N + 1, 2)) ** 2)
+    d[0] /= 2
+    d[-1] /= 2
+    k = np.arange(N // 2 + 1)
+    n = np.arange(N // 2 + 1)
+    D = 2 / N * np.cos(k[:, None] * n[None, :] * np.pi / (N // 2))
+    D = np.where((n == 0) | (n == N // 2), D * 1 / 2, D)
+    w = D.T @ d
+    t = np.arange(0, 1 + N // 2) * np.pi / N
+    x = np.cos(t)
+    return x, w
+
+
+# generate weights for N = powers of 2
+cc_weights = {}
+for i in range(1, 8):
+    N = int(2 * 2**i)
+    x, w = _cc_get_weights(N)
+    cc_weights[N] = {
+        "xc": x,
+        "wc": w,
+    }
+
+# error formula uses weights from order N/2
+for i in range(2, 8):
+    N = int(2 * 2**i)
+    cc_weights[N]["we"] = np.array(
+        [cc_weights[N / 2]["wc"], np.zeros_like(cc_weights[N / 2]["wc"])]
+    ).flatten(order="F")[:-1]
+
+del cc_weights[4]
+
+
+##### tanh-sinh weights for trapezoidal rule
+ts_weights = {}
+
+_xts = lambda t: np.tanh(np.pi / 2 * np.sinh(t))
+_wts = lambda t: np.pi / 2 * np.cosh(t) / np.cosh(np.pi / 2 * np.sinh(t)) ** 2
+
+
+def _get_tmax(xmax):
+    # Inverse of tanh-sinh transform.
+    tanhinv = lambda x: 1 / 2 * np.log((1 + x) / (1 - x))
+    sinhinv = lambda x: np.log(x + np.sqrt(x**2 + 1))
+    return sinhinv(2 / np.pi * tanhinv(xmax))
+
+
+tmax = _get_tmax(np.array(1.0) - 10 * np.finfo(np.array(1.0).dtype).eps)
+a, b = -tmax, tmax
+
+
+for N in [41, 61, 81, 101]:
+    t1 = np.linspace(a, b, N)
+    t2 = np.linspace(a, b, N // 2 + 1)
+    assert np.all(t1[::2] == t2)
+
+    x1 = _xts(t1)
+    w1 = _wts(t1)
+    w2 = _wts(t2)
+    ts_weights[N] = {
+        "xt": x1,
+        "wt": w1 * np.diff(t1)[0],
+        "we": w2 * np.diff(t2)[0],
+    }
+    ts_weights[N]["wt"] *= 2 / ts_weights[N]["wt"].sum()
+    ts_weights[N]["we"] *= 2 / ts_weights[N]["we"].sum()
+
+
+#### chebyshev moments for weighted clenshaw-curtis integration
+def _get_chebmom_alg_plus(N, alpha):
+    r"""A type of modified chebyshev moment.
+
+    Computes the modified chebyshev moments:
+    ::math
+    \integral_{-1}^{1} (1 + x)^{\alpha} t(k, x) dx
+    where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
+    """
+    moments = np.zeros(N)
+    moments[0] = 2**alpha / (alpha + 1)
+    moments[1] = moments[0] / (alpha + 2)
+    for k in range(2, N):
+        moments[k] = (
+            (-(2 ** (alpha + 1)) - k * (k - alpha - 2) * moments[k - 1])
+            / (k - 1)
+            / (k + alpha + 1)
+        )
+    return moments
+
+
+def _get_chebmom_alg_minus(N, beta):
+    r"""A type of modified chebyshev moment.
+
+    Computes the modified chebyshev moments:
+    ::math
+    \integral_{-1}^{1} (1 - x)^{\beta} t(k, x) dx
+    where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
+    """
+    return _get_chebmom_alg_log_plus(N, beta) * np.resize([1, -1], N)
+
+
+def _get_chebmom_alg_log_minus(N):
+    pass
+
+
+def _get_chebmom_alg_log_plus(N):
+    pass
