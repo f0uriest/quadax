@@ -116,19 +116,19 @@ class NestedRule(AbstractQuadratureRule):
             halflength = (b - a) / 2
             center = (b + a) / 2
             f = vfun(center + halflength * self.xh)
-            result_konrod = _dot(self.wh, f) * halflength
+            result_kronrod = _dot(self.wh, f) * halflength
             result_gauss = _dot(self.wl, f) * halflength
 
             integral_abs = _dot(self.wh, jnp.abs(f))  # ~integral of abs(fun)
             integral_mmn = _dot(
-                self.wh, jnp.abs(f - result_konrod / (b - a))
+                self.wh, jnp.abs(f - result_kronrod / (b - a))
             )  # ~ integral of abs(fun - mean(fun))
 
-            result = result_konrod
+            result = result_kronrod
 
             uflow = jnp.finfo(f.dtype).tiny
             eps = jnp.finfo(f.dtype).eps
-            abserr = jnp.abs(result_konrod - result_gauss)
+            abserr = jnp.abs(result_kronrod - result_gauss)
             abserr = jnp.where(
                 (integral_mmn != 0.0) & (abserr != 0.0),
                 integral_mmn * jnp.minimum(1.0, (200.0 * abserr / integral_mmn) ** 1.5),
@@ -144,10 +144,10 @@ class NestedRule(AbstractQuadratureRule):
         return jax.lax.cond(a == b, truefun, falsefun)
 
 
-class GaussKonrodRule(NestedRule):
-    """Integrate a function from a to b using a fixed order Gauss-Konrod rule.
+class GaussKronrodRule(NestedRule):
+    """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
 
-    Integration is performed using an order n Konrod rule with error estimated
+    Integration is performed using an order n Kronrod rule with error estimated
     using an embedded n//2 order Gauss rule.
 
     Parameters
@@ -274,9 +274,9 @@ class TanhSinhRule(NestedRule):
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5))
 def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
-    """Integrate a function from a to b using a fixed order Gauss-Konrod rule.
+    """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
 
-    Integration is performed using an order n Konrod rule with error estimated
+    Integration is performed using an order n Kronrod rule with error estimated
     using an embedded n//2 order Gauss rule.
 
     Parameters
@@ -308,7 +308,7 @@ def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
         is the mean value of fun over the interval.
 
     """
-    return GaussKonrodRule(n, norm).integrate(fun, a, b, args)
+    return GaussKronrodRule(n, norm).integrate(fun, a, b, args)
 
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5))

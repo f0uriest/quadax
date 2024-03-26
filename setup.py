@@ -44,7 +44,7 @@ setup(
         "Topic :: Scientific/Engineering",
         "Topic :: Scientific/Engineering :: Mathematics",
     ],
-    keywords="integration quadrature gauss konrod tanh sinh romberg adaptive",
+    keywords="integration quadrature gauss kronrod tanh sinh romberg adaptive",
     packages=find_packages(exclude=["docs", "tests", "local", "report"]),
     include_package_data=True,
     install_requires=requirements,
