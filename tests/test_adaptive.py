@@ -396,7 +396,7 @@ class TestQuadTS:
         """Test for example problem #6."""
         self._base(6, 1e-4)
         self._base(6, 1e-8)
-        self._base(6, 1e-12, 1e4)
+        self._base(6, 1e-12, 1e4, status=4)
 
     def test_prob7(self):
         """Test for example problem #7."""
@@ -414,7 +414,7 @@ class TestQuadTS:
         """Test for example problem #9."""
         self._base(9, 1e-4)
         self._base(9, 1e-8, 10)
-        self._base(9, 1e-12, 1e4)
+        self._base(9, 1e-12, 1e4, status=4)
 
     def test_prob10(self):
         """Test for example problem #10."""
@@ -426,7 +426,7 @@ class TestQuadTS:
         """Test for example problem #11."""
         self._base(11, 1e-4)
         self._base(11, 1e-8)
-        self._base(11, 1e-12, 1e4)
+        self._base(11, 1e-12, 1e4, status=4)
 
     def test_prob12(self):
         """Test for example problem #12."""
