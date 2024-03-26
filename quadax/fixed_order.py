@@ -144,10 +144,10 @@ class NestedRule(AbstractQuadratureRule):
         return jax.lax.cond(a == b, truefun, falsefun)
 
 
-class GaussKonrodRule(NestedRule):
-    """Integrate a function from a to b using a fixed order Gauss-Konrod rule.
+class GaussKronrodRule(NestedRule):
+    """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
 
-    Integration is performed using an order n Konrod rule with error estimated
+    Integration is performed using an order n Kronrod rule with error estimated
     using an embedded n//2 order Gauss rule.
 
     Parameters
@@ -274,9 +274,9 @@ class TanhSinhRule(NestedRule):
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5))
 def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
-    """Integrate a function from a to b using a fixed order Gauss-Konrod rule.
+    """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
 
-    Integration is performed using an order n Konrod rule with error estimated
+    Integration is performed using an order n Kronrod rule with error estimated
     using an embedded n//2 order Gauss rule.
 
     Parameters
@@ -308,7 +308,7 @@ def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
         is the mean value of fun over the interval.
 
     """
-    return GaussKonrodRule(n, norm).integrate(fun, a, b, args)
+    return GaussKronrodRule(n, norm).integrate(fun, a, b, args)
 
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5))
