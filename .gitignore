@@ -20,3 +20,4 @@ tests/benchmarks/.benchmarks/
 *.pdf
 *.pyc
 .pymon
+env/
