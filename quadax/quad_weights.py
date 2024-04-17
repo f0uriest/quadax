@@ -844,16 +844,24 @@ for N in [41, 61, 81, 101]:
 
 
 #### chebyshev moments for weighted clenshaw-curtis integration
-def _get_chebmom_alg_plus(N, alpha):
-    r"""A type of modified chebyshev moment.
+
+
+def _chebmom_alg_plus(N, alpha):
+    r"""Modified chebyshev moments.
 
     Computes the modified chebyshev moments:
     ::math
     \integral_{-1}^{1} (1 + x)^{\alpha} t(k, x) dx
     where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
     """
+    if N == 0:
+        raise ValueError(f"N must be greater than 0: N = {N}")
+
     moments = np.zeros(N)
     moments[0] = 2**alpha / (alpha + 1)
+    if N == 1:
+        return moments
+
     moments[1] = moments[0] / (alpha + 2)
     for k in range(2, N):
         moments[k] = (
@@ -864,20 +872,104 @@ def _get_chebmom_alg_plus(N, alpha):
     return moments
 
 
-def _get_chebmom_alg_minus(N, beta):
-    r"""A type of modified chebyshev moment.
+def _chebmom_alg_log_plus(N, alpha):
+    r"""Modified chebyshev moments.
 
     Computes the modified chebyshev moments:
     ::math
-    \integral_{-1}^{1} (1 - x)^{\beta} t(k, x) dx
+        \integral_{-1}^{1} (1 + x)^{\alpha} log(\frac{1 + x}{2}) t(k, x) dx
+
     where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
     """
-    return _get_chebmom_alg_log_plus(N, beta) * np.resize([1, -1], N)
+    moments = np.zeros(N)
+    algplusmoments = _chebmom_alg_plus(N, alpha)
+    moments[0] = -algplusmoments[0] / (alpha + 1)
+    moments[1] = -_chebmom_alg_plus(1, alpha + 1)[0] / (alpha + 2) - moments[0]
+
+    for k in range(2, N):
+        moments[k] = (
+            k * algplusmoments[k - 1]
+            - (k - 1) * algplusmoments[k]
+            - k * (k - alpha - 2) * moments[k - 1]
+        ) / ((k - 1) * (k + alpha + 1))
+
+    return moments
 
 
-def _get_chebmom_alg_log_minus(N):
-    pass
+def _chebmom_alg_minus(N, beta):
+    r"""Modified chebyshev moments.
+
+    Computes the modified chebyshev moments:
+    ::math
+        \integral_{-1}^{1} (1 - x)^{\beta} t(k, x) dx
+    where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
+    """
+    return _chebmom_alg_log_plus(N, beta) * np.resize([1, -1], N)
 
 
-def _get_chebmom_alg_log_plus(N):
-    pass
+def _chebmom_alg_log_minus(N, beta):
+    r"""Modified chebyshev moments.
+
+    Computes the modified chebyshev moments:
+    ::math
+        \integral_{-1}^{1} (1 - x)^{\beta}  log(\frac{1 - x}{2}) t(k, x) dx
+
+    where :math: `t(k,x)` is the chebyshev polynomial of degree k for k = 0, ..., N - 1.
+    """
+    return _chebmom_alg_log_plus(N, beta) * np.resize([1, -1], N)
+
+
+def _ccmod_get_weights(N, algpower):
+    """Compute modified Clenshaw-Curtis nodes and weights for order N. N must be even.
+
+    algpower: float
+        argument used for computing Chebyshev moments.
+    """
+    d_alg = _chebmom_alg_plus(N + 1, algpower)[::2]
+    d_alg_log = _chebmom_alg_log_plus(N + 1, algpower)[::2]
+    k = np.arange(N // 2 + 1)
+    n = np.arange(N // 2 + 1)
+    D = 2 / N * np.cos(k[:, None] * n[None, :] * np.pi / (N // 2))
+    D = np.where((n == 0) | (n == N // 2), D * 1 / 2, D)
+    t = np.arange(0, 1 + N // 2) * np.pi / N
+    x = np.cos(t)
+
+    algweights = D.T @ d_alg
+    alglogweights = D.T @ d_alg_log
+
+    return x, algweights, alglogweights
+
+
+def ccmod_weights(N: int, algpower: float) -> dict:
+    """Modified Clenshaw-Curtis nodes and weights for order N and N / 2.
+
+    N must be even.
+
+    Parameters
+    ----------
+    N : int
+        order of integration rule
+    algpower: float
+        argument used for computing Chebyshev moments.
+
+    Returns
+    -------
+    res: dict
+        keys:
+        "xc" : nodes
+        "walgc": weights for algebraic Chebyshev moments of order N
+        "walglogc": weights for algebraic-logarithmic Chebyshev moments of order N
+        "walge": weights for algebraic Chebyshev moments of order N / 2
+        "walgloge": weights for algebraic-logarithmic Chebyshev moments of order N / 2
+    """
+    if N % 2 == 1:
+        raise NotImplementedError(f"Order N={N} must be even.")
+
+    res = {}
+    res["xc"], res["walgc"], res["walglogc"] = _ccmod_get_weights(N, algpower)
+    _, walge, walgloge = _ccmod_get_weights(N // 2, algpower)
+    res["walge"] = np.array([walge, np.zeros_like(walge)]).flatten(order="F")[:-1]
+    res["walgloge"] = np.array([walgloge, np.zeros_like(walgloge)]).flatten(order="F")[
+        :-1
+    ]
+    return res

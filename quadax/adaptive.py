@@ -1,9 +1,16 @@
 """Functions for globally h-adaptive quadrature."""
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
-from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
+from .fixed_order import (
+    fixed_quadcc,
+    fixed_quadgk,
+    fixed_quadts,
+    fixed_quadcc_alglogweight,
+)
 from .utils import (
     QuadratureInfo,
     bounded_while_loop,
@@ -307,6 +314,154 @@ def quadts(
     """
     y, info = adaptive_quadrature(
         fixed_quadts,
+        fun,
+        interval,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        max_ninter,
+        n=order,
+        norm=norm,
+    )
+    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    return y, info
+
+
+def quadcc_alglogweight(
+    fun,
+    interval,
+    args=(),
+    weightargs=None,
+    full_output=False,
+    epsabs=None,
+    epsrel=None,
+    max_ninter=50,
+    order=32,
+    norm=jnp.inf,
+):
+    """Global adaptive weighted quadrature using a modified Clenshaw-Curtis rule.
+
+    Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
+    error estimate. Breakpoints can be specified in `interval` where integration
+    difficulty may occur.
+
+    A good general purpose integrator for most reasonably well behaved functions over
+    finite or infinite intervals.
+
+    Parameters
+    ----------
+    fun : callable
+        Function to integrate, should have a signature of the form
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
+    interval : array-like
+        Lower and upper limits of integration with possible breakpoints. Use np.inf to
+        denote infinite intervals.
+    args : tuple, optional
+        Extra arguments passed to fun.
+    full_output : bool, optional
+        If True, return the full state of the integrator. See below for more
+        information.
+    epsabs, epsrel : float, optional
+        Absolute and relative error tolerance. Default is square root of
+        machine precision. Algorithm tries to obtain an accuracy of
+        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
+        `fun` over `interval`, and ``result`` is the numerical approximation.
+    max_ninter : int, optional
+        An upper bound on the number of sub-intervals used in the adaptive
+        algorithm.
+    order : {8, 16, 32, 64, 128, 256}
+        Order of local integration rule.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
+
+    Returns
+    -------
+    y : float, Array
+        The integral of fun from `a` to `b`.
+    info : QuadratureInfo
+        Named tuple with the following fields:
+
+        * err : (float) Estimate of the error in the approximation.
+        * neval : (int) Total number of function evaluations.
+        * status : (int) Flag indicating reason for termination. status of 0 means
+          normal termination, any other value indicates a possible error. A human
+          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * info : (dict or None) Other information returned by the algorithm.
+          Only present if ``full_output`` is True. Contains the following:
+
+          * 'ninter' : (int) The number, K, of sub-intervals produced in the
+            subdivision process.
+          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the left end points of the (remapped) sub-intervals
+            in the partition of the integration range.
+          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the right end points of the (remapped) sub-intervals.
+          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the integral approximations on the sub-intervals.
+          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
+            elements of which are the moduli of the absolute error estimates on the
+            sub-intervals.
+
+    Notes
+    -----
+    Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
+    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
+    ``order`` points, so using higher order methods will generally be more efficient on
+    GPU/TPU.
+
+    """
+    # compute modified Chebyshev moments based on weightargs
+    chebmom = None
+
+    def weightrule(
+        fun,
+        a,
+        b,
+        args,
+        norm,
+        n,
+    ):
+        return fixed_quadcc_alglogweight(
+            fun,
+            a,
+            b,
+            args,
+            norm,
+            n,
+            weightargs=weightargs,
+            chebmom=chebmom,
+        )
+
+    def defaultrule(
+        fun,
+        a,
+        b,
+        args,
+        norm,
+        n,
+    ):
+        fullfun = lambda x, args: fun(x, *args) * alglogweightfn(x, **weightargs)
+        return fixed_quadcc(fullfun, a, b, args, norm, n)
+
+    @functools.partial(jax.jit, static_argnums=(0, 4, 5))
+    def rule(fun, a, b, args, norm, n):
+        return jax.lax.cond(
+            weightargs["lsingularity"] == a or weightargs["rsingularity"] == b,
+            weightrule,
+            defaultrule,
+            fun,
+            a,
+            b,
+            args,
+            norm,
+            n,
+        )
+
+    y, info = adaptive_quadrature(
+        rule,
         fun,
         interval,
         args,
