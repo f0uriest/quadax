@@ -486,6 +486,7 @@ def adaptive_quadrature(
     epsrel=None,
     max_ninter=50,
     norm=jnp.inf,
+    weight_function=None,
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -529,6 +530,10 @@ def adaptive_quadrature(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    weight_function: WeightedRule, optional
+        Weight function to use in a weighted quadrature scheme. Useful when integrating
+        integrands of the form f(x) * w(x) where w(x) is the weight function. weight_function
+        inherits the WeightedRule abstract class.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -569,6 +574,13 @@ def adaptive_quadrature(
     epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
+    
+    if weight_function is not None:
+        basefun, interval = map_interval(fun, interval)
+        vbasefunc = wrap_func(basefun, args)
+        # integrand including weight function
+        fun = lambda x, args : fun(x, *args) * weight_function.evaluate(x)
+        
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1] / 2))
@@ -640,9 +652,16 @@ def adaptive_quadrature(
         a2 = b1
         b2 = state["b_arr"][i]
 
-        area1, error1, intabs1, intmmn1 = rule(vfunc, a1, b1, (), **kwargs)
+        if weight_function is not None and weight_function.apply_weighted_rule(a1, b1):
+            area1, error1, intabs1, intmmn1 = weight_function.integrate(vbasefunc, a1, b1, (), **kwargs)
+        else:
+            area1, error1, intabs1, intmmn1 = rule(vfunc, a1, b1, (), **kwargs)
         state["neval"] += 1
-        area2, error2, intabs2, intmmn2 = rule(vfunc, a2, b2, (), **kwargs)
+        
+        if weight_function is not None and weight_function.apply_weighted_rule(a2, b2):
+            area2, error2, intabs2, intmmn2 = weight_function.integrate(vbasefunc, a2, b2, (), **kwargs)
+        else:
+            area2, error2, intabs2, intmmn2 = rule(vfunc, a2, b2, (), **kwargs)
         state["neval"] += 1
 
         # ! improve previous approximations to integral
