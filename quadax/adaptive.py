@@ -1,16 +1,9 @@
 """Functions for globally h-adaptive quadrature."""
 
-import functools
-
 import jax
 import jax.numpy as jnp
 
-from .fixed_order import (
-    fixed_quadcc,
-    fixed_quadgk,
-    fixed_quadts,
-    fixed_quadcc_alglogweight,
-)
+from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
 from .utils import (
     QuadratureInfo,
     bounded_while_loop,
@@ -328,154 +321,6 @@ def quadts(
     return y, info
 
 
-def quadcc_alglogweight(
-    fun,
-    interval,
-    args=(),
-    weightargs=None,
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    max_ninter=50,
-    order=32,
-    norm=jnp.inf,
-):
-    """Global adaptive weighted quadrature using a modified Clenshaw-Curtis rule.
-
-    Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
-    error estimate. Breakpoints can be specified in `interval` where integration
-    difficulty may occur.
-
-    A good general purpose integrator for most reasonably well behaved functions over
-    finite or infinite intervals.
-
-    Parameters
-    ----------
-    fun : callable
-        Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    interval : array-like
-        Lower and upper limits of integration with possible breakpoints. Use np.inf to
-        denote infinite intervals.
-    args : tuple, optional
-        Extra arguments passed to fun.
-    full_output : bool, optional
-        If True, return the full state of the integrator. See below for more
-        information.
-    epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is square root of
-        machine precision. Algorithm tries to obtain an accuracy of
-        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
-        `fun` over `interval`, and ``result`` is the numerical approximation.
-    max_ninter : int, optional
-        An upper bound on the number of sub-intervals used in the adaptive
-        algorithm.
-    order : {8, 16, 32, 64, 128, 256}
-        Order of local integration rule.
-    norm : int, callable
-        Norm to use for measuring error for vector valued integrands. No effect if the
-        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
-        should be callable.
-
-    Returns
-    -------
-    y : float, Array
-        The integral of fun from `a` to `b`.
-    info : QuadratureInfo
-        Named tuple with the following fields:
-
-        * err : (float) Estimate of the error in the approximation.
-        * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
-        * info : (dict or None) Other information returned by the algorithm.
-          Only present if ``full_output`` is True. Contains the following:
-
-          * 'ninter' : (int) The number, K, of sub-intervals produced in the
-            subdivision process.
-          * 'a_arr' : (ndarray) rank-1 array of length max_ninter, the first K
-            elements of which are the left end points of the (remapped) sub-intervals
-            in the partition of the integration range.
-          * 'b_arr' : (ndarray) rank-1 array of length max_ninter, the first K
-            elements of which are the right end points of the (remapped) sub-intervals.
-          * 'r_arr' : (ndarray) rank-1 array of length max_ninter, the first K
-            elements of which are the integral approximations on the sub-intervals.
-          * 'e_arr' : (ndarray) rank-1 array of length max_ninter, the first K
-            elements of which are the moduli of the absolute error estimates on the
-            sub-intervals.
-
-    Notes
-    -----
-    Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
-    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
-    ``order`` points, so using higher order methods will generally be more efficient on
-    GPU/TPU.
-
-    """
-    # compute modified Chebyshev moments based on weightargs
-    chebmom = None
-
-    def weightrule(
-        fun,
-        a,
-        b,
-        args,
-        norm,
-        n,
-    ):
-        return fixed_quadcc_alglogweight(
-            fun,
-            a,
-            b,
-            args,
-            norm,
-            n,
-            weightargs=weightargs,
-            chebmom=chebmom,
-        )
-
-    def defaultrule(
-        fun,
-        a,
-        b,
-        args,
-        norm,
-        n,
-    ):
-        fullfun = lambda x, args: fun(x, *args) * alglogweightfn(x, **weightargs)
-        return fixed_quadcc(fullfun, a, b, args, norm, n)
-
-    @functools.partial(jax.jit, static_argnums=(0, 4, 5))
-    def rule(fun, a, b, args, norm, n):
-        return jax.lax.cond(
-            weightargs["lsingularity"] == a or weightargs["rsingularity"] == b,
-            weightrule,
-            defaultrule,
-            fun,
-            a,
-            b,
-            args,
-            norm,
-            n,
-        )
-
-    y, info = adaptive_quadrature(
-        rule,
-        fun,
-        interval,
-        args,
-        full_output,
-        epsabs,
-        epsrel,
-        max_ninter,
-        n=order,
-        norm=norm,
-    )
-    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
-    return y, info
-
-
 def adaptive_quadrature(
     rule,
     fun,
@@ -532,8 +377,8 @@ def adaptive_quadrature(
         should be callable.
     weight_function: WeightedRule, optional
         Weight function to use in a weighted quadrature scheme. Useful when integrating
-        integrands of the form f(x) * w(x) where w(x) is the weight function. weight_function
-        inherits the WeightedRule abstract class.
+        integrands of the form f(x) * w(x) where w(x) is the weight function, where
+        `weight_function` inherits the WeightedRule abstract class.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -574,13 +419,14 @@ def adaptive_quadrature(
     epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-    
+
     if weight_function is not None:
-        basefun, interval = map_interval(fun, interval)
-        vbasefunc = wrap_func(basefun, args)
+        basefun = fun
+        mapped_basefun, interval = map_interval(basefun, interval)
+        vbasefunc = wrap_func(mapped_basefun, args)
         # integrand including weight function
-        fun = lambda x, args : fun(x, *args) * weight_function.evaluate(x)
-        
+        fun = lambda x, *args: basefun(x, *args) * weight_function.evaluate_weight(x)
+
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1] / 2))
@@ -606,11 +452,20 @@ def adaptive_quadrature(
     state["area"] = jnp.zeros(shape)  # current best estimate for I
     state["err_sum"] = 0.0  # current estimate for error in I
 
+    def integrate_single_interval(a, b):
+        return jax.lax.cond(
+            weight_function is not None and weight_function.apply_weighted_rule(a, b),
+            lambda x1, x2: weight_function.integrate(vbasefunc, x1, x2, (), **kwargs),
+            lambda x1, x2,: rule(vfunc, x1, x2, (), **kwargs),
+            a,
+            b,
+        )
+
     def init_body(i, state_):
         state, intabs_ = state_
         a = state["a_arr"][i]
         b = state["b_arr"][i]
-        result, abserr, intabs, intmmn = rule(vfunc, a, b, (), **kwargs)
+        result, abserr, intabs, intmmn = integrate_single_interval(a, b)
 
         intabs_ += intabs
         state["neval"] += 1
@@ -652,16 +507,10 @@ def adaptive_quadrature(
         a2 = b1
         b2 = state["b_arr"][i]
 
-        if weight_function is not None and weight_function.apply_weighted_rule(a1, b1):
-            area1, error1, intabs1, intmmn1 = weight_function.integrate(vbasefunc, a1, b1, (), **kwargs)
-        else:
-            area1, error1, intabs1, intmmn1 = rule(vfunc, a1, b1, (), **kwargs)
+        area1, error1, intabs1, intmmn1 = integrate_single_interval(a1, b1)
         state["neval"] += 1
-        
-        if weight_function is not None and weight_function.apply_weighted_rule(a2, b2):
-            area2, error2, intabs2, intmmn2 = weight_function.integrate(vbasefunc, a2, b2, (), **kwargs)
-        else:
-            area2, error2, intabs2, intmmn2 = rule(vfunc, a2, b2, (), **kwargs)
+
+        area2, error2, intabs2, intmmn2 = integrate_single_interval(a2, b2)
         state["neval"] += 1
 
         # ! improve previous approximations to integral
