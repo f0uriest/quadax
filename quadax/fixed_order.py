@@ -3,7 +3,7 @@
 import abc
 import functools
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any, Tuple, Union
 
 import equinox as eqx
 import jax
@@ -30,8 +30,8 @@ class AbstractQuadratureRule(eqx.Module):
         fun: Callable,
         a: float,
         b: float,
-        args: tuple[Any],
-    ) -> tuple[float, float, float, float]:
+        args: Tuple[Any],
+    ) -> Tuple[float, float, float, float]:
         """Integrate fun(x, *args) from a to b.
 
         Parameters
@@ -77,8 +77,8 @@ class NestedRule(AbstractQuadratureRule):
         fun: Callable,
         a: float,
         b: float,
-        args: tuple[Any],
-    ) -> tuple[float, float, float, float]:
+        args: Tuple[Any],
+    ) -> Tuple[float, float, float, float]:
         """Integrate a function from a to b using a nested rule.
 
         Parameters
