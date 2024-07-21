@@ -42,6 +42,7 @@ Integrating function from sampled values
     trapezoid            -- Use trapezoidal rule to approximate definite integral.
     cumulative_trapezoid -- Use trapezoidal rule to approximate indefinite integral.
     simpson              -- Use Simpson's rule to compute integral from samples.
+    cumulative_simpson   -- Use Simpson's rule to approximate indefinite integral.
 
 
 Low level routines and wrappers
