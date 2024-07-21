@@ -18,16 +18,18 @@ Adaptive integration of a callable function or method
     rombergts -- Adaptive tanh-sinh integration with Richardson extrapolation
 
 
-Fixed order integration of a callable function or method
---------------------------------------------------------
+Quadrature Rules
+----------------
 
 .. autosummary::
     :toctree: _api/
     :recursive:
 
-    fixed_quadgk    -- Fixed order integration over finite interval using Gauss-Konrod scheme
-    fixed_quadcc    -- Fixed order integration over finite interval using Clenshaw-Curtis scheme
-    fixed_quadts    -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
+    AbstractQuadratureRule -- Abstract base class for all quadrature rules
+    NestedRule             -- Abstract base class for nested quadrature rules.
+    GaussKronrodRule       -- Fixed order integration over finite interval using Gauss-Konrod scheme
+    ClenshawCurtisRule     -- Fixed order integration over finite interval using Clenshaw-Curtis scheme
+    TanhSinhRule           -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
 
 
 Integrating function from sampled values

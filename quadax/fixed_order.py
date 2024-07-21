@@ -2,6 +2,7 @@
 
 import abc
 import functools
+import warnings
 from collections.abc import Callable
 from typing import Any, Union
 
@@ -22,6 +23,9 @@ class AbstractQuadratureRule(eqx.Module):
 
     Subclasses should implement the ``integrate`` method for integrating a function
     over a fixed interval using the given rule.
+
+    Subclasses may also override the ``norm`` method for measuring error for vector
+    valued integrands. Default is the infinity (max) norm.
     """
 
     @abc.abstractmethod
@@ -58,6 +62,10 @@ class AbstractQuadratureRule(eqx.Module):
 
         """
 
+    def norm(self, x: jax.Array) -> float:
+        """Norm to use for measuring error for vector valued integrands."""
+        return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
+
 
 class NestedRule(AbstractQuadratureRule):
     """Base class for nested quadrature rules.
@@ -70,8 +78,9 @@ class NestedRule(AbstractQuadratureRule):
     xh: jax.Array
     wh: jax.Array
     wl: jax.Array
-    norm: Callable = lambda x: jnp.linalg.norm(x.flatten(), ord=jnp.inf)
+    _norm: Callable
 
+    @eqx.filter_jit
     def integrate(
         self,
         fun: Callable,
@@ -143,6 +152,10 @@ class NestedRule(AbstractQuadratureRule):
 
         return jax.lax.cond(a == b, truefun, falsefun)
 
+    def norm(self, x):
+        """Norm to use for measuring error for vector valued integrands."""
+        return self._norm(x)
+
 
 class GaussKronrodRule(NestedRule):
     """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
@@ -161,7 +174,7 @@ class GaussKronrodRule(NestedRule):
     """
 
     def __init__(self, order: int = 21, norm: Union[Callable, int] = jnp.inf):
-        self.norm = (
+        self._norm = (
             norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
         )
         try:
@@ -193,7 +206,7 @@ class ClenshawCurtisRule(NestedRule):
     """
 
     def __init__(self, order: int = 32, norm: Union[Callable, int] = jnp.inf):
-        self.norm = (
+        self._norm = (
             norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
         )
 
@@ -238,7 +251,7 @@ class TanhSinhRule(NestedRule):
     """
 
     def __init__(self, order: int = 61, norm: Union[Callable, int] = jnp.inf):
-        self.norm = (
+        self._norm = (
             norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
         )
         _xts = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
@@ -308,6 +321,11 @@ def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
         is the mean value of fun over the interval.
 
     """
+    warnings.warn(
+        "fixed_quadgk is deprecated and will be removed in a future release. "
+        "Please use ``quadax.GaussKronrodRule(n, norm).integrate(fun, a, b, args)``",
+        FutureWarning,
+    )
     return GaussKronrodRule(n, norm).integrate(fun, a, b, args)
 
 
@@ -347,6 +365,11 @@ def fixed_quadcc(fun, a, b, args=(), norm=jnp.inf, n=32):
         is the mean value of fun over the interval.
 
     """
+    warnings.warn(
+        "fixed_quadcc is deprecated and will be removed in a future release. "
+        "Please use ``quadax.ClenshawCurtisRule(n, norm).integrate(fun, a, b, args)``",
+        FutureWarning,
+    )
     return ClenshawCurtisRule(n, norm).integrate(fun, a, b, args)
 
 
@@ -386,4 +409,9 @@ def fixed_quadts(fun, a, b, args=(), norm=jnp.inf, n=61):
         is the mean value of fun over the interval.
 
     """
+    warnings.warn(
+        "fixed_quadts is deprecated and will be removed in a future release. "
+        "Please use ``quadax.TanhSinhRule(n, norm).integrate(fun, a, b, args)``",
+        FutureWarning,
+    )
     return TanhSinhRule(n, norm).integrate(fun, a, b, args)

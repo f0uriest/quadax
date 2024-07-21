@@ -1,9 +1,16 @@
 """Functions for globally h-adaptive quadrature."""
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 
-from .fixed_order import fixed_quadcc, fixed_quadgk, fixed_quadts
+from .fixed_order import (
+    AbstractQuadratureRule,
+    ClenshawCurtisRule,
+    GaussKronrodRule,
+    TanhSinhRule,
+)
 from .utils import (
     QuadratureInfo,
     bounded_while_loop,
@@ -106,8 +113,9 @@ def quadgk(
     GPU/TPU.
 
     """
+    rule = GaussKronrodRule(order, norm)
     y, info = adaptive_quadrature(
-        fixed_quadgk,
+        rule,
         fun,
         interval,
         args,
@@ -115,8 +123,6 @@ def quadgk(
         epsabs,
         epsrel,
         max_ninter,
-        n=order,
-        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -206,8 +212,9 @@ def quadcc(
     GPU/TPU.
 
     """
+    rule = ClenshawCurtisRule(order, norm)
     y, info = adaptive_quadrature(
-        fixed_quadcc,
+        rule,
         fun,
         interval,
         args,
@@ -215,8 +222,6 @@ def quadcc(
         epsabs,
         epsrel,
         max_ninter,
-        n=order,
-        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -305,8 +310,9 @@ def quadts(
     GPU/TPU.
 
     """
+    rule = TanhSinhRule(order, norm)
     y, info = adaptive_quadrature(
-        fixed_quadts,
+        rule,
         fun,
         interval,
         args,
@@ -314,8 +320,6 @@ def quadts(
         epsabs,
         epsrel,
         max_ninter,
-        n=order,
-        norm=norm,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -341,16 +345,8 @@ def adaptive_quadrature(
 
     Parameters
     ----------
-    rule : callable
-        Local quadrature rule to use. It should have a signature of the form
-        ``rule(fun, a, b, **kwargs)`` -> out, where out is a tuple with 4 elements:
-
-            #. Estimate of the integral of fun from a to b
-            #. Estimate of the absolute error in the integral (ie, from nested scheme).
-            #. Estimate of the integral of abs(fun) from a to b
-            #. Estimate of the integral of abs(fun - <fun>) from a to b, where <fun> is
-               the mean value of fun over the interval.
-
+    rule : AbstractQuadratureRule
+        Local quadrature rule to use.
     fun : callable
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
@@ -370,10 +366,6 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    norm : int, callable
-        Norm to use for measuring error for vector valued integrands. No effect if the
-        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
-        should be callable.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -406,6 +398,21 @@ def adaptive_quadrature(
             sub-intervals.
 
     """
+    if not isinstance(rule, AbstractQuadratureRule):
+        warnings.warn(
+            "Passing a callable for ``rule`` is deprecated and in the future will "
+            "raise an error. Users should instead subclass "
+            "``quadax.AbstractQuadratureRule``",
+            FutureWarning,
+        )
+        intfun = rule
+        norm = kwargs.pop("norm", jnp.inf)
+        _norm = (
+            norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
+        )
+    else:
+        intfun = rule.integrate
+        _norm = rule.norm
     errorif(
         max_ninter < len(interval) - 1,
         ValueError,
@@ -413,7 +420,6 @@ def adaptive_quadrature(
     )
     epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
-    _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1] / 2))
@@ -443,7 +449,7 @@ def adaptive_quadrature(
         state, intabs_ = state_
         a = state["a_arr"][i]
         b = state["b_arr"][i]
-        result, abserr, intabs, intmmn = rule(vfunc, a, b, (), **kwargs)
+        result, abserr, intabs, intmmn = intfun(vfunc, a, b, (), **kwargs)
 
         intabs_ += intabs
         state["neval"] += 1
@@ -485,9 +491,9 @@ def adaptive_quadrature(
         a2 = b1
         b2 = state["b_arr"][i]
 
-        area1, error1, intabs1, intmmn1 = rule(vfunc, a1, b1, (), **kwargs)
+        area1, error1, intabs1, intmmn1 = intfun(vfunc, a1, b1, (), **kwargs)
         state["neval"] += 1
-        area2, error2, intabs2, intmmn2 = rule(vfunc, a2, b2, (), **kwargs)
+        area2, error2, intabs2, intmmn2 = intfun(vfunc, a2, b2, (), **kwargs)
         state["neval"] += 1
 
         # ! improve previous approximations to integral
