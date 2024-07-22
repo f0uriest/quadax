@@ -2,7 +2,7 @@
 
 import numpy as np
 
-konrod_15_weights = np.array(
+kronrod_15_weights = np.array(
     [
         2.29353220105292249637320080589695919936e-2,
         6.30920926299785532907006631892042866651e-2,
@@ -21,7 +21,7 @@ konrod_15_weights = np.array(
         2.29353220105292249637320080589695919936e-2,
     ]
 )
-konrod_15_nodes = np.array(
+kronrod_15_nodes = np.array(
     [
         -9.91455371120812639206854697526328516642e-1,
         -9.49107912342758524526189684047851262401e-1,
@@ -59,7 +59,7 @@ gauss_7_weights = np.array(
         0.00000000000000000000000000000000000000e0,
     ]
 )
-konrod_21_weights = np.array(
+kronrod_21_weights = np.array(
     [
         1.16946388673718742780643960621920483962e-2,
         3.25581623079647274788189724593897606174e-2,
@@ -84,7 +84,7 @@ konrod_21_weights = np.array(
         1.16946388673718742780643960621920483962e-2,
     ]
 )
-konrod_21_nodes = np.array(
+kronrod_21_nodes = np.array(
     [
         -9.95657163025808080735527280689002847921e-1,
         -9.73906528517171720077964012084452053428e-1,
@@ -134,7 +134,7 @@ gauss_10_weights = np.array(
         0.00000000000000000000000000000000000000e0,
     ]
 )
-konrod_31_weights = np.array(
+kronrod_31_weights = np.array(
     [
         5.37747987292334898779205143012764981831e-3,
         1.50079473293161225383747630758072680946e-2,
@@ -169,7 +169,7 @@ konrod_31_weights = np.array(
         5.37747987292334898779205143012764981831e-3,
     ]
 )
-konrod_31_nodes = np.array(
+kronrod_31_nodes = np.array(
     [
         -9.98002298693397060285172840152271209073e-1,
         -9.87992518020485428489565718586612581147e-1,
@@ -239,7 +239,7 @@ gauss_15_weights = np.array(
         0.00000000000000000000000000000000000000e0,
     ]
 )
-konrod_41_weights = np.array(
+kronrod_41_weights = np.array(
     [
         3.07358371852053150121829324603098748803e-3,
         8.60026985564294219866178795010234725213e-3,
@@ -284,7 +284,7 @@ konrod_41_weights = np.array(
         3.07358371852053150121829324603098748803e-3,
     ]
 )
-konrod_41_nodes = np.array(
+kronrod_41_nodes = np.array(
     [
         -9.98859031588277663838315576545863010000e-1,
         -9.93128599185094924786122388471320278223e-1,
@@ -374,7 +374,7 @@ gauss_20_weights = np.array(
         0.00000000000000000000000000000000000000e0,
     ]
 )
-konrod_51_weights = np.array(
+kronrod_51_weights = np.array(
     [
         1.98738389233031592650785188284340988943e-3,
         5.56193213535671375804023690106552207018e-3,
@@ -429,7 +429,7 @@ konrod_51_weights = np.array(
         1.98738389233031592650785188284340988943e-3,
     ]
 )
-konrod_51_nodes = np.array(
+kronrod_51_nodes = np.array(
     [
         -9.99262104992609834193457486540340593705e-1,
         -9.95556969790498097908784946893901617258e-1,
@@ -539,7 +539,7 @@ gauss_25_weights = np.array(
         0.00000000000000000000000000000000000000e0,
     ]
 )
-konrod_61_weights = np.array(
+kronrod_61_weights = np.array(
     [
         1.38901369867700762455159122675969968105e-3,
         3.89046112709988405126720184451550327852e-3,
@@ -604,7 +604,7 @@ konrod_61_weights = np.array(
         1.38901369867700762455159122675969968105e-3,
     ]
 )
-konrod_61_nodes = np.array(
+kronrod_61_nodes = np.array(
     [
         -9.99484410050490637571325895705810819469e-1,
         -9.96893484074649540271630050918695283341e-1,
@@ -738,106 +738,33 @@ gauss_30_weights = np.array(
 
 gk_weights = {
     15: {
-        "wk": konrod_15_weights,
-        "xk": konrod_15_nodes,
+        "wk": kronrod_15_weights,
+        "xk": kronrod_15_nodes,
         "wg": gauss_7_weights,
     },
     21: {
-        "wk": konrod_21_weights,
-        "xk": konrod_21_nodes,
+        "wk": kronrod_21_weights,
+        "xk": kronrod_21_nodes,
         "wg": gauss_10_weights,
     },
     31: {
-        "wk": konrod_31_weights,
-        "xk": konrod_31_nodes,
+        "wk": kronrod_31_weights,
+        "xk": kronrod_31_nodes,
         "wg": gauss_15_weights,
     },
     41: {
-        "wk": konrod_41_weights,
-        "xk": konrod_41_nodes,
+        "wk": kronrod_41_weights,
+        "xk": kronrod_41_nodes,
         "wg": gauss_20_weights,
     },
     51: {
-        "wk": konrod_51_weights,
-        "xk": konrod_51_nodes,
+        "wk": kronrod_51_weights,
+        "xk": kronrod_51_nodes,
         "wg": gauss_25_weights,
     },
     61: {
-        "wk": konrod_61_weights,
-        "xk": konrod_61_nodes,
+        "wk": kronrod_61_weights,
+        "xk": kronrod_61_nodes,
         "wg": gauss_30_weights,
     },
 }
-
-
-##### clenshaw-curtis nodes and weights
-
-
-def _cc_get_weights(N):
-    """Compute Clenshaw-Curtis nodes and weights for order N. N must be even."""
-    d = 2 / (1 - (np.arange(0, N + 1, 2)) ** 2)
-    d[0] /= 2
-    d[-1] /= 2
-    k = np.arange(N // 2 + 1)
-    n = np.arange(N // 2 + 1)
-    D = 2 / N * np.cos(k[:, None] * n[None, :] * np.pi / (N // 2))
-    D = np.where((n == 0) | (n == N // 2), D * 1 / 2, D)
-    w = D.T @ d
-    t = np.arange(0, 1 + N // 2) * np.pi / N
-    x = np.cos(t)
-    return x, w
-
-
-# generate weights for N = powers of 2
-cc_weights = {}
-for i in range(1, 8):
-    N = int(2 * 2**i)
-    x, w = _cc_get_weights(N)
-    cc_weights[N] = {
-        "xc": x,
-        "wc": w,
-    }
-
-# error formula uses weights from order N/2
-for i in range(2, 8):
-    N = int(2 * 2**i)
-    cc_weights[N]["we"] = np.array(
-        [cc_weights[N / 2]["wc"], np.zeros_like(cc_weights[N / 2]["wc"])]
-    ).flatten(order="F")[:-1]
-
-del cc_weights[4]
-
-
-##### tanh-sinh weights for trapezoidal rule
-ts_weights = {}
-
-_xts = lambda t: np.tanh(np.pi / 2 * np.sinh(t))
-_wts = lambda t: np.pi / 2 * np.cosh(t) / np.cosh(np.pi / 2 * np.sinh(t)) ** 2
-
-
-def _get_tmax(xmax):
-    # Inverse of tanh-sinh transform.
-    tanhinv = lambda x: 1 / 2 * np.log((1 + x) / (1 - x))
-    sinhinv = lambda x: np.log(x + np.sqrt(x**2 + 1))
-    return sinhinv(2 / np.pi * tanhinv(xmax))
-
-
-tmax = _get_tmax(np.array(1.0) - 10 * np.finfo(np.array(1.0).dtype).eps)
-a, b = -tmax, tmax
-
-
-for N in [41, 61, 81, 101]:
-    t1 = np.linspace(a, b, N)
-    t2 = np.linspace(a, b, N // 2 + 1)
-    assert np.all(t1[::2] == t2)
-
-    x1 = _xts(t1)
-    w1 = _wts(t1)
-    w2 = _wts(t2)
-    ts_weights[N] = {
-        "xt": x1,
-        "wt": w1 * np.diff(t1)[0],
-        "we": w2 * np.diff(t2)[0],
-    }
-    ts_weights[N]["wt"] *= 2 / ts_weights[N]["wt"].sum()
-    ts_weights[N]["we"] *= 2 / ts_weights[N]["we"].sum()
