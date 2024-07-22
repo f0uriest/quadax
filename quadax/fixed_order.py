@@ -36,7 +36,7 @@ class AbstractQuadratureRule(eqx.Module):
         b: float,
         args: tuple[Any],
     ) -> tuple[float, float, float, float]:
-        """Integrate fun(x, *args) from a to b.
+        """Integrate ``fun(x, *args)`` from a to b.
 
         Parameters
         ----------
@@ -75,9 +75,9 @@ class NestedRule(AbstractQuadratureRule):
     nodes with the high order rule.
     """
 
-    xh: jax.Array
-    wh: jax.Array
-    wl: jax.Array
+    _xh: jax.Array
+    _wh: jax.Array
+    _wl: jax.Array
     _norm: Callable
 
     @eqx.filter_jit
@@ -124,13 +124,13 @@ class NestedRule(AbstractQuadratureRule):
 
             halflength = (b - a) / 2
             center = (b + a) / 2
-            f = vfun(center + halflength * self.xh)
-            result_kronrod = _dot(self.wh, f) * halflength
-            result_gauss = _dot(self.wl, f) * halflength
+            f = vfun(center + halflength * self._xh)
+            result_kronrod = _dot(self._wh, f) * halflength
+            result_gauss = _dot(self._wl, f) * halflength
 
-            integral_abs = _dot(self.wh, jnp.abs(f))  # ~integral of abs(fun)
+            integral_abs = _dot(self._wh, jnp.abs(f))  # ~integral of abs(fun)
             integral_mmn = _dot(
-                self.wh, jnp.abs(f - result_kronrod / (b - a))
+                self._wh, jnp.abs(f - result_kronrod / (b - a))
             )  # ~ integral of abs(fun - mean(fun))
 
             result = result_kronrod
@@ -178,7 +178,7 @@ class GaussKronrodRule(NestedRule):
             norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
         )
         try:
-            self.xh, self.wh, self.wl = (
+            self._xh, self._wh, self._wl = (
                 jnp.array(gk_weights[order]["xk"]),
                 jnp.array(gk_weights[order]["wk"]),
                 jnp.array(gk_weights[order]["wg"]),
@@ -229,9 +229,9 @@ class ClenshawCurtisRule(NestedRule):
         wl = _cc_get_weights(order // 2)[1]
         wl = jnp.zeros_like(wh).at[::2].set(wl)
 
-        self.xh = jnp.concatenate([xh, -xh[:-1][::-1]])
-        self.wh = jnp.concatenate([wh, wh[:-1][::-1]])
-        self.wl = jnp.concatenate([wl, wl[:-1][::-1]])
+        self._xh = jnp.concatenate([xh, -xh[:-1][::-1]])
+        self._wh = jnp.concatenate([wh, wh[:-1][::-1]])
+        self._wl = jnp.concatenate([wl, wl[:-1][::-1]])
 
 
 class TanhSinhRule(NestedRule):
@@ -280,9 +280,9 @@ class TanhSinhRule(NestedRule):
         wh *= 2 / wh.sum()
         wl *= 2 / wl.sum()
 
-        self.xh = xh
-        self.wh = wh
-        self.wl = wl
+        self._xh = xh
+        self._wh = wh
+        self._wl = wl
 
 
 @functools.partial(jax.jit, static_argnums=(0, 4, 5))
