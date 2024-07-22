@@ -24,9 +24,9 @@ Quadrature Rules
 .. autosummary::
     :toctree: _api/
     :recursive:
+    :template: class.rst
 
     AbstractQuadratureRule -- Abstract base class for all quadrature rules
-    NestedRule             -- Abstract base class for nested quadrature rules.
     GaussKronrodRule       -- Fixed order integration over finite interval using Gauss-Konrod scheme
     ClenshawCurtisRule     -- Fixed order integration over finite interval using Clenshaw-Curtis scheme
     TanhSinhRule           -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
