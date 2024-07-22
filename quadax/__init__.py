@@ -13,7 +13,7 @@ from .fixed_order import (
     fixed_quadts,
 )
 from .romberg import romberg, rombergts
-from .sampled import cumulative_trapezoid, simpson, trapezoid
+from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid
 from .utils import STATUS
 
 __version__ = _version.get_versions()["version"]
