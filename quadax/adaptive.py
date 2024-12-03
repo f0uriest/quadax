@@ -422,7 +422,7 @@ def adaptive_quadrature(
     epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
-    f = jax.eval_shape(vfunc, (interval[0] + interval[-1] / 2))
+    f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)
     epmach = jnp.finfo(f.dtype).eps
     shape = f.shape
 

@@ -97,7 +97,7 @@ def romberg(
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
     a, b = interval
-    f = jax.eval_shape(vfunc, (a + b / 2))
+    f = jax.eval_shape(vfunc, (a + b) / 2)
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     result = result.at[0, 0].set(vfunc(a) + vfunc(b))
