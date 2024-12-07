@@ -97,7 +97,7 @@ example_problems = [
 
 
 class TestQuadGK:
-    """Tests for Gauss-Konrod quadrature."""
+    """Tests for Gauss-Kronrod quadrature."""
 
     def _base(self, i, tol, fudge=1, **kwargs):
         prob = example_problems[i]

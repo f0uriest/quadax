@@ -39,7 +39,7 @@ def quadgk(
     order=21,
     norm=jnp.inf,
 ):
-    """Global adaptive quadrature using Gauss-Konrod rule.
+    """Global adaptive quadrature using Gauss-Kronrod rule.
 
     Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
     error estimate. Breakpoints can be specified in `interval` where integration

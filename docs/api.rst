@@ -11,7 +11,7 @@ Adaptive integration of a callable function or method
     :toctree: _api/
     :recursive:
 
-    quadgk    -- General purpose integration using Gauss-Konrod scheme
+    quadgk    -- General purpose integration using Gauss-Kronrod scheme
     quadcc    -- General purpose integration using Clenshaw-Curtis scheme
     quadts    -- General purpose integration using tanh-sinh (aka double exponential) scheme
     romberg   -- Adaptive trapezoidal integration with Richardson extrapolation
@@ -27,7 +27,7 @@ Quadrature Rules
     :template: class.rst
 
     AbstractQuadratureRule -- Abstract base class for all quadrature rules
-    GaussKronrodRule       -- Fixed order integration over finite interval using Gauss-Konrod scheme
+    GaussKronrodRule       -- Fixed order integration over finite interval using Gauss-Kronrod scheme
     ClenshawCurtisRule     -- Fixed order integration over finite interval using Clenshaw-Curtis scheme
     TanhSinhRule           -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
 
