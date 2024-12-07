@@ -39,7 +39,7 @@ def quadgk(
     order=21,
     norm=jnp.inf,
 ):
-    """Global adaptive quadrature using Gauss-Konrod rule.
+    """Global adaptive quadrature using Gauss-Kronrod rule.
 
     Integrate fun from `interval[0]` to `interval[-1]` using a h-adaptive scheme with
     error estimate. Breakpoints can be specified in `interval` where integration
@@ -429,12 +429,14 @@ def adaptive_quadrature(
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
     state["ninter"] = len(interval) - 1  # current number of intervals
-    state["r_arr"] = jnp.zeros((max_ninter, *shape))  # local results from each interval
+    state["r_arr"] = jnp.zeros(
+        (max_ninter, *shape), f.dtype
+    )  # local results from each interval
     state["e_arr"] = jnp.zeros(max_ninter)  # local error est. from each interval
     state["a_arr"] = jnp.zeros(max_ninter)  # start of each interval
     state["b_arr"] = jnp.zeros(max_ninter)  # end of each interval
     state["s_arr"] = jnp.zeros(
-        (max_ninter, *shape)
+        (max_ninter, *shape), f.dtype
     )  # global est. of I from n intervals
     state["a_arr"] = state["a_arr"].at[: state["ninter"]].set(interval[:-1])
     state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
@@ -442,7 +444,7 @@ def adaptive_quadrature(
     state["roundoff2"] = 0  # for keeping track of roundoff errors
     state["status"] = 0  # error flag
     state["err_bnd"] = 0.0  # error bound we're trying to reach
-    state["area"] = jnp.zeros(shape)  # current best estimate for I
+    state["area"] = jnp.zeros(shape, f.dtype)  # current best estimate for I
     state["err_sum"] = 0.0  # current estimate for error in I
 
     def init_body(i, state_):
