@@ -118,7 +118,7 @@ class NestedRule(AbstractQuadratureRule):
         def truefun():
             f = jax.eval_shape(vfun, jnp.array(0.0))
             z = jnp.zeros(f.shape, f.dtype)
-            return z, 0.0, z, z
+            return z, self.norm(z), jnp.abs(z), jnp.abs(z)
 
         def falsefun():
 

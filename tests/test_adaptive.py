@@ -87,6 +87,12 @@ example_problems = [
         "interval": [0, 1, 2],
         "val": -4,
     },
+    # problem 16 - complex function
+    {
+        "fun": lambda t: t * jnp.log(1 + t) * 1j,
+        "interval": [0, 1],
+        "val": 0.25j,
+    },
 ]
 
 
@@ -210,6 +216,12 @@ class TestQuadGK:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob16(self):
+        """Test for example problem #16."""
+        self._base(16, 1e-4)
+        self._base(16, 1e-8)
+        self._base(16, 1e-12)
+
 
 class TestQuadCC:
     """Tests for Clenshaw-Curtis quadrature."""
@@ -330,6 +342,12 @@ class TestQuadCC:
         self._base(14, 1e-4)
         self._base(14, 1e-8)
         self._base(14, 1e-12)
+
+    def test_prob16(self):
+        """Test for example problem #16."""
+        self._base(16, 1e-4)
+        self._base(16, 1e-8)
+        self._base(16, 1e-12)
 
 
 class TestQuadTS:
@@ -452,6 +470,12 @@ class TestQuadTS:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob16(self):
+        """Test for example problem #16."""
+        self._base(16, 1e-4)
+        self._base(16, 1e-8)
+        self._base(16, 1e-12)
+
 
 class TestRombergTS:
     """Tests for tanh-sinh quadrature with adaptive refinement."""
@@ -567,6 +591,12 @@ class TestRombergTS:
         self._base(14, 1e-8)
         self._base(14, 1e-12)
 
+    def test_prob16(self):
+        """Test for example problem #16."""
+        self._base(16, 1e-4)
+        self._base(16, 1e-8)
+        self._base(16, 1e-12)
+
 
 class TestRomberg:
     """Tests for Romberg's method (only for well behaved integrands)."""
@@ -670,3 +700,9 @@ class TestRomberg:
         self._base(14, 1e-4)
         self._base(14, 1e-8)
         self._base(14, 1e-12)
+
+    def test_prob16(self):
+        """Test for example problem #16."""
+        self._base(16, 1e-4)
+        self._base(16, 1e-8)
+        self._base(16, 1e-12)
