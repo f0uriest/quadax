@@ -50,7 +50,7 @@ jobs:
             ./prof.db
       - name: Upload coverage
         id : codecov
-        uses: Wandalen/wretry.action@v1.3.0
+        uses: Wandalen/wretry.action@v3.7.3
         with:
           action: codecov/codecov-action@v5
           with: |
