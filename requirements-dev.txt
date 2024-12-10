@@ -1,7 +1,6 @@
 # standard install requirements
 -r ./requirements.txt
 
-jax[cpu] >= 0.3.2, <= 0.4.37
 scipy >= 1.10.0, <= 1.14.1
 
 # building the docs
