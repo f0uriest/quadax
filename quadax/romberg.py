@@ -124,8 +124,7 @@ def romberg(
             return s
 
         result = result.at[n, 0].set(
-            0.5 * result[n - 1, 0]
-            + h * jax.lax.fori_loop(1, (2**n) // 2 + 1, sloop, s)
+            0.5 * result[n - 1, 0] + h * jax.lax.fori_loop(1, (2**n) // 2 + 1, sloop, s)
         )
         neval += (2**n) // 2
 
