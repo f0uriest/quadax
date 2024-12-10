@@ -52,9 +52,8 @@ jobs:
         id : codecov
         uses: Wandalen/wretry.action@v1.3.0
         with:
-          action: codecov/codecov-action@v3
+          action: codecov/codecov-action@v5
           with: |
-            token: ${{ secrets.CODECOV_TOKEN }}
             name: codecov-umbrella
             files: ./cov.xml
             fail_ci_if_error: true
