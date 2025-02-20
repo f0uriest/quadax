@@ -267,7 +267,11 @@ class _WrappedFunction(eqx.Module):
 
     @eqx.filter_jit
     def __call__(self, x):
-        f = jnp.vectorize(self.fun, signature="()->" + self.outsig)(x, *self.args)
+        f = jnp.vectorize(
+            self.fun,
+            excluded=tuple(range(1, len(self.args) + 1)),
+            signature="()->" + self.outsig,
+        )(x, *self.args)
         return jnp.where(jnp.isfinite(f), f, 0.0)
 
 
