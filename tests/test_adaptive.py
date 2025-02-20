@@ -1,5 +1,6 @@
 """Tests for adaptive quadrature routines."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -706,3 +707,42 @@ class TestRomberg:
         self._base(16, 1e-4)
         self._base(16, 1e-8)
         self._base(16, 1e-12)
+
+
+def test_escaped_tracers():
+    """Test that no tracers escape, related to gh issue 18."""
+
+    @jax.jit
+    def integral_quadgk(interval):
+        return quadgk(jnp.square, interval)
+
+    with jax.checking_leaks():
+        jax.block_until_ready(integral_quadgk([0.0, 1.0]))
+
+    @jax.jit
+    def integral_quadcc(interval):
+        return quadcc(jnp.square, interval)
+
+    with jax.checking_leaks():
+        jax.block_until_ready(integral_quadcc([0.0, 1.0]))
+
+    @jax.jit
+    def integral_quadts(interval):
+        return quadts(jnp.square, interval)
+
+    with jax.checking_leaks():
+        jax.block_until_ready(integral_quadts([0.0, 1.0]))
+
+    @jax.jit
+    def integral_romberg(interval):
+        return romberg(jnp.square, interval)
+
+    with jax.checking_leaks():
+        jax.block_until_ready(integral_romberg([0.0, 1.0]))
+
+    @jax.jit
+    def integral_rombergts(interval):
+        return rombergts(jnp.square, interval)
+
+    with jax.checking_leaks():
+        jax.block_until_ready(integral_rombergts([0.0, 1.0]))
