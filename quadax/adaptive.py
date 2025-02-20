@@ -2,6 +2,7 @@
 
 import warnings
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -28,6 +29,7 @@ NO_CONVERGE = 4
 DIVERGENT = 5
 
 
+@eqx.filter_jit
 def quadgk(
     fun,
     interval,
@@ -128,6 +130,7 @@ def quadgk(
     return y, info
 
 
+@eqx.filter_jit
 def quadcc(
     fun,
     interval,
@@ -227,6 +230,7 @@ def quadcc(
     return y, info
 
 
+@eqx.filter_jit
 def quadts(
     fun,
     interval,
@@ -325,6 +329,7 @@ def quadts(
     return y, info
 
 
+@eqx.filter_jit
 def adaptive_quadrature(
     rule,
     fun,

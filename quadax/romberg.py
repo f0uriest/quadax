@@ -1,5 +1,6 @@
 """Romberg integration aka adaptive trapezoid with Richardson extrapolation."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -14,6 +15,7 @@ from .utils import (
 )
 
 
+@eqx.filter_jit
 def romberg(
     fun,
     interval,
@@ -147,6 +149,7 @@ def romberg(
     return y, out
 
 
+@eqx.filter_jit
 def rombergts(
     fun,
     interval,
