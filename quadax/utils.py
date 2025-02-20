@@ -1,8 +1,8 @@
 """Utility functions for parsing inputs, mapping coordinates etc."""
 
-from functools import partial
-from typing import NamedTuple, Union
+from typing import Any, NamedTuple, Union
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
@@ -22,7 +22,7 @@ def _map_linear(t, a, b):
     c = (b - a) / 2
     d = (b + a) / 2
     x = d + c * t
-    w = c
+    w = c * jnp.ones_like(t)
     return x.squeeze(), w.squeeze()
 
 
@@ -73,6 +73,10 @@ def _map_ninfb_inv(x, a, b):
     return t.squeeze()
 
 
+MAPFUNS = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
+MAPFUNS_INV = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
+
+
 def map_interval(fun, interval):
     """Map a function over an arbitrary interval [a, b] to the interval [-1, 1].
 
@@ -110,20 +114,29 @@ def map_interval(fun, interval):
     # 2 : a finite, b = inf
     # 3 : both infinite
     bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
-    mapfuns = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
-    mapfuns_inv = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
 
-    @jax.jit
-    def fun_mapped(t, *args):
-        x, w = jax.lax.switch(bitmask, mapfuns, t, a, b)
-        return sgn * w * fun(x, *args)
-
+    fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b)
     # map original breakpoints to new domain
-    interval_t = jax.lax.switch(bitmask, mapfuns_inv, interval, a, b)
+    interval_t = jax.lax.switch(bitmask, MAPFUNS_INV, interval, a, b)
     # +/-inf gets mapped to +/-1 but numerically evaluates to nan so we replace that.
     interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
     interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
     return fun_mapped, interval_t
+
+
+class _MappedFunction(eqx.Module):
+    """Function mapped to unit interval [-1,1]."""
+
+    fun: callable
+    bitmask: int
+    sgn: int
+    a: float
+    b: float
+
+    @eqx.filter_jit
+    def __call__(self, t, *args):
+        x, w = jax.lax.switch(self.bitmask, MAPFUNS, t, self.a, self.b)
+        return self.sgn * w * self.fun(x, *args)
 
 
 def tanhsinh_transform(fun, interval):
@@ -154,10 +167,7 @@ def tanhsinh_transform(fun, interval):
     # map a, b -> [-1, 1]
     fun, interval = map_interval(fun, interval)
 
-    # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
-    xk = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-    wk = lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
-    func = lambda t, *args: fun(xk(t), *args) * wk(t)
+    func = _TanhSinhTransformedFunction(fun)
 
     # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
     # we don't want to include the endpoint that maps to x==1 to avoid
@@ -172,7 +182,26 @@ def tanhsinh_transform(fun, interval):
     # inverse of tanh-sinh transformation for x = 1-eps
     tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
     interval_t = jnp.array([-tmax, tmax])
-    return jax.jit(func), interval_t
+    return func, interval_t
+
+
+# map [-1, 1] to [-inf, inf], but with mass concentrated near 0
+tanhsinh_x = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
+tanhsinh_w = (
+    lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+)
+
+
+class _TanhSinhTransformedFunction(eqx.Module):
+    """Function transformed by tanh-sinh transformation."""
+
+    fun: callable
+
+    @eqx.filter_jit
+    def __call__(self, t, *args):
+        x = tanhsinh_x(t)
+        w = tanhsinh_w(t)
+        return self.fun(x, *args) * w
 
 
 messages = {
@@ -226,13 +255,20 @@ def wrap_func(fun, args):
     # need to make sure we get the correct shape for array valued integrands
     outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
-    @jax.jit
-    @partial(jnp.vectorize, signature="()->" + outsig)
-    def wrapped(x):
-        f = fun(x, *args)
-        return jnp.where(jnp.isfinite(f), f, 0.0)
+    return _WrappedFunction(fun, args, outsig)
 
-    return wrapped
+
+class _WrappedFunction(eqx.Module):
+    """Wraps a function in jit/vectorize and masks out inf/nans."""
+
+    fun: callable
+    args: Any
+    outsig: str
+
+    @eqx.filter_jit
+    def __call__(self, x):
+        f = jnp.vectorize(self.fun, signature="()->" + self.outsig)(x, *self.args)
+        return jnp.where(jnp.isfinite(f), f, 0.0)
 
 
 class QuadratureInfo(NamedTuple):
