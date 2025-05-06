@@ -46,6 +46,6 @@ jobs:
         run: |
           pwd
           lscpu
-          python -m pytest -m unit \
+          python -m pytest \
             --durations=0 \
             --maxfail=1 \
