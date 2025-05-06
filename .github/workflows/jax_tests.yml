@@ -33,10 +33,10 @@ jobs:
           python -m pip install --upgrade pip
       - name: Install dependencies with given JAX version
         run: |
-          pip install -r ./devtools/dev-requirements.txt
           sed -i '/jax/d' ./requirements.txt
           sed -i '1i\jax == ${{ matrix.jax-version }}' ./requirements.txt
           cat ./requirements.txt
+          pip install -r ./requirements-dev.txt
       - name: Verify dependencies
         run: |
           python --version
