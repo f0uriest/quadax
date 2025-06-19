@@ -1,21 +1,22 @@
 """Quadrature of functions using known sample values."""
 
-import functools
-from typing import Callable, Union
+from typing import Any, Callable, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
+from .utils import wrap_jit
 
-def _tupleset(t, i, value):
+
+def _tupleset(t: tuple, i: int, value: Any) -> tuple:
     l = list(t)
     l[i] = value
     return tuple(l)
 
 
-@functools.partial(jax.jit, static_argnames="axis")
+@wrap_jit(static_argnames="axis")
 def trapezoid(
     y: ArrayLike, *, x: Union[None, ArrayLike] = None, dx: float = 1.0, axis: int = -1
 ) -> jax.Array:
@@ -113,12 +114,12 @@ def trapezoid(
     return 0.5 * (dx_array * (y_arr[..., 1:] + y_arr[..., :-1])).sum(-1)
 
 
-@functools.partial(jax.jit, static_argnames="axis")
+@wrap_jit(static_argnames="axis")
 def cumulative_trapezoid(
     y: ArrayLike,
     *,
     x: Union[None, ArrayLike] = None,
-    dx: float = 1.0,
+    dx: ArrayLike = 1.0,
     axis: int = -1,
     initial: Union[ArrayLike, None] = None,
 ) -> jax.Array:
@@ -240,7 +241,7 @@ def _basic_simpson(
     return result
 
 
-@functools.partial(jax.jit, static_argnames="axis")
+@wrap_jit(static_argnames="axis")
 def simpson(
     y: ArrayLike, *, x: Union[None, ArrayLike] = None, dx: float = 1.0, axis: int = -1
 ) -> jax.Array:
@@ -277,14 +278,11 @@ def simpson(
     nd = len(y.shape)
     N = y.shape[axis]
     last_dx = dx
-    returnshape = 0
     if x is not None:
         x = jnp.asarray(x)
         if len(x.shape) == 1:
             shapex = [1] * nd
             shapex[axis] = x.shape[0]
-            saveshape = x.shape
-            returnshape = 1
             x = x.reshape(tuple(shapex))
         elif len(x.shape) != len(y.shape):
             raise ValueError("If given, shape of x must be 1-D or the " "same as y.")
@@ -294,8 +292,8 @@ def simpson(
             )
 
     if N % 2 == 0:
-        val = 0.0
-        result = 0.0
+        val = jnp.array(0.0)
+        result = jnp.array(0.0)
         slice_all = (slice(None),) * nd
 
         if N == 2:
@@ -355,16 +353,15 @@ def simpson(
         result = result + val
     else:
         result = _basic_simpson(y, 0, N - 2, x, dx, axis)
-    if returnshape:
-        x = x.reshape(saveshape)
     return result
 
 
+@wrap_jit(static_argnames="axis")
 def cumulative_simpson(
     y: ArrayLike,
     *,
     x: Union[None, ArrayLike] = None,
-    dx: float = 1.0,
+    dx: ArrayLike = 1.0,
     axis: int = -1,
     initial: Union[ArrayLike, None] = None,
 ) -> jax.Array:
@@ -425,7 +422,7 @@ def cumulative_simpson(
         message = f"`axis={axis}` is not valid for `y` with `y.ndim={y.ndim}`."
         raise ValueError(message) from e
     if y.shape[-1] < 3:
-        res = cumulative_trapezoid(original_y, x, dx=dx, axis=axis, initial=None)
+        res = cumulative_trapezoid(original_y, x=x, dx=dx, axis=axis, initial=None)
         res = jnp.swapaxes(res, axis, -1)
 
     elif x is not None:
@@ -444,7 +441,7 @@ def cumulative_simpson(
         dx = jnp.diff(x, axis=-1)
         dx = eqx.error_if(dx, dx <= 0, "Input x must be strictly increasing.")
         res = _cumulatively_sum_simpson_integrals(
-            y, dx, _cumulative_simpson_unequal_intervals
+            y, dx, _cumulative_simpson_unequal_intervals  # pyright: ignore
         )
 
     else:
@@ -538,7 +535,7 @@ def _cumulative_simpson_unequal_intervals(y: jax.Array, dx: jax.Array) -> jax.Ar
     return x21 / 6 * (coeff1 * f1 + coeff2 * f2 + coeff3 * f3)
 
 
-def _ensure_float_array(arr):
+def _ensure_float_array(arr: ArrayLike) -> jax.Array:
     arr = jnp.asarray(arr)
     if jnp.issubdtype(arr.dtype, jnp.integer):
         arr = arr.astype(float, copy=False)

@@ -1,15 +1,21 @@
 """Romberg integration aka adaptive trapezoid with Richardson extrapolation."""
 
+from collections.abc import Callable
+from functools import partial
+from typing import Optional, Union
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 from .utils import (
     QuadratureInfo,
+    _get_eps,
+    _pnorm,
     bounded_while_loop,
     errorif,
     map_interval,
-    setdefault,
     tanhsinh_transform,
     wrap_func,
 )
@@ -17,14 +23,14 @@ from .utils import (
 
 @eqx.filter_jit
 def romberg(
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    divmax=20,
-    norm=jnp.inf,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    divmax: int = 20,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
 ):
     """Romberg integration of a callable function or method.
 
@@ -87,14 +93,21 @@ def romberg(
     Also, it is currently only forward mode differentiable.
 
     """
+    interval = jnp.atleast_1d(interval)
     errorif(
         len(interval) != 2,
         NotImplementedError,
         "Romberg integration with breakpoints not supported",
     )
-    epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
-    epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
-    _norm = norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
+    if epsabs is None:
+        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    if epsrel is None:
+        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    if callable(norm):
+        _norm: Callable[[jax.Array], jax.Array] = norm
+    else:
+        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+
     # map a, b -> [-1, 1]
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
@@ -151,14 +164,14 @@ def romberg(
 
 @eqx.filter_jit
 def rombergts(
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    divmax=20,
-    norm=jnp.inf,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    divmax: int = 20,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 

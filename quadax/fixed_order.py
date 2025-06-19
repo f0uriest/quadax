@@ -31,11 +31,11 @@ class AbstractQuadratureRule(eqx.Module):
     @abc.abstractmethod
     def integrate(
         self,
-        fun: Callable,
+        fun: Callable[..., jax.Array],
         a: float,
         b: float,
-        args: tuple[Any],
-    ) -> tuple[float, float, float, float]:
+        args: tuple[Any, ...],
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         """Integrate ``fun(x, *args)`` from a to b.
 
         Parameters
@@ -62,7 +62,7 @@ class AbstractQuadratureRule(eqx.Module):
 
         """
 
-    def norm(self, x: jax.Array) -> float:
+    def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
         return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
 
@@ -78,16 +78,16 @@ class NestedRule(AbstractQuadratureRule):
     _xh: jax.Array
     _wh: jax.Array
     _wl: jax.Array
-    _norm: Callable
+    _norm: Union[float, int, Callable]
 
     @eqx.filter_jit
     def integrate(
         self,
-        fun: Callable,
+        fun: Callable[..., jax.Array],
         a: float,
         b: float,
-        args: tuple[Any],
-    ) -> tuple[float, float, float, float]:
+        args: tuple[Any, ...],
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         """Integrate a function from a to b using a nested rule.
 
         Parameters
@@ -124,7 +124,7 @@ class NestedRule(AbstractQuadratureRule):
 
             halflength = (b - a) / 2
             center = (b + a) / 2
-            f = vfun(center + halflength * self._xh)
+            f: jax.Array = vfun(center + halflength * self._xh)
             result_kronrod = _dot(self._wh, f) * halflength
             result_gauss = _dot(self._wl, f) * halflength
 
@@ -152,9 +152,11 @@ class NestedRule(AbstractQuadratureRule):
 
         return jax.lax.cond(a == b, truefun, falsefun)
 
-    def norm(self, x):
+    def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
-        return self._norm(x)
+        if callable(self._norm):
+            return self._norm(x)
+        return jnp.linalg.norm(x.flatten(), ord=self._norm)
 
 
 class GaussKronrodRule(NestedRule):
@@ -173,10 +175,9 @@ class GaussKronrodRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 21, norm: Union[Callable, int] = jnp.inf):
-        self._norm = (
-            norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-        )
+    def __init__(self, order: int = 21, norm: Union[Callable, float, int] = jnp.inf):
+        self._norm = norm
+
         try:
             self._xh, self._wh, self._wl = (
                 jnp.array(gk_weights[order]["xk"]),
@@ -205,10 +206,8 @@ class ClenshawCurtisRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 32, norm: Union[Callable, int] = jnp.inf):
-        self._norm = (
-            norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-        )
+    def __init__(self, order: int = 32, norm: Union[Callable, float, int] = jnp.inf):
+        self._norm = norm
 
         def _cc_get_weights(N):
             d = 2 / (1 - (jnp.arange(0, N + 1, 2)) ** 2)
@@ -250,10 +249,9 @@ class TanhSinhRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 61, norm: Union[Callable, int] = jnp.inf):
-        self._norm = (
-            norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-        )
+    def __init__(self, order: int = 61, norm: Union[Callable, float, int] = jnp.inf):
+        self._norm = norm
+
         _xts = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
         _wts = (
             lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
