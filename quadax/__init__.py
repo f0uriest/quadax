@@ -16,4 +16,23 @@ from .romberg import romberg, rombergts
 from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid
 from .utils import STATUS
 
+__all__ = [
+    "adaptive_quadrature",
+    "quadcc",
+    "quadgk",
+    "quadts",
+    "AbstractQuadratureRule",
+    "ClenshawCurtisRule",
+    "GaussKronrodRule",
+    "NestedRule",
+    "TanhSinhRule",
+    "romberg",
+    "rombergts",
+    "cumulative_simpson",
+    "cumulative_trapezoid",
+    "simpson",
+    "trapezoid",
+    "STATUS",
+]
+
 __version__ = _version.get_versions()["version"]
