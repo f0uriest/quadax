@@ -1,10 +1,14 @@
 """Functions for globally h-adaptive quadrature."""
 
 import warnings
+from collections.abc import Callable
+from functools import partial
+from typing import Optional, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 from .fixed_order import (
     AbstractQuadratureRule,
@@ -14,10 +18,11 @@ from .fixed_order import (
 )
 from .utils import (
     QuadratureInfo,
+    _get_eps,
+    _pnorm,
     bounded_while_loop,
     errorif,
     map_interval,
-    setdefault,
     wrap_func,
 )
 
@@ -31,15 +36,15 @@ DIVERGENT = 5
 
 @eqx.filter_jit
 def quadgk(
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    max_ninter=50,
-    order=21,
-    norm=jnp.inf,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    max_ninter: int = 50,
+    order: int = 21,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -132,15 +137,15 @@ def quadgk(
 
 @eqx.filter_jit
 def quadcc(
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    max_ninter=50,
-    order=32,
-    norm=jnp.inf,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    max_ninter: int = 50,
+    order: int = 32,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -232,15 +237,15 @@ def quadcc(
 
 @eqx.filter_jit
 def quadts(
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    max_ninter=50,
-    order=61,
-    norm=jnp.inf,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    max_ninter: int = 50,
+    order: int = 61,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -331,15 +336,15 @@ def quadts(
 
 @eqx.filter_jit
 def adaptive_quadrature(
-    rule,
-    fun,
-    interval,
-    args=(),
-    full_output=False,
-    epsabs=None,
-    epsrel=None,
-    max_ninter=50,
-    norm=jnp.inf,
+    rule: AbstractQuadratureRule,
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: Optional[ArrayLike] = None,
+    epsrel: Optional[ArrayLike] = None,
+    max_ninter: int = 50,
+    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -412,23 +417,27 @@ def adaptive_quadrature(
         )
         intfun = rule
         norm = kwargs.pop("norm", jnp.inf)
-        _norm = (
-            norm if callable(norm) else lambda x: jnp.linalg.norm(x.flatten(), ord=norm)
-        )
+        if callable(norm):
+            _norm: Callable[[jax.Array], jax.Array] = norm
+        else:
+            _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
     else:
         intfun = rule.integrate
         _norm = rule.norm
+    interval = jnp.atleast_1d(interval)
     errorif(
         max_ninter < len(interval) - 1,
         ValueError,
         f"max_ninter={max_ninter} is not enough for {len(interval)-1} breakpoints",
     )
-    epsabs = setdefault(epsabs, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
-    epsrel = setdefault(epsrel, jnp.sqrt(jnp.finfo(jnp.array(1.0)).eps))
+    if epsabs is None:
+        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    if epsrel is None:
+        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
     fun, interval = map_interval(fun, interval)
     vfunc = wrap_func(fun, args)
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)
-    epmach = jnp.finfo(f.dtype).eps
+    epmach = _get_eps(f)
     shape = f.shape
 
     state = {}

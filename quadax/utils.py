@@ -1,13 +1,18 @@
 """Utility functions for parsing inputs, mapping coordinates etc."""
 
-from typing import Any, NamedTuple, Union
+import functools
+from collections.abc import Callable
+from typing import Any, NamedTuple, Type, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 
-def errorif(cond, err=ValueError, msg=""):
+def errorif(
+    cond: Union[bool, jax.Array], err: Type[Exception] = ValueError, msg: str = ""
+):
     """Raise an error if condition is met.
 
     Similar to assert but allows wider range of Error types, rather than
@@ -17,7 +22,7 @@ def errorif(cond, err=ValueError, msg=""):
         raise err(msg)
 
 
-def _map_linear(t, a, b):
+def _map_linear(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [a, b]."""
     c = (b - a) / 2
     d = (b + a) / 2
@@ -26,7 +31,7 @@ def _map_linear(t, a, b):
     return x.squeeze(), w.squeeze()
 
 
-def _map_linear_inv(x, a, b):
+def _map_linear_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point x in [a, b] to t in [-1, 1]."""
     c = (b - a) / 2
     d = (b + a) / 2
@@ -34,40 +39,40 @@ def _map_linear_inv(x, a, b):
     return t.squeeze()
 
 
-def _map_ninfinf(t, a, b):
+def _map_ninfinf(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [-inf, inf]."""
     x = t / jnp.sqrt(1 - t**2)
     w = 1 / jnp.sqrt(1 - t**2) ** 3
     return x.squeeze(), w.squeeze()
 
 
-def _map_ninfinf_inv(x, a, b):
+def _map_ninfinf_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point x in [-inf, inf] to t in [-1, 1]."""
     t = x / jnp.sqrt(x**2 + 1)
     return t.squeeze()
 
 
-def _map_ainf(t, a, b):
+def _map_ainf(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [a, inf]."""
     x = a - 1 + 2 / (1 - t)
     w = 2 / (1 - t) ** 2
     return x.squeeze(), w.squeeze()
 
 
-def _map_ainf_inv(x, a, b):
+def _map_ainf_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point x in [a, inf] to t in [-1, 1]."""
     t = (a - x + 1) / (a - x - 1)
     return t.squeeze()
 
 
-def _map_ninfb(t, a, b):
+def _map_ninfb(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [-inf, b]."""
     x = b + 1 - 2 / (t + 1)
     w = 2 / (t + 1) ** 2
     return x.squeeze(), w.squeeze()
 
 
-def _map_ninfb_inv(x, a, b):
+def _map_ninfb_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point x in [-inf, b] to t in [-1, 1]."""
     t = (x - b + 1) / (b - x + 1)
     return t.squeeze()
@@ -77,7 +82,7 @@ MAPFUNS = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
 MAPFUNS_INV = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
 
 
-def map_interval(fun, interval):
+def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
     """Map a function over an arbitrary interval [a, b] to the interval [-1, 1].
 
     Transform a function such that integral(fun) on interval is the same as
@@ -117,7 +122,7 @@ def map_interval(fun, interval):
 
     fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b)
     # map original breakpoints to new domain
-    interval_t = jax.lax.switch(bitmask, MAPFUNS_INV, interval, a, b)
+    interval_t: jax.Array = jax.lax.switch(bitmask, MAPFUNS_INV, interval, a, b)
     # +/-inf gets mapped to +/-1 but numerically evaluates to nan so we replace that.
     interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
     interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
@@ -127,14 +132,14 @@ def map_interval(fun, interval):
 class _MappedFunction(eqx.Module):
     """Function mapped to unit interval [-1,1]."""
 
-    fun: callable
-    bitmask: int
-    sgn: int
-    a: float
-    b: float
+    fun: Callable[..., jax.Array]
+    bitmask: jax.Array
+    sgn: jax.Array
+    a: jax.Array
+    b: jax.Array
 
     @eqx.filter_jit
-    def __call__(self, t, *args):
+    def __call__(self, t: jax.Array, *args):
         x, w = jax.lax.switch(self.bitmask, MAPFUNS, t, self.a, self.b)
         return self.sgn * w * self.fun(x, *args)
 
@@ -195,7 +200,7 @@ tanhsinh_w = (
 class _TanhSinhTransformedFunction(eqx.Module):
     """Function transformed by tanh-sinh transformation."""
 
-    fun: callable
+    fun: Callable[..., jax.Array]
 
     @eqx.filter_jit
     def __call__(self, t, *args):
@@ -249,7 +254,7 @@ def _decode_status(status):
 STATUS = {i: _decode_status(i) for i in range(int(2**5))}
 
 
-def wrap_func(fun, args):
+def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...]):
     """Vectorize, jit, and mask out inf/nan."""
     f = jax.eval_shape(fun, jnp.array(0.0), *args)
     # need to make sure we get the correct shape for array valued integrands
@@ -261,13 +266,13 @@ def wrap_func(fun, args):
 class _WrappedFunction(eqx.Module):
     """Wraps a function in jit/vectorize and masks out inf/nans."""
 
-    fun: callable
-    args: Any
+    fun: Callable[..., jax.Array]
+    args: tuple[Any, ...]
     outsig: str
 
     @eqx.filter_jit
-    def __call__(self, x):
-        f = jnp.vectorize(
+    def __call__(self, x: jax.Array) -> jax.Array:
+        f: jax.Array = jnp.vectorize(
             self.fun,
             excluded=tuple(range(1, len(self.args) + 1)),
             signature="()->" + self.outsig,
@@ -293,10 +298,10 @@ class QuadratureInfo(NamedTuple):
         details. Only present if ``full_output`` is True.
     """
 
-    err: float
-    neval: int
-    status: int
-    info: Union[dict, None]
+    err: Union[float, jax.Array]
+    neval: Union[int, jax.Array]
+    status: Union[int, jax.Array]
+    info: Any
 
 
 def bounded_while_loop(condfun, bodyfun, init_val, bound):
@@ -310,10 +315,33 @@ def bounded_while_loop(condfun, bodyfun, init_val, bound):
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
 
 
-def setdefault(val, default, cond=None):
+def setdefault(val, default, cond=None) -> Any:
     """Return val if condition is met, otherwise default.
 
     If cond is None, then it checks if val is not None, returning val
     or default accordingly.
     """
     return val if cond or (cond is None and val is not None) else default
+
+
+def _get_eps(x: jax.Array) -> jax.Array:
+    return jnp.finfo(x.dtype).eps  # pyright: ignore
+
+
+def _pnorm(x: jax.Array, p: Union[int, float, jax.Array]) -> jax.Array:
+    return jnp.linalg.norm(x.flatten(), ord=p)
+
+
+def wrap_jit(*args, **kwargs):
+    """Wrap a function with jit with optional extra args.
+
+    This is a helper to ensure docstrings and type hints are correctly propagated
+    to the wrapped function, bc vscode seems to have issues with regular jitted funcs.
+    """
+
+    def wrapper(fun):
+        foo = jax.jit(fun, *args, **kwargs)
+        foo = functools.wraps(fun)(foo)
+        return foo
+
+    return wrapper

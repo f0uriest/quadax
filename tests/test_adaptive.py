@@ -100,7 +100,7 @@ example_problems = [
 class TestQuadGK:
     """Tests for Gauss-Kronrod quadrature."""
 
-    def _base(self, i, tol, fudge=1, **kwargs):
+    def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
         y, info = quadgk(
@@ -227,7 +227,7 @@ class TestQuadGK:
 class TestQuadCC:
     """Tests for Clenshaw-Curtis quadrature."""
 
-    def _base(self, i, tol, fudge=1, **kwargs):
+    def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
         y, info = quadcc(
@@ -354,7 +354,7 @@ class TestQuadCC:
 class TestQuadTS:
     """Tests for adaptive tanh-sinh quadrature."""
 
-    def _base(self, i, tol, fudge=1, **kwargs):
+    def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
         y, info = quadts(
@@ -481,7 +481,7 @@ class TestQuadTS:
 class TestRombergTS:
     """Tests for tanh-sinh quadrature with adaptive refinement."""
 
-    def _base(self, i, tol, fudge=1, **kwargs):
+    def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         y, info = rombergts(
             prob["fun"], prob["interval"], epsabs=tol, epsrel=tol, **kwargs
