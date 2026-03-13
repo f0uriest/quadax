@@ -41,14 +41,14 @@ def _map_linear_inv(x: jax.Array, a: jax.Array, b: jax.Array):
 
 def _map_ninfinf(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [-inf, inf]."""
-    x = t / jnp.sqrt(1 - t**2)
-    w = 1 / jnp.sqrt(1 - t**2) ** 3
+    x = jnp.tan(t * jnp.pi / 2)
+    w = jnp.pi / 2 / jnp.cos(jnp.pi * t / 2) ** 2
     return x.squeeze(), w.squeeze()
 
 
 def _map_ninfinf_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point x in [-inf, inf] to t in [-1, 1]."""
-    t = x / jnp.sqrt(x**2 + 1)
+    t = jnp.arctan(x) / (jnp.pi / 2)
     return t.squeeze()
 
 
