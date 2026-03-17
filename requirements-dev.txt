@@ -7,7 +7,7 @@ scipy >= 1.10.0, <= 1.17
 sphinx >= 3.0.0, <= 9.1
 sphinx_copybutton <= 0.5.2
 sphinx-rtd-theme >= 1.0, <= 3.1
-sphinx-github-style >= 1.0, <= 1.2
+sphinx-github-style >= 1.0, <= 1.2.2
 
 # linting
 black == 26.3
