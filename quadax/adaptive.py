@@ -424,7 +424,7 @@ def adaptive_quadrature(
     else:
         intfun = rule.integrate
         _norm = rule.norm
-    interval = jnp.atleast_1d(interval)
+    interval = jnp.atleast_1d(jnp.asarray(interval))
     errorif(
         max_ninter < len(interval) - 1,
         ValueError,
