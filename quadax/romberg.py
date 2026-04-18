@@ -93,7 +93,7 @@ def romberg(
     Also, it is currently only forward mode differentiable.
 
     """
-    interval = jnp.atleast_1d(interval)
+    interval = jnp.atleast_1d(jnp.asarray(interval))
     errorif(
         len(interval) != 2,
         NotImplementedError,
