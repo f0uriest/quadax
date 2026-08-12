@@ -2,6 +2,7 @@
 
 from . import _version
 from .adaptive import adaptive_quadrature, quadcc, quadgk, quadts
+from .adjoint import AbstractAdjoint, DirectAdjoint, LeibnizAdjoint
 from .fixed_order import (
     AbstractQuadratureRule,
     ClenshawCurtisRule,
@@ -23,6 +24,9 @@ __all__ = [
     "GaussKronrodRule",
     "NestedRule",
     "TanhSinhRule",
+    "AbstractAdjoint",
+    "DirectAdjoint",
+    "LeibnizAdjoint",
     "romberg",
     "rombergts",
     "cumulative_simpson",

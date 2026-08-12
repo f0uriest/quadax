@@ -60,6 +60,39 @@ class AbstractQuadratureRule(eqx.Module):
 
         """
 
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate ``fun(x, *args)`` from a to b, without an error estimate.
+
+        Internal: used by the adjoints where many sub-intervals are evaluated at once
+        and only the values are wanted. Users writing a custom rule do not need to
+        touch this; the default below is correct, and subclasses only override it when
+        they can compute the value more cheaply than by discarding the error estimate
+        from :meth:`integrate`.
+
+        Parameters
+        ----------
+        fun : callable
+            Function to integrate, should have a signature of the form
+            ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
+        a, b : float
+            Lower and upper limits of integration. Must be finite.
+        args : tuple, optional
+            Extra arguments passed to fun.
+
+        Returns
+        -------
+        y : float, Array
+            Estimate of the integral of fun from a to b.
+
+        """
+        return self.integrate(fun, a, b, args)[0]
+
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
         return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
@@ -149,6 +182,25 @@ class NestedRule(AbstractQuadratureRule):
             return result, self.norm(abserr), integral_abs, integral_mmn
 
         return jax.lax.cond(a == b, truefun, falsefun)
+
+    @eqx.filter_jit
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate a function from a to b, without an error estimate.
+
+        Only the high order rule is summed, skipping the low order rule and the two
+        auxiliary sums that ``integrate`` needs for its error estimate.
+        """
+        vfun = wrap_func(fun, args)
+        halflength = (b - a) / 2
+        center = (b + a) / 2
+        f: jax.Array = vfun(center + halflength * self._xh)
+        return _dot(self._wh, f) * halflength
 
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""

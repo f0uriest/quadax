@@ -4,6 +4,21 @@ Changelog
 
 v0.3.0
 ------
+- Added pluggable adjoints, controlling how derivatives of a quadrature are computed.
+ ``quadgk``, ``quadcc``, ``quadts``, ``romberg``, ``rombergts``, and
+ ``adaptive_quadrature`` all take a new ``adjoint`` argument, and ``AbstractAdjoint``, ``DirectAdjoint``, and ``LeibnizAdjoint`` are exported at the top level.
+  - ``DirectAdjoint`` (the default) differentiates the discretization, reusing the
+    subdivision the primal solve converged to. Matches but uses a much faster
+    implementation.
+  - ``LeibnizAdjoint`` gives the derivative its own adaptive solve, so it gets its own
+    error control rather than inheriting the subdivision chosen for the integral. Often
+    several times faster for a gradient of a scalar-valued integral.
+- Fixed a bug in the sub-interval bookkeeping causing wrong results when the number of
+  iterations reaches the max allowed (though in this case the solution is marked as
+  un-converged anyways)
+- ``vmap``-ed integrations should now be faster, by stopping evaluation once every batch
+  element has converged, rather than running for the full ``max_ninter`` iterations
+  whenever any single element still needs them. Results are unchanged.
 - **Breaking**: removed ``fixed_quadgk``, ``fixed_quadcc``, and ``fixed_quadts``,
   deprecated since v0.2.2. Use ``GaussKronrodRule``, ``ClenshawCurtisRule``, and
   ``TanhSinhRule`` instead, eg
@@ -13,6 +28,10 @@ v0.3.0
   ``quadax.AbstractQuadratureRule``.
 - **Breaking**: removed the unused ``norm`` argument to ``adaptive_quadrature``. It had
   no effect; the norm is taken from the rule, ie ``GaussKronrodRule(order, norm)``.
+- Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
+  Development dependencies are now declared as extras rather than in requirements
+  files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and
+  ``lint`` extras) when working from a checkout.
 
 
 v0.2.13

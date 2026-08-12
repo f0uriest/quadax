@@ -8,6 +8,14 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
+from .adjoint import (
+    AbstractAdjoint,
+    DirectAdjoint,
+    QuadratureOps,
+    _ConvertedFunction,
+    build_integrand,
+    closure_convert,
+)
 from .utils import (
     QuadratureInfo,
     _get_eps,
@@ -30,6 +38,7 @@ def romberg(
     epsrel: ArrayLike | None = None,
     divmax: int = 20,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Romberg integration of a callable function or method.
 
@@ -64,6 +73,13 @@ def romberg(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which gives the exact derivative of the discretized problem in either mode, and
+        is usually the fastest option. ``LeibnizAdjoint`` is slower but gives the
+        derivative its own error control (ie, can better approximate the true
+        continuous derivative), and in reverse mode uses much less memory; see
+        ``AbstractAdjoint`` for when that is worth paying for.
 
     Returns
     -------
@@ -89,10 +105,12 @@ def romberg(
     sequential and does not vectorize integrand evaluations, so may not be the most
     efficient on GPU/TPU.
 
-    Also, it is currently only forward mode differentiable.
-
     """
     interval = jnp.atleast_1d(jnp.asarray(interval))
+    if not jnp.issubdtype(interval.dtype, jnp.inexact):
+        # integration limits must be inexact: they are differentiated with respect to,
+        # and integer leaves would otherwise be treated as static metadata
+        interval = interval.astype(jnp.result_type(float))
     errorif(
         len(interval) != 2,
         NotImplementedError,
@@ -102,14 +120,66 @@ def romberg(
         epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
     if epsrel is None:
         epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    epsabs = jnp.asarray(epsabs)
+    epsrel = jnp.asarray(epsrel)
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
         _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
 
-    # map a, b -> [-1, 1]
-    fun, interval = map_interval(fun, interval)
-    vfunc = wrap_func(fun, args)
+    return _romberg(
+        fun,
+        interval,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        divmax,
+        _norm,
+        adjoint,
+        build_integrand,
+    )
+
+
+def _romberg(
+    fun, interval, args, full_output, epsabs, epsrel, divmax, _norm, adjoint, build
+):
+    """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
+    # Closure conversion has to happen on the user's function, before any wrapping:
+    # once a transformed integrand crosses a filter_jit boundary its leaves become
+    # tracers that closure_convert cannot hoist.
+    f_conv, consts = closure_convert(fun, args)
+    # Romberg has no subdivision to reuse, so `rebuild`/`on_mesh` are left unset and
+    # DirectAdjoint falls back to differentiating through the loop.
+    ops = QuadratureOps(
+        build=partial(build, f_conv=f_conv),
+        solve=partial(_romberg_solve, divmax=divmax, _norm=_norm),
+        # Romberg has no subdivision to reuse, but it does settle on a number of
+        # Richardson levels. Freezing that makes the result a fixed linear functional of
+        # the integrand, which is what DirectAdjoint needs to differentiate in either
+        # direction. It has to go through a custom primitive rather than being
+        # differentiated directly, because evaluating it still involves a fori_loop with
+        # dynamic bounds that JAX cannot reverse differentiate.
+        frozen=lambda state: state["n"],
+        frozen_solve=partial(_romberg_levels, divmax=divmax),
+    )
+    y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
+    info = state["table"] if full_output else None
+    out = QuadratureInfo(state["err_sum"], state["neval"], state["status"], info)
+    return y, out
+
+
+def _build_tanhsinh(interval, args, consts, *, f_conv):
+    """Build the integrand for ``rombergts``: tanh-sinh, then map to the reference."""
+    fun = _ConvertedFunction(f_conv, args, consts)
+    fun_t, interval_t = tanhsinh_transform(fun, interval)
+    fun_m, interval_m = map_interval(fun_t, interval_t)
+    return wrap_func(fun_m, ()), interval_m
+
+
+def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _norm):
+    """Run the Romberg/Richardson extrapolation loop."""
+    del rule, kwargs
     a, b = interval
     f = jax.eval_shape(vfunc, (a + b) / 2)
 
@@ -156,9 +226,46 @@ def romberg(
 
     y = result[n - 1, n - 1]
     status = 2 * (err > jnp.maximum(epsabs, epsrel * _norm(y)))
-    info = result if full_output else None
-    out = QuadratureInfo(err, neval, status, info)
-    return y, out
+    state = {
+        "table": result,
+        "err_sum": err,
+        "neval": neval,
+        "status": status,
+        "n": n,  # Richardson levels used; frozen by DirectAdjoint
+    }
+    return y, state
+
+
+def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax):
+    """Evaluate the Richardson table at a fixed number of levels.
+
+    With ``n`` fixed this is a fixed linear combination of the integrand at fixed nodes,
+    so its forward and reverse derivatives are exact transposes of one another. Mirrors
+    the loop in ``_romberg_solve`` exactly so the two agree.
+    """
+    del rule, kwargs
+    a, b = interval[0], interval[-1]
+    f = jax.eval_shape(vfunc, (a + b) / 2)
+    result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
+    result = result.at[0, 0].set(vfunc(a) + vfunc(b))
+
+    def nloop(k, result):
+        h = (b - a) / 2**k
+
+        def sloop(i, s):
+            return s + vfunc(a + h * (2 * i - 1))
+
+        s = jax.lax.fori_loop(1, (2**k) // 2 + 1, sloop, jnp.zeros(f.shape, f.dtype))
+        result = result.at[k, 0].set(0.5 * result[k - 1, 0] + h * s)
+
+        def mloop(m, result):
+            temp = 1 / (4.0**m - 1.0) * (result[k, m - 1] - result[k - 1, m - 1])
+            return result.at[k, m].set(result[k, m - 1] + temp)
+
+        return jax.lax.fori_loop(1, k + 1, mloop, result)
+
+    result = jax.lax.fori_loop(1, n, nloop, result)
+    return result[n - 1, n - 1]
 
 
 @eqx.filter_jit
@@ -171,6 +278,7 @@ def rombergts(
     epsrel: ArrayLike | None = None,
     divmax: int = 20,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -205,6 +313,13 @@ def rombergts(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which gives the exact derivative of the discretized problem in either mode, and
+        is usually the fastest option. ``LeibnizAdjoint`` is slower but gives the
+        derivative its own error control (ie, can better approximate the true
+        continuous derivative), and in reverse mode uses much less memory; see
+        ``AbstractAdjoint`` for when that is worth paying for.
 
 
     Returns
@@ -231,8 +346,37 @@ def rombergts(
     sequential and does not vectorize integrand evaluations, so may not be the most
     efficient on GPU/TPU.
 
-    Also, it is currently only forward mode differentiable.
-
     """
-    fun, interval = tanhsinh_transform(fun, interval)
-    return romberg(fun, interval, args, full_output, epsabs, epsrel, divmax, norm)
+    interval = jnp.atleast_1d(jnp.asarray(interval))
+    if not jnp.issubdtype(interval.dtype, jnp.inexact):
+        # integration limits must be inexact: they are differentiated with respect to,
+        # and integer leaves would otherwise be treated as static metadata
+        interval = interval.astype(jnp.result_type(float))
+    errorif(
+        len(interval) != 2,
+        NotImplementedError,
+        "tanh-sinh transformation with breakpoints not supported",
+    )
+    if epsabs is None:
+        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    if epsrel is None:
+        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
+    epsabs = jnp.asarray(epsabs)
+    epsrel = jnp.asarray(epsrel)
+    if callable(norm):
+        _norm: Callable[[jax.Array], jax.Array] = norm
+    else:
+        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+
+    return _romberg(
+        fun,
+        interval,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        divmax,
+        _norm,
+        adjoint,
+        _build_tanhsinh,
+    )

@@ -32,6 +32,22 @@ Quadrature Rules
     TanhSinhRule           -- Fixed order integration over finite interval using tanh-sinh (aka double exponential) scheme
 
 
+Adjoints
+--------
+
+Adjoints control how derivatives of a quadrature are computed, without changing what the
+quadrature itself returns. Pass one as the ``adjoint`` argument.
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+    :template: class.rst
+
+    AbstractAdjoint       -- Abstract base class for all adjoint methods
+    DirectAdjoint         -- Exact derivative of discretized problem on the converged subdivision, aka "discretize then optimize" or "discrete adjoint" (default)
+    LeibnizAdjoint        -- Leibniz rule with an error controlled derivative solve, aka "optimize then discretize" or "continuous adjoint"
+
+
 Integrating function from sampled values
 ----------------------------------------
 
