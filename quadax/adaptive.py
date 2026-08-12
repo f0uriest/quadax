@@ -1,7 +1,6 @@
 """Functions for globally h-adaptive quadrature."""
 
 from collections.abc import Callable
-from typing import Optional, Union
 
 import equinox as eqx
 import jax
@@ -37,11 +36,11 @@ def quadgk(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
     order: int = 21,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -138,11 +137,11 @@ def quadcc(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
     order: int = 32,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -238,11 +237,11 @@ def quadts(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
     order: int = 61,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -338,8 +337,8 @@ def adaptive_quadrature(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
     **kwargs,
 ):
@@ -416,7 +415,7 @@ def adaptive_quadrature(
     errorif(
         max_ninter < len(interval) - 1,
         ValueError,
-        f"max_ninter={max_ninter} is not enough for {len(interval)-1} breakpoints",
+        f"max_ninter={max_ninter} is not enough for {len(interval) - 1} breakpoints",
     )
     if epsabs is None:
         epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))

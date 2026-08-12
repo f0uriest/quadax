@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 from functools import partial
-from typing import Optional, Union
 
 import equinox as eqx
 import jax
@@ -27,10 +26,10 @@ def romberg(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     divmax: int = 20,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
 ):
     """Romberg integration of a callable function or method.
 
@@ -168,10 +167,10 @@ def rombergts(
     interval: ArrayLike,
     args: tuple = (),
     full_output: bool = False,
-    epsabs: Optional[ArrayLike] = None,
-    epsrel: Optional[ArrayLike] = None,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
     divmax: int = 20,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 

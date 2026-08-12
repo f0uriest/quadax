@@ -2,7 +2,7 @@
 
 import abc
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -76,7 +76,7 @@ class NestedRule(AbstractQuadratureRule):
     _xh: jax.Array
     _wh: jax.Array
     _wl: jax.Array
-    _norm: Union[float, int, Callable]
+    _norm: float | int | Callable
 
     @eqx.filter_jit
     def integrate(
@@ -173,7 +173,7 @@ class GaussKronrodRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 21, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 21, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         try:
@@ -204,7 +204,7 @@ class ClenshawCurtisRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 32, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         def _cc_get_weights(N):
@@ -247,12 +247,12 @@ class TanhSinhRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 61, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         _xts = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-        _wts = (
-            lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+        _wts = lambda t: (
+            jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
         )
 
         def _get_tmax(xmax):
