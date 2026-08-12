@@ -6,22 +6,36 @@ on:
   workflow_dispatch:
 
 jobs:
-  jax_tests:
+  discover_jax_versions:
     if: ${{ github.event.label.name == 'test_jax' && github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    outputs:
+      jax-versions: ${{ steps.discover.outputs.versions }}
+    steps:
+      - name: Discover available JAX versions from PyPI
+        id: discover
+        run: |
+          # Fetch every stable, non-yanked JAX release >= 0.3.0 from PyPI and
+          # emit them as a JSON array for the test matrix below. Missing
+          # versions (e.g. 0.4.32) and any newly released versions are handled
+          # automatically.
+          versions=$(curl -s https://pypi.org/pypi/jax/json | jq -c \
+            '[.releases | to_entries[]
+              | select(.value | length > 0)
+              | select(.value[0].yanked == false)
+              | .key
+              | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | select((split(".") | map(tonumber)) >= [0, 3, 0])]
+             | sort_by(. | split(".") | map(tonumber))')
+          echo "versions=${versions}" >> "$GITHUB_OUTPUT"
+
+  jax_tests:
+    needs: discover_jax_versions
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        jax-version: [0.3.0,  0.3.1,  0.3.2,  0.3.3,  0.3.4,  0.3.5,  0.3.6,  0.3.7,
-                      0.3.8,  0.3.9,  0.3.10, 0.3.11, 0.3.12, 0.3.13, 0.3.14, 0.3.15,
-                      0.3.16, 0.3.17, 0.3.19, 0.3.20, 0.3.21, 0.3.22, 0.3.23, 0.3.24,
-                      0.3.25, 0.4.1,  0.4.2,  0.4.3,  0.4.4,  0.4.5,  0.4.6,  0.4.7,
-                      0.4.8,  0.4.9,  0.4.10, 0.4.11, 0.4.12, 0.4.13, 0.4.14, 0.4.15,
-                      0.4.16, 0.4.17, 0.4.18, 0.4.19, 0.4.20, 0.4.21, 0.4.22, 0.4.23,
-                      0.4.24, 0.4.25, 0.4.26, 0.4.27, 0.4.28, 0.4.29, 0.4.30, 0.4.31,
-                      0.4.33, 0.4.34, 0.4.35, 0.4.36, 0.4.37, 0.4.38, 0.5.0,  0.5.1,
-                      0.5.2,  0.5.3,  0.6.0]
-                      # 0.4.32 is not available on PyPI
+        jax-version: ${{ fromJSON(needs.discover_jax_versions.outputs.jax-versions) }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python 3.12
@@ -51,3 +65,41 @@ jobs:
           python -m pytest \
             --durations=0 \
             --maxfail=1 \
+
+  report_jax_results:
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    needs: jax_tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Summarize per-version results
+        run: |
+          # needs.jax_tests is an object keyed by each matrix combination (the
+          # JAX version), with the result of that job. jax_tests uses
+          # fail-fast: false, so every version is exercised even if some fail.
+          echo '${{ toJSON(needs.jax_tests) }}' > results.json
+          {
+            echo '### JAX version test results'
+            echo ''
+            echo '| Version | Result |'
+            echo '|---|---|'
+            jq -r 'to_entries[] | "| \(.key) | \(if .value.result == "success" then ":white_check_mark: passed" else ":x: failed" end) |"' results.json
+            echo ''
+            echo "Passed: $(jq '[to_entries[] | select(.value.result == "success")] | length' results.json), Failed: $(jq '[to_entries[] | select(.value.result != "success")] | length' results.json)"
+          } > summary.md
+          cat summary.md
+      - name: Add comment to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.GITHUB_WORKSPACE + '/summary.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
