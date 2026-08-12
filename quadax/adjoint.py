@@ -8,6 +8,7 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax._src import core as jcore
 from jax.extend.core import Primitive
 from jax.flatten_util import ravel_pytree
@@ -101,13 +102,20 @@ def _with_checkpoint(ops, checkpoint):
 
 
 def _zero_tangent(tree):
-    """Zero tangent for a pytree, using None for non-inexact leaves."""
+    """Zero tangent for a pytree, materialized rather than symbolic.
+
+    Nothing in the integrator state is differentiable, so every leaf gets an explicit
+    zero: an ordinary zeros array for the inexact leaves, and a ``float0`` array (the
+    tangent type of a non-inexact primal, and zero-sized) for the integer and boolean
+    bookkeeping. Returning ``None`` for the latter would be more natural but this causes
+    problems with jax 0.7.0 and 0.7.1.
+    """
 
     def z(x):
         x = jnp.asarray(x)
         if jnp.issubdtype(x.dtype, jnp.inexact):
             return jnp.zeros_like(x)
-        return None
+        return np.zeros(x.shape, dtype=jax.dtypes.float0)
 
     return jax.tree.map(z, tree)
 

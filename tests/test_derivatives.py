@@ -387,6 +387,25 @@ class TestTransforms:
             rtol=1e-12,
         )
 
+    @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
+    def test_hessian(self, adjoint):
+        """Reverse inside forward works, not just forward inside forward.
+
+        ``jax.hessian`` is ``jacfwd(jacrev(...))``, which linearizes through the custom
+        rule rather than nesting two JVPs, and so reaches machinery that
+        ``test_second_derivatives`` does not.
+        """
+        fun = lambda t, c: jnp.sum(jnp.exp(-c * t))
+        interval = jnp.array([0.0, 1.0])
+        f = lambda c: quadgk(fun, interval, (c,), adjoint=adjoint)[0]
+        # int_0^1 sum_i exp(-c_i t) dt = sum_i (1 - exp(-c_i))/c_i, so the Hessian is
+        # diagonal; check against the unrolled reference, which carries no custom rule.
+        g = lambda c: quadgk(fun, interval, (c,), adjoint=_UnrolledDirectAdjoint())[0]
+        c = jnp.linspace(0.5, 2.0, 3)
+        got = np.asarray(jax.hessian(f)(c))
+        assert got.shape == (3, 3)
+        np.testing.assert_allclose(got, np.asarray(jax.hessian(g)(c)), rtol=1e-6)
+
     def test_closed_over_values_get_gradients(self):
         """Values closed over by the integrand must not silently get zero gradients."""
 
