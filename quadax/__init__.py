@@ -8,9 +8,6 @@ from .fixed_order import (
     GaussKronrodRule,
     NestedRule,
     TanhSinhRule,
-    fixed_quadcc,
-    fixed_quadgk,
-    fixed_quadts,
 )
 from .romberg import romberg, rombergts
 from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid

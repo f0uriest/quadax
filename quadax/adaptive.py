@@ -1,8 +1,6 @@
 """Functions for globally h-adaptive quadrature."""
 
-import warnings
 from collections.abc import Callable
-from functools import partial
 from typing import Optional, Union
 
 import equinox as eqx
@@ -19,7 +17,6 @@ from .fixed_order import (
 from .utils import (
     QuadratureInfo,
     _get_eps,
-    _pnorm,
     bounded_while_loop,
     errorif,
     map_interval,
@@ -344,7 +341,6 @@ def adaptive_quadrature(
     epsabs: Optional[ArrayLike] = None,
     epsrel: Optional[ArrayLike] = None,
     max_ninter: int = 50,
-    norm: Union[float, int, Callable[[jax.Array], jax.Array]] = jnp.inf,
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -408,22 +404,14 @@ def adaptive_quadrature(
             sub-intervals.
 
     """
-    if not isinstance(rule, AbstractQuadratureRule):
-        warnings.warn(
-            "Passing a callable for ``rule`` is deprecated and in the future will "
-            "raise an error. Users should instead subclass "
-            "``quadax.AbstractQuadratureRule``",
-            FutureWarning,
-        )
-        intfun = rule
-        norm = kwargs.pop("norm", jnp.inf)
-        if callable(norm):
-            _norm: Callable[[jax.Array], jax.Array] = norm
-        else:
-            _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
-    else:
-        intfun = rule.integrate
-        _norm = rule.norm
+    errorif(
+        not isinstance(rule, AbstractQuadratureRule),
+        TypeError,
+        "rule should be an instance of quadax.AbstractQuadratureRule, "
+        f"got {type(rule)}",
+    )
+    intfun = rule.integrate
+    _norm = rule.norm
     interval = jnp.atleast_1d(jnp.asarray(interval))
     errorif(
         max_ninter < len(interval) - 1,
