@@ -239,8 +239,8 @@ class DirectAdjoint(AbstractAdjoint):
     the derivative is then taken of that discretization.
 
     This is the default. It is usually the fastest option for forward mode. For a
-    gradient of a scalar-valued integral via ``jax.grad`, :class:`LeibnizAdjoint` can be
-    often several times faster; see :class:`AbstractAdjoint` for the trade-offs.
+    gradient of a scalar-valued integral via ``jax.grad``, :class:`LeibnizAdjoint` can
+    be often several times faster; see :class:`AbstractAdjoint` for the trade-offs.
 
     It works by running the primal solve recording the final adaptive mesh, and then
     using the same mesh (with corrections when differentiating the interval itself) to
@@ -250,6 +250,12 @@ class DirectAdjoint(AbstractAdjoint):
     extra integrand evaluations are spent on error control for it. That is what makes
     this the cheapest option, and also the reason to reach for a Leibniz adjoint when
     the derivative needs resolving that the integral did not pay for.
+
+    Methods with no subdivision to reuse (Romberg) are handled the same way in spirit:
+    the number of Richardson levels the solve settled on is frozen instead of a mesh.
+    There the fixed discretization still contains a ``fori_loop`` with dynamic bounds
+    that JAX cannot reverse differentiate, so the derivative is routed through a custom
+    primitive that supplies the two directions explicitly. Both modes work either way.
 
     Parameters
     ----------
@@ -266,11 +272,6 @@ class DirectAdjoint(AbstractAdjoint):
         only the derivative with respect to the integration limits, since its derivative
         with respect to ``args`` comes from a separate solve that stores nothing.
 
-    Methods with no subdivision to reuse (Romberg) are handled the same way in spirit:
-    the number of Richardson levels the solve settled on is frozen instead of a mesh.
-    There the fixed discretization still contains a ``fori_loop`` with dynamic bounds
-    that JAX cannot reverse differentiate, so the derivative is routed through a custom
-    primitive that supplies the two directions explicitly. Both modes work either way.
     """
 
     checkpoint: bool = True
@@ -536,14 +537,15 @@ class LeibnizAdjoint(AbstractAdjoint):
     control rather than inheriting the subdivision chosen for the integral -- see
     :class:`AbstractAdjoint` for when that is worth paying for.
 
-    Both modes come from one object: the integral carries a custom JVP whose tangent is
-    a primitive that is linear in the tangent and supplies an explicit transpose, so JAX
-    takes forward mode from the rule and reverse mode by transposing it.
+    Because each mode picks its own subdivision, forward and reverse results agree to
+    quadrature accuracy rather than exactly.
 
-    Only the direction being asked for is computed. Forward mode integrates the scalar
-    :math:`\partial f/\partial\theta \cdot \dot\theta`; reverse mode integrates the
-    vector-valued :math:`\bar y \cdot \partial f/\partial\theta`. Neither forms the full
-    Jacobian.
+    Derivatives with respect to the integration limits are taken on the subdivision the
+    primal solve settled on, rather than from the error-controlled solve. In mapped
+    coordinates a moving breakpoint slides a discontinuity across a fixed mesh, and
+    integrating ``df/dx`` cannot represent the resulting delta; rebuilding the mesh from
+    the limits tracks the breakpoint and recovers the jump term. Only the derivative
+    with respect to ``args`` gets its own error control.
 
     Parameters
     ----------
@@ -559,16 +561,6 @@ class LeibnizAdjoint(AbstractAdjoint):
         for :class:`DirectAdjoint` that is the whole of it, for :class:`LeibnizAdjoint`
         only the derivative with respect to the integration limits, since its derivative
         with respect to ``args`` comes from a separate solve that stores nothing.
-
-    Because each mode picks its own subdivision, forward and reverse results agree to
-    quadrature accuracy rather than exactly.
-
-    Derivatives with respect to the integration limits are taken on the subdivision the
-    primal solve settled on, rather than from the error-controlled solve. In mapped
-    coordinates a moving breakpoint slides a discontinuity across a fixed mesh, and
-    integrating ``df/dx`` cannot represent the resulting delta; rebuilding the mesh from
-    the limits tracks the breakpoint and recovers the jump term. Only the derivative
-    with respect to ``args`` gets its own error control.
     """
 
     checkpoint: bool = True
