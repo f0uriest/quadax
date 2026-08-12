@@ -15,17 +15,18 @@ jobs:
       - name: Discover available JAX versions from PyPI
         id: discover
         run: |
-          # Fetch every stable, non-yanked JAX release >= 0.3.0 from PyPI and
+          # Fetch every stable, non-yanked JAX release >= 0.4.18 from PyPI and
           # emit them as a JSON array for the test matrix below. Missing
           # versions (e.g. 0.4.32) and any newly released versions are handled
-          # automatically.
+          # automatically. jaxlib only became pip-installable at 0.4.18, so
+          # older jax cannot get a matching jaxlib here.
           versions=$(curl -s https://pypi.org/pypi/jax/json | jq -c \
             '[.releases | to_entries[]
               | select(.value | length > 0)
               | select(.value[0].yanked == false)
               | .key
               | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
-              | select((split(".") | map(tonumber)) >= [0, 3, 0])]
+              | select((split(".") | map(tonumber)) >= [0, 4, 18])]
              | sort_by(. | split(".") | map(tonumber))')
           echo "versions=${versions}" >> "$GITHUB_OUTPUT"
 
@@ -51,7 +52,17 @@ jobs:
           # override the jax pin from pyproject.toml with the version under test.
           # pip will warn about the resulting conflict with our declared range;
           # that is expected, since the point of this job is to probe old versions.
+          # Start from a clean slate so the jaxlib already pulled in by `.[test]`
+          # doesn't linger and get paired with an incompatible jax.
+          pip uninstall -y jax jaxlib
           pip install "jax == ${{ matrix.jax-version }}"
+          # jaxlib must match the jax version under test. For jax < 0.4.30,
+          # jaxlib is not a base dependency of jax (it only exists in the [cpu]
+          # extra), so a bare `pip install "jax == X"` would leave a mismatched
+          # jaxlib behind. Pin the matching jaxlib, falling back to the [cpu]
+          # extra for versions that only declare jaxlib there.
+          pip install "jaxlib == ${{ matrix.jax-version }}" || \
+            pip install "jax[cpu] == ${{ matrix.jax-version }}"
           pip list | grep -i "^jax"
       - name: Verify dependencies
         run: |
