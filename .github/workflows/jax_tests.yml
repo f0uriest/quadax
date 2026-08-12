@@ -7,7 +7,10 @@ on:
 
 jobs:
   discover_jax_versions:
-    if: ${{ github.event.label.name == 'test_jax' && github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    if: >-
+      ${{ github.event.label.name == 'test_jax' &&
+      github.event_name == 'pull_request' ||
+      github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     outputs:
       jax-versions: ${{ steps.discover.outputs.versions }}
@@ -91,15 +94,46 @@ jobs:
           # needs.jax_tests is an object keyed by each matrix combination (the
           # JAX version), with the result of that job. jax_tests uses
           # fail-fast: false, so every version is exercised even if some fail.
+          # Note: GitHub serializes failed/skipped matrix jobs in the needs
+          # context as a plain string (e.g. "failure") instead of an object,
+          # so values must be checked for type before reading .result.
           echo '${{ toJSON(needs.jax_tests) }}' > results.json
           {
             echo '### JAX version test results'
             echo ''
             echo '| Version | Result |'
             echo '|---|---|'
-            jq -r 'to_entries[] | "| \(.key) | \(if .value.result == "success" then ":white_check_mark: passed" else ":x: failed" end) |"' results.json
+            jq -r '
+              if type != "object" then
+                "| (no versions tested) | :x: failed |"
+              else
+                to_entries[] |
+                "| \(.key) | \(
+                  if
+                    (.value | type) == "object"
+                    and .value.result == "success"
+                  then
+                    ":white_check_mark: passed"
+                  else
+                    ":x: failed"
+                  end
+                ) |"
+              end
+            ' results.json
             echo ''
-            echo "Passed: $(jq '[to_entries[] | select(.value.result == "success")] | length' results.json), Failed: $(jq '[to_entries[] | select(.value.result != "success")] | length' results.json)"
+            passed=$(jq '
+              [to_entries[] | select(
+                (.value | type) == "object"
+                and .value.result == "success"
+              )] | length
+            ' results.json)
+            failed=$(jq '
+              [to_entries[] | select(
+                (.value | type) != "object"
+                or .value.result != "success"
+              )] | length
+            ' results.json)
+            echo "Passed: $passed, Failed: $failed"
           } > summary.md
           cat summary.md
       - name: Add comment to PR
