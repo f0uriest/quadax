@@ -205,8 +205,6 @@ def _basic_simpson(
     y: jax.Array, start: int, stop: int, x: jax.Array | None, dx: float, axis: int
 ) -> jax.Array:
     nd = len(y.shape)
-    if start is None:
-        start = 0
     step = 2
     slice_all = (slice(None),) * nd
     slice0 = _tupleset(slice_all, axis, slice(start, stop, step))
