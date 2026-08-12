@@ -9,7 +9,7 @@ repos:
       - id: end-of-file-fixer
       - id: trailing-whitespace
   # ruff replaces black, isort, flake8 (+ docstrings/eradicate/isort plugins),
-  # and pyupgrade. Keep the rev in sync with the pin in requirements-dev.txt.
+  # and pyupgrade. Keep the rev in sync with the pin in pyproject.toml.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.14
     hooks:

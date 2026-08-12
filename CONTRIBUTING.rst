@@ -149,7 +149,7 @@ Python Styleguide
 *****************
 
 -  `Follow the PEP8 format <https://www.python.org/dev/peps/pep-0008/>`__ where possible
--  Format code using `ruff <https://docs.astral.sh/ruff/>`__ before committing (``ruff format quadax/ tests/``) - with formatting, consistency is better than "correctness." There are small differences between versions, so install the pinned version from ``requirements-dev.txt``.
+-  Format code using `ruff <https://docs.astral.sh/ruff/>`__ before committing (``ruff format quadax/ tests/``) - with formatting, consistency is better than "correctness." There are small differences between versions, so install the pinned version from the ``lint`` extra in ``pyproject.toml`` (``pip install -e ".[lint]"``).
 -  Check code with ``ruff check quadax/ tests/``, settings are in ``pyproject.toml`` under ``[tool.ruff]``
 -  We recommend installing ``pre-commit`` with ``pip install pre-commit`` and then running ``pre-commit install`` from the root of the repository. This will automatically run a number of checks every time you commit new code, reducing the likelihood of committing bad code.
 -  -  Use `Numpy Style Docstrings <https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_numpy.html#example-numpy>`__ - see the code for plenty of examples. At a minimum, the docstring should include a description of inputs and outputs, and a short description of what the function or method does. Code snippets showing example usage strongly encouraged.
@@ -177,7 +177,7 @@ Python Styleguide
 ``pytest``
 ----------
 
-The testing suite is based on `pytest <https://docs.pytest.org/>`__, and makes use of several plugins for specialized testing. You can install all the necessary tools with ``pip install -r requirements-dev.txt``. You can run the tests from the root of the repository with ``pytest -m unit``. To only run selected tests you can use ``pytest -k foo`` which will only run tests that have ``foo`` in the test or file name.
+The testing suite is based on `pytest <https://docs.pytest.org/>`__, and makes use of several plugins for specialized testing. You can install all the necessary tools with ``pip install -e ".[dev]"``. You can run the tests from the root of the repository with ``pytest -m unit``. To only run selected tests you can use ``pytest -k foo`` which will only run tests that have ``foo`` in the test or file name.
 
 Additional useful flags include:
 

@@ -33,10 +33,12 @@ jobs:
           python -m pip install --upgrade pip
       - name: Install dependencies with given JAX version
         run: |
-          sed -i '/jax/d' ./requirements.txt
-          sed -i '1i\jax == ${{ matrix.jax-version }}' ./requirements.txt
-          cat ./requirements.txt
-          pip install -r ./requirements-dev.txt
+          pip install -e ".[test]"
+          # override the jax pin from pyproject.toml with the version under test.
+          # pip will warn about the resulting conflict with our declared range;
+          # that is expected, since the point of this job is to probe old versions.
+          pip install "jax == ${{ matrix.jax-version }}"
+          pip list | grep -i "^jax"
       - name: Verify dependencies
         run: |
           python --version
