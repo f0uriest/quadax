@@ -28,8 +28,9 @@ example_problems = [
     },
     # problem 3
     {
-        "fun": lambda t: jnp.arctan(jnp.sqrt(2 + t**2))
-        / ((1 + t**2) * jnp.sqrt(2 + t**2)),
+        "fun": lambda t: (
+            jnp.arctan(jnp.sqrt(2 + t**2)) / ((1 + t**2) * jnp.sqrt(2 + t**2))
+        ),
         "interval": [0, 1],
         "val": 5 * jnp.pi**2 / 96,
     },

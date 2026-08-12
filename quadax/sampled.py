@@ -1,6 +1,7 @@
 """Quadrature of functions using known sample values."""
 
-from typing import Any, Callable, Union
+from collections.abc import Callable
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -18,7 +19,7 @@ def _tupleset(t: tuple, i: int, value: Any) -> tuple:
 
 @wrap_jit(static_argnames="axis")
 def trapezoid(
-    y: ArrayLike, *, x: Union[None, ArrayLike] = None, dx: float = 1.0, axis: int = -1
+    y: ArrayLike, *, x: None | ArrayLike = None, dx: float = 1.0, axis: int = -1
 ) -> jax.Array:
     r"""
     Integrate along the given axis using the composite trapezoidal rule.
@@ -118,10 +119,10 @@ def trapezoid(
 def cumulative_trapezoid(
     y: ArrayLike,
     *,
-    x: Union[None, ArrayLike] = None,
+    x: None | ArrayLike = None,
     dx: ArrayLike = 1.0,
     axis: int = -1,
-    initial: Union[ArrayLike, None] = None,
+    initial: ArrayLike | None = None,
 ) -> jax.Array:
     """Cumulatively integrate y(x) using the composite trapezoidal rule.
 
@@ -175,14 +176,12 @@ def cumulative_trapezoid(
             shape[axis] = -1
             d = d.reshape(shape)
         elif len(x.shape) != len(y.shape):
-            raise ValueError("If given, shape of x must be 1-D or the " "same as y.")
+            raise ValueError("If given, shape of x must be 1-D or the same as y.")
         else:
             d = jnp.diff(x, axis=axis)
 
         if d.shape[axis] != y.shape[axis] - 1:
-            raise ValueError(
-                "If given, length of x along axis must be the " "same as y."
-            )
+            raise ValueError("If given, length of x along axis must be the same as y.")
 
     nd = len(y.shape)
     slice1 = _tupleset((slice(None),) * nd, axis, slice(1, None))
@@ -203,7 +202,7 @@ def cumulative_trapezoid(
 
 
 def _basic_simpson(
-    y: jax.Array, start: int, stop: int, x: Union[jax.Array, None], dx: float, axis: int
+    y: jax.Array, start: int, stop: int, x: jax.Array | None, dx: float, axis: int
 ) -> jax.Array:
     nd = len(y.shape)
     if start is None:
@@ -243,7 +242,7 @@ def _basic_simpson(
 
 @wrap_jit(static_argnames="axis")
 def simpson(
-    y: ArrayLike, *, x: Union[None, ArrayLike] = None, dx: float = 1.0, axis: int = -1
+    y: ArrayLike, *, x: None | ArrayLike = None, dx: float = 1.0, axis: int = -1
 ) -> jax.Array:
     """Integrate y(x) from samples using the composite Simpson's rule.
 
@@ -285,11 +284,9 @@ def simpson(
             shapex[axis] = x.shape[0]
             x = x.reshape(tuple(shapex))
         elif len(x.shape) != len(y.shape):
-            raise ValueError("If given, shape of x must be 1-D or the " "same as y.")
+            raise ValueError("If given, shape of x must be 1-D or the same as y.")
         if x.shape[axis] != N:
-            raise ValueError(
-                "If given, length of x along axis must be the " "same as y."
-            )
+            raise ValueError("If given, length of x along axis must be the same as y.")
 
     if N % 2 == 0:
         val = jnp.array(0.0)
@@ -360,10 +357,10 @@ def simpson(
 def cumulative_simpson(
     y: ArrayLike,
     *,
-    x: Union[None, ArrayLike] = None,
+    x: None | ArrayLike = None,
     dx: ArrayLike = 1.0,
     axis: int = -1,
-    initial: Union[ArrayLike, None] = None,
+    initial: ArrayLike | None = None,
 ) -> jax.Array:
     r"""Cumulatively integrate y(x) using the composite Simpson's 1/3 rule.
 
@@ -441,7 +438,9 @@ def cumulative_simpson(
         dx = jnp.diff(x, axis=-1)
         dx = eqx.error_if(dx, dx <= 0, "Input x must be strictly increasing.")
         res = _cumulatively_sum_simpson_integrals(
-            y, dx, _cumulative_simpson_unequal_intervals  # pyright: ignore
+            y,
+            dx,  # pyright: ignore
+            _cumulative_simpson_unequal_intervals,
         )
 
     else:

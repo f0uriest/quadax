@@ -8,3 +8,29 @@ build-backend = "setuptools.build_meta"
 include = ["quadax/*.py", "tests/*.py"]
 exclude = ["quadax/_version.py", "versioneer.py", "docs/conf.py", "build/*", "setup.py"
 ]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-exclude = ["docs", "build", "local", "versioneer.py", "quadax/_version.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "D", "ERA", "UP", "C901"]
+ignore = [
+  "E731",   # lambda expressions are useful
+  "E741",   # variable names like "l" are common for mode numbers
+  "D401",   # don't want to always use "imperative mood" in docstrings
+  "D105",   # don't care about docstrings in __dunder__ methods
+  "W505",   # doc line length handled elsewhere
+]
+
+[tool.ruff.lint.per-file-ignores]
+# need to import things to top level even if they aren't used there
+"quadax/__init__.py" = ["F401"]
+"tests/*" = ["D101", "D102", "D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15

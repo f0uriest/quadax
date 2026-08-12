@@ -2,7 +2,7 @@
 
 import functools
 from collections.abc import Callable
-from typing import Any, NamedTuple, Type, Union
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
@@ -10,9 +10,7 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 
 
-def errorif(
-    cond: Union[bool, jax.Array], err: Type[Exception] = ValueError, msg: str = ""
-):
+def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str = ""):
     """Raise an error if condition is met.
 
     Similar to assert but allows wider range of Error types, rather than
@@ -192,8 +190,8 @@ def tanhsinh_transform(fun, interval):
 
 # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
 tanhsinh_x = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-tanhsinh_w = (
-    lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+tanhsinh_w = lambda t: (
+    jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
 )
 
 
@@ -243,7 +241,7 @@ def _decode_status(status):
     if status == 0:
         msg = messages[0]
     else:
-        status = "{:05b}".format(status)[::-1]
+        status = f"{status:05b}"[::-1]
         msg = ""
         for s, m in zip(status, messages.values()):
             if int(s):
@@ -298,9 +296,9 @@ class QuadratureInfo(NamedTuple):
         details. Only present if ``full_output`` is True.
     """
 
-    err: Union[float, jax.Array]
-    neval: Union[int, jax.Array]
-    status: Union[int, jax.Array]
+    err: float | jax.Array
+    neval: int | jax.Array
+    status: int | jax.Array
     info: Any
 
 
@@ -328,7 +326,7 @@ def _get_eps(x: jax.Array) -> jax.Array:
     return jnp.finfo(x.dtype).eps  # pyright: ignore
 
 
-def _pnorm(x: jax.Array, p: Union[int, float, jax.Array]) -> jax.Array:
+def _pnorm(x: jax.Array, p: int | float | jax.Array) -> jax.Array:
     return jnp.linalg.norm(x.flatten(), ord=p)
 
 
