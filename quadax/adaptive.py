@@ -601,6 +601,27 @@ def _rebuild_mesh(interval, frozen):
     return lo + frac_a * width, lo + frac_b * width
 
 
+def _at_roundoff_floor(state, epmach, norm):
+    """Report whether the error has bottomed out while still above the tolerance.
+
+    The local rule floors each sub-interval's error estimate at ``50*eps*int|f|`` over
+    that sub-interval, so the total can never fall below that floor summed over the
+    partition -- and that sum stays near ``50*eps*int|f|`` over the whole domain however
+    finely the mesh is refined. Once the total has reached the floor and is still above
+    ``err_bnd``, no amount of further subdivision will reach the requested tolerance,
+    because the tolerance is below what the arithmetic can resolve.
+
+    QUADPACK makes this test only in its initial phase, before the subdivision loop, so
+    a request below the achievable precision is left to exhaust the subdivision budget
+    and report that instead. quadax makes it every iteration, which reports the actual
+    difficulty and stops early.
+    """
+    intabs = norm(jnp.sum(state["f_arr"], axis=0))
+    return (state["err_sum"] <= 100.0 * epmach * intabs) & (
+        state["err_sum"] > state["err_bnd"]
+    )
+
+
 def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter):
     """Run the globally adaptive subdivision loop."""
     intfun = partial(rule.integrate, **kwargs) if kwargs else rule.integrate
@@ -621,6 +642,9 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
     state["s_arr"] = jnp.zeros(
         (max_ninter, *shape), f.dtype
     )  # global est. of I from n intervals
+    state["f_arr"] = jnp.zeros(
+        (max_ninter, *shape), f.dtype
+    )  # local est. of integral of abs(fun) from each interval
     state["a_arr"] = state["a_arr"].at[: state["ninter"]].set(interval[:-1])
     state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
     state["roundoff1"] = 0  # for keeping track of roundoff errors
@@ -641,30 +665,24 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
     state["frac_a"] = jnp.zeros(max_ninter)
     state["frac_b"] = jnp.zeros(max_ninter).at[: state["ninter"]].set(1.0)
 
-    def init_body(i, state_):
-        state, intabs_ = state_
+    def init_body(i, state):
         a = state["a_arr"][i]
         b = state["b_arr"][i]
         result, abserr, intabs, intmmn = intfun(vfunc, a, b, ())
 
-        intabs_ += intabs
         state["neval"] += 1
-        state["area"] += result
-        state["err_sum"] += abserr
         state["r_arr"] = state["r_arr"].at[i].set(result)
         state["e_arr"] = state["e_arr"].at[i].set(abserr)
+        state["f_arr"] = state["f_arr"].at[i].set(intabs)
+        state["area"] = jnp.sum(state["r_arr"], axis=0)
+        state["err_sum"] = jnp.sum(state["e_arr"])
         state["s_arr"] = state["s_arr"].at[i].set(state["area"])
-        return state, intabs_
+        return state
 
-    state, intabs_ = jax.lax.fori_loop(
-        0, state["ninter"], init_body, (state, jnp.zeros(shape))
-    )
+    state = jax.lax.fori_loop(0, state["ninter"], init_body, state)
     state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
     # check for roundoff error - error too big but relative error is small
-    state["status"] += 2**ROUNDOFF * (
-        (state["err_sum"] <= (100.0 * epmach * _norm(intabs_)))
-        & (state["err_sum"] > state["err_bnd"])
-    )
+    state["status"] += 2**ROUNDOFF * _at_roundoff_floor(state, epmach, _norm)
 
     # check for max intervals exceeded
     state["status"] += 2**MAX_NINTER * (state["ninter"] >= max_ninter)
@@ -699,32 +717,94 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
         # improve previous approximations to integral and error and test for accuracy.
         area12 = area1 + area2
         erro12 = error1 + error2
-        state["err_sum"] += erro12 - state["e_arr"][i]
-        state["area"] += area12 - state["r_arr"][i]
-        state["r_arr"] = state["r_arr"].at[i].set(area1)
-        state["r_arr"] = state["r_arr"].at[n].set(area2)
+        # The parent's contribution and error estimate, read before either is
+        # overwritten below. These are QUADPACK's `rlist(maxerr)`/`errmax`, and the
+        # stagnation test further down compares against the *parent*, so they have to be
+        # captured here rather than read back out of the arrays.
+        area_i = state["r_arr"][i]
+        err_i = state["e_arr"][i]
+
+        # Which half keeps slot `i` and which takes the new slot `n`: as in QUADPACK the
+        # larger error goes first. Only the placement depends on this, not either total,
+        # so both arrays are written here and the branch at the end of the body is left
+        # with the endpoints and the fractions.
+        swap = error2 > error1
+
+        def place(arr, x1, x2):
+            """Write the two halves into slots `i` and `n`, ordered by `swap`."""
+            return (
+                arr.at[i]
+                .set(jnp.where(swap, x2, x1))
+                .at[n]
+                .set(jnp.where(swap, x1, x2))
+            )
+
+        state["e_arr"] = place(state["e_arr"], error1, error2)
+        state["r_arr"] = place(state["r_arr"], area1, area2)
+        state["f_arr"] = place(state["f_arr"], intabs1, intabs2)
+
+        # Both running totals are summed afresh from the per-interval contributions
+        # rather than carried forward as `total += new - old`. Accumulating discards
+        # ~eps times the largest term ever subtracted on every iteration, and that drift
+        # random-walks while the total it is tracking shrinks. For `err_sum` the two
+        # move in opposite directions and the drift can outgrow the total outright: on
+        # an integrand with a tall narrow peak it goes negative, and the loop then exits
+        # through the `0 <= err_sum` guard in `condfun` with `status` still 0, reporting
+        # a nonsense error estimate and a clean bill of health. Summing afresh keeps the
+        # error at O(eps * total)
+        state["err_sum"] = jnp.sum(state["e_arr"])
+        state["area"] = jnp.sum(state["r_arr"], axis=0)
         state["s_arr"] = state["s_arr"].at[n].set(state["area"])
         state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
+
+        # Did the local rule resolve both halves at all? The error estimate saturates at
+        # exactly the integral of |f - <f>| when the rule learned nothing about that
+        # half, in which case a stagnant area is evidence of an unresolved integrand
+        # rather than of roundoff, and QUADPACK skips both counters. Without this a hard
+        # but tractable integrand accumulates stagnation counts while it is still making
+        # legitimate progress. The equality is exact on purpose: it asks whether the
+        # `min(1, ...)` clamped, not whether two quantities are merely close. Both sides
+        # go through `_norm` because that is the reduction the error estimate itself
+        # already went through for vector valued integrands.
+        resolved = (error1 != _norm(intmmn1)) & (error2 != _norm(intmmn2))
 
         # test for roundoff error
         # is the area estimate not changing and error not getting smaller?
         state["roundoff1"] += (
-            _norm(state["r_arr"][i] - area12) <= 0.1e-4 * _norm(area12)
-        ) & (erro12 >= 0.99 * jnp.max(state["e_arr"]))
-        # are errors getting larger as we go to smaller intervals?
-        state["roundoff2"] += (state["ninter"] > 10) & (
-            erro12 > jnp.max(state["e_arr"])
+            resolved
+            & (_norm(area_i - area12) <= 0.1e-4 * _norm(area12))
+            & (erro12 >= 0.99 * err_i)
         )
-        state["status"] += 2**ROUNDOFF * (
-            (state["roundoff1"] >= 10) | (state["roundoff2"] >= 20)
+        # are errors getting larger as we go to smaller intervals?
+        state["roundoff2"] += resolved & (state["ninter"] > 10) & (erro12 > err_i)
+
+        # Whether the tolerance was reached on this iteration. QUADPACK jumps past
+        # every `ier` assignment once `errsum <= errbnd`, so an iteration that both
+        # reaches the tolerance and, say, consumes the last subdivision slot still exits
+        # cleanly. The counters above are still updated, matching the original.
+        converged = state["err_sum"] <= state["err_bnd"]
+
+        # Roundoff is reported either because the error has bottomed out at the floor
+        # the arithmetic imposes, or because the two counters say subdivision has
+        # stopped buying anything.
+        state["status"] += (
+            2**ROUNDOFF
+            * ~converged
+            * (
+                _at_roundoff_floor(state, epmach, _norm)
+                | (state["roundoff1"] >= 10)
+                | (state["roundoff2"] >= 20)
+            )
         )
 
         # test for max number of intervals
-        state["status"] += 2**MAX_NINTER * (state["ninter"] >= max_ninter)
+        state["status"] += 2**MAX_NINTER * ~converged * (state["ninter"] >= max_ninter)
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
-        state["status"] += 2**BAD_INTEGRAND * (
-            jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach)
+        state["status"] += (
+            2**BAD_INTEGRAND
+            * ~converged
+            * (jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach))
         )
 
         # update the arrays of interval starts/ends etc
@@ -737,12 +817,12 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
         frac_mid = 0.5 * (frac_a1 + frac_b2)
         state["owner"] = state["owner"].at[n].set(owner_i)
 
+        # `e_arr` and `r_arr` were placed above; what is left is to give the two halves
+        # the endpoints and fractions matching the slots they landed in.
         def error1big(state):
             state["a_arr"] = state["a_arr"].at[n].set(a2)
             state["b_arr"] = state["b_arr"].at[i].set(b1)
             state["b_arr"] = state["b_arr"].at[n].set(b2)
-            state["e_arr"] = state["e_arr"].at[i].set(error1)
-            state["e_arr"] = state["e_arr"].at[n].set(error2)
             state["frac_b"] = state["frac_b"].at[i].set(frac_mid)
             state["frac_a"] = state["frac_a"].at[n].set(frac_mid)
             state["frac_b"] = state["frac_b"].at[n].set(frac_b2)
@@ -752,16 +832,12 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
             state["a_arr"] = state["a_arr"].at[i].set(a2)
             state["a_arr"] = state["a_arr"].at[n].set(a1)
             state["b_arr"] = state["b_arr"].at[n].set(b1)
-            state["r_arr"] = state["r_arr"].at[i].set(area2)
-            state["r_arr"] = state["r_arr"].at[n].set(area1)
-            state["e_arr"] = state["e_arr"].at[i].set(error2)
-            state["e_arr"] = state["e_arr"].at[n].set(error1)
             state["frac_a"] = state["frac_a"].at[i].set(frac_mid)
             state["frac_a"] = state["frac_a"].at[n].set(frac_a1)
             state["frac_b"] = state["frac_b"].at[n].set(frac_mid)
             return state
 
-        state = jax.lax.cond(error2 > error1, error2big, error1big, state)
+        state = jax.lax.cond(swap, error2big, error1big, state)
         return state
 
     state = bounded_while_loop(condfun, bodyfun, state, max_ninter + 1)
