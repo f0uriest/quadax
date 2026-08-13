@@ -1,5 +1,2 @@
-include versioneer.py
 include quadax/_version.py
-include requirements.txt
-include requirements-dev.txt
 include LICENSE
