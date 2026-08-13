@@ -7,6 +7,7 @@ from typing import Any, NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 
@@ -303,12 +304,33 @@ class QuadratureInfo(NamedTuple):
 
 
 def bounded_while_loop(condfun, bodyfun, init_val, bound):
-    """While loop for bounded number of iterations, implemented using cond and scan."""
+    """While loop for bounded number of iterations, implemented using cond and scan.
+
+    Implemented with ``scan`` rather than ``lax.while_loop`` so that it can be reverse
+    mode differentiated.
+
+    Each iteration is gated twice. The outer gate is
+    ``unvmap_any(condfun(state))``, a scalar, so it stays a real branch under ``vmap``
+    and the loop stops doing work once *every* batch element has converged. Without it
+    the raw predicate is per-element, the branch degrades to a ``select``, and the body
+    runs for all ``bound`` iterations however few elements still need it. The inner gate
+    is the raw predicate, which unbatched is a second cheap branch and batched is the
+    per-element select that leaves already-converged elements untouched. Results are
+    unchanged either way.
+    """
     # could do some fancy stuff with checkpointing here like in equinox but the loops
     # in quadax usually only do ~100 iterations max so probably not worth it.
 
     def scanfun(state, *args):
-        return jax.lax.cond(condfun(state), bodyfun, lambda x: x, state), None
+        keep = condfun(state)
+
+        def stepfun(state):
+            # Inner branch on the raw predicate. Unbatched this is a second real branch
+            # and costs almost nothing; batched it becomes a select, which is the
+            # per-element masking that keeps already-converged elements untouched.
+            return jax.lax.cond(keep, bodyfun, lambda x: x, state)
+
+        return jax.lax.cond(unvmap_any(keep), stepfun, lambda x: x, state), None
 
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
 

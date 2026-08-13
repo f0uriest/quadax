@@ -60,6 +60,39 @@ class AbstractQuadratureRule(eqx.Module):
 
         """
 
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate ``fun(x, *args)`` from a to b, without an error estimate.
+
+        Internal: used by the adjoints where many sub-intervals are evaluated at once
+        and only the values are wanted. Users writing a custom rule do not need to
+        touch this; the default below is correct, and subclasses only override it when
+        they can compute the value more cheaply than by discarding the error estimate
+        from :meth:`integrate`.
+
+        Parameters
+        ----------
+        fun : callable
+            Function to integrate, should have a signature of the form
+            ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
+        a, b : float
+            Lower and upper limits of integration. Must be finite.
+        args : tuple, optional
+            Extra arguments passed to fun.
+
+        Returns
+        -------
+        y : float, Array
+            Estimate of the integral of fun from a to b.
+
+        """
+        return self.integrate(fun, a, b, args)[0]
+
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
         return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
@@ -136,9 +169,20 @@ class NestedRule(AbstractQuadratureRule):
             uflow = jnp.finfo(f.dtype).tiny
             eps = jnp.finfo(f.dtype).eps
             abserr = jnp.abs(result_kronrod - result_gauss)
+            # double where trick to avoid nans when ratio would be zero or inf
+            # The scaling is only defined when both quantities are nonzero. The ratio
+            # must also be substituted, not just masked afterwards: ``x ** 1.5`` has an
+            # infinite second derivative at ``x == 0``, so differentiating the
+            # unselected branch twice yields ``inf * 0 == nan``, which ``where``
+            # then propagates.
+            # ``abserr`` is exactly zero whenever the two rules agree to the last bit,
+            # which a smooth enough integrand does reach.
+            scalable = (integral_mmn != 0.0) & (abserr != 0.0)
+            mmn_safe = jnp.where(scalable, integral_mmn, 1.0)
+            ratio = jnp.where(scalable, 200.0 * abserr / mmn_safe, 1.0)
             abserr = jnp.where(
-                (integral_mmn != 0.0) & (abserr != 0.0),
-                integral_mmn * jnp.minimum(1.0, (200.0 * abserr / integral_mmn) ** 1.5),
+                scalable,
+                integral_mmn * jnp.minimum(1.0, ratio**1.5),
                 abserr,
             )
             abserr = jnp.where(
@@ -149,6 +193,25 @@ class NestedRule(AbstractQuadratureRule):
             return result, self.norm(abserr), integral_abs, integral_mmn
 
         return jax.lax.cond(a == b, truefun, falsefun)
+
+    @eqx.filter_jit
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate a function from a to b, without an error estimate.
+
+        Only the high order rule is summed, skipping the low order rule and the two
+        auxiliary sums that ``integrate`` needs for its error estimate.
+        """
+        vfun = wrap_func(fun, args)
+        halflength = (b - a) / 2
+        center = (b + a) / 2
+        f: jax.Array = vfun(center + halflength * self._xh)
+        return _dot(self._wh, f) * halflength
 
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""

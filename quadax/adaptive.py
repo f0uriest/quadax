@@ -1,26 +1,28 @@
 """Functions for globally h-adaptive quadrature."""
 
 from collections.abc import Callable
+from functools import partial
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
+from .adjoint import (
+    AbstractAdjoint,
+    DirectAdjoint,
+    QuadratureOps,
+    build_integrand,
+    closure_convert,
+)
 from .fixed_order import (
     AbstractQuadratureRule,
     ClenshawCurtisRule,
     GaussKronrodRule,
     TanhSinhRule,
 )
-from .utils import (
-    QuadratureInfo,
-    _get_eps,
-    bounded_while_loop,
-    errorif,
-    map_interval,
-    wrap_func,
-)
+from .utils import QuadratureInfo, _get_eps, bounded_while_loop, errorif
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -41,6 +43,7 @@ def quadgk(
     max_ninter: int = 50,
     order: int = 21,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -79,6 +82,14 @@ def quadgk(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -126,6 +137,7 @@ def quadgk(
         epsabs,
         epsrel,
         max_ninter,
+        adjoint=adjoint,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -142,6 +154,7 @@ def quadcc(
     max_ninter: int = 50,
     order: int = 32,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -179,6 +192,14 @@ def quadcc(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -226,6 +247,7 @@ def quadcc(
         epsabs,
         epsrel,
         max_ninter,
+        adjoint=adjoint,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -242,6 +264,7 @@ def quadts(
     max_ninter: int = 50,
     order: int = 61,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -278,6 +301,14 @@ def quadts(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -325,6 +356,7 @@ def quadts(
         epsabs,
         epsrel,
         max_ninter,
+        adjoint=adjoint,
     )
     info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
     return y, info
@@ -340,6 +372,7 @@ def adaptive_quadrature(
     epsabs: ArrayLike | None = None,
     epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -371,6 +404,14 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -409,9 +450,11 @@ def adaptive_quadrature(
         "rule should be an instance of quadax.AbstractQuadratureRule, "
         f"got {type(rule)}",
     )
-    intfun = rule.integrate
-    _norm = rule.norm
     interval = jnp.atleast_1d(jnp.asarray(interval))
+    if not jnp.issubdtype(interval.dtype, jnp.inexact):
+        # integration limits must be inexact: they are differentiated with respect to,
+        # and integer leaves would otherwise be treated as static metadata
+        interval = interval.astype(jnp.result_type(float))
     errorif(
         max_ninter < len(interval) - 1,
         ValueError,
@@ -421,8 +464,147 @@ def adaptive_quadrature(
         epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
     if epsrel is None:
         epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
-    fun, interval = map_interval(fun, interval)
-    vfunc = wrap_func(fun, args)
+    epsabs = jnp.asarray(epsabs)
+    epsrel = jnp.asarray(epsrel)
+
+    f_conv, consts = closure_convert(fun, args)
+
+    ops = QuadratureOps(
+        build=partial(build_integrand, f_conv=f_conv),
+        solve=partial(_adaptive_solve, max_ninter=max_ninter),
+        rebuild=_rebuild_mesh,
+        on_mesh=_quad_on_mesh,
+        frozen=_frozen_mesh,
+        frozen_solve=_mesh_solve,
+    )
+    y, state = adjoint.quadrature(
+        ops, rule, interval, args, consts, epsabs, epsrel, kwargs
+    )
+
+    err = state["err_sum"]
+    neval = state["neval"]
+    status = state["status"]
+    info = state if full_output else None
+    out = QuadratureInfo(err, neval, status, info)
+    return y, out
+
+
+# How many sub-intervals of a fixed subdivision are evaluated at once. Evaluating all of
+# them together is fastest but makes peak memory scale with ``max_ninter``, which is a
+# safety bound users tend to set generously; evaluating one at a time streams but
+# serializes. Measured on a scalar integrand with an order 21 rule, 8 is where the curve
+# turns over: it matches one-at-a-time peak memory at large ``max_ninter`` while being
+# noticeably faster in reverse mode, and larger blocks buy little more speed for a lot
+# more memory.
+_CHUNK = 8
+
+
+def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
+    """Apply the local rule on a fixed subdivision and sum the contributions."""
+    # Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
+    # block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make
+    # a gradient cost ``max_ninter`` rather than the number of sub-intervals actually
+    # used, because reverse mode stacks residuals for every iteration whether or not it
+    # did any work. A plain ``vmap`` fixes that but materializes the whole subdivision
+    # at once.
+
+    # Slots past the end of the subdivision are empty (``a == b``). A block with no used
+    # slot in it is skipped entirely with a ``cond``, which is what keeps the cost of a
+    # derivative tracking the sub-intervals the solve actually used rather than
+    # ``max_ninter``; the solve fills slots from the front, so the used blocks are the
+    # leading ones. The predicate is reduced with ``unvmap_any`` so that it stays a
+    # scalar under ``vmap`` and the skip survives batching, at the cost of a block being
+    # evaluated for every batch element as soon as one of them needs it.
+
+    # Within a block the empty slots are still handed a real sub-interval and masked out
+    # afterwards rather than skipped: a per-slot ``cond`` sits inside the ``vmap``,
+    # where a batched ``cond`` becomes a ``select`` carrying a ``stop_gradient`` that
+    # cannot be transposed. Substituting a real sub-interval also stops an integrand
+    # that is singular somewhere in the mapped domain from poisoning the unused slots
+    # with a NaN that the mask would then propagate. So the granularity of the skip is
+    # ``_CHUNK``.
+
+    del kwargs
+    used = a_arr != b_arr
+    a_safe = jnp.where(used, a_arr, a_arr[0])
+    b_safe = jnp.where(used, b_arr, b_arr[0])
+
+    nslot = a_arr.shape[0]
+    chunk = min(_CHUNK, nslot)
+    pad = -nslot % chunk
+    reshape = lambda x, fill: jnp.pad(x, (0, pad), constant_values=fill).reshape(
+        -1, chunk
+    )
+    a_c, b_c = reshape(a_safe, a_arr[0]), reshape(b_safe, b_arr[0])
+    used_c = reshape(used.astype(a_arr.dtype), 0.0)
+
+    apply1 = lambda a, b: rule._apply(vfunc, a, b, ())
+    sds = jax.eval_shape(apply1, a_arr[0], b_arr[0])
+
+    def bodyfun(total, block):
+        a, b, m = block
+
+        def evaluate(_):
+            y = jax.vmap(apply1)(a, b)
+            y = y * m.reshape((-1,) + (1,) * (y.ndim - 1))
+            return jnp.sum(y, axis=0)
+
+        # `unvmap_any` keeps the predicate a scalar under `vmap`, so the block is
+        # skipped whenever *no* batch element uses it instead of degrading to a select
+        # that evaluates every block. No inner per-element gate is needed: `m` already
+        # zeroes the slots an individual element does not use.
+        contrib = jax.lax.cond(
+            unvmap_any(jnp.any(m != 0)),
+            evaluate,
+            lambda _: jnp.zeros(sds.shape, sds.dtype),
+            None,
+        )
+        return total + contrib, None
+
+    if checkpoint:
+        # Recompute each block during the backward pass instead of keeping the
+        # integrand's value at every node of every sub-interval. Those values dominate
+        # reverse mode otherwise, and recomputing them is nearly free here.
+        bodyfun = jax.checkpoint(bodyfun)
+
+    total, _ = jax.lax.scan(
+        bodyfun, jnp.zeros(sds.shape, sds.dtype), (a_c, b_c, used_c)
+    )
+    return total
+
+
+def _frozen_mesh(state):
+    """The parts of the subdivision that do not vary smoothly with the limits."""
+    return (state["owner"], state["frac_a"], state["frac_b"])
+
+
+def _mesh_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
+    """Quadrature on the subdivision implied by `frozen`, as a function of interval."""
+    a_arr, b_arr = _rebuild_mesh(interval, frozen)
+    return _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, checkpoint=checkpoint)
+
+
+def _rebuild_mesh(interval, frozen):
+    """Rebuild the subdivision from `interval`, as a function of the integration limits.
+
+    Bisection never crosses a breakpoint, so every sub-interval stays inside whichever
+    of the original sub-intervals it was carved out of, at a fixed dyadic fraction of
+    the way along it. The primal loop records that owner and those fractions, which are
+    exactly the parts that do not vary smoothly. Rebuilding the mesh is then a gather
+    and a rescale, no loop, and no dependence on how many bisections were performed,
+    while still letting the mesh move when a limit or a breakpoint moves.
+    """
+    owner, frac_a, frac_b = frozen
+    lo = interval[owner]
+    hi = interval[owner + 1]
+    width = hi - lo
+    return lo + frac_a * width, lo + frac_b * width
+
+
+def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter):
+    """Run the globally adaptive subdivision loop."""
+    intfun = partial(rule.integrate, **kwargs) if kwargs else rule.integrate
+    _norm = rule.norm
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)
     epmach = _get_eps(f)
     shape = f.shape
@@ -447,12 +629,23 @@ def adaptive_quadrature(
     state["err_bnd"] = 0.0  # error bound we're trying to reach
     state["area"] = jnp.zeros(shape, f.dtype)  # current best estimate for I
     state["err_sum"] = 0.0  # current estimate for error in I
+    # Where each sub-interval sits relative to the *original* sub-intervals: which one
+    # it was carved out of, and the fractions of the way along it that its ends lie at.
+    # These are what stay fixed when a limit or breakpoint moves, so recording them lets
+    # the mesh be rebuilt as a smooth function of `interval` by gather and rescale.
+    state["owner"] = (
+        jnp.zeros(max_ninter, int)
+        .at[: state["ninter"]]
+        .set(jnp.arange(state["ninter"]))
+    )
+    state["frac_a"] = jnp.zeros(max_ninter)
+    state["frac_b"] = jnp.zeros(max_ninter).at[: state["ninter"]].set(1.0)
 
     def init_body(i, state_):
         state, intabs_ = state_
         a = state["a_arr"][i]
         b = state["b_arr"][i]
-        result, abserr, intabs, intmmn = intfun(vfunc, a, b, (), **kwargs)
+        result, abserr, intabs, intmmn = intfun(vfunc, a, b, ())
 
         intabs_ += intabs
         state["neval"] += 1
@@ -484,24 +677,26 @@ def adaptive_quadrature(
         )
 
     def bodyfun(state):
-        state["ninter"] += 1
-
         # bisect the sub-interval with the largest error estimate.
         i = jnp.argmax(state["e_arr"])
+        # The bisection turns one sub-interval into two, so the extra half goes in the
+        # first free slot, which is the *current* interval count, before incrementing
+        # it. Taking the count after the increment instead would skip a slot and, on the
+        # final iteration, index off the end of the arrays, silently dropping that half
+        # of the interval from the result.
         n = state["ninter"]
+        state["ninter"] += 1
         a1 = state["a_arr"][i]
         b1 = 0.5 * (state["a_arr"][i] + state["b_arr"][i])
         a2 = b1
         b2 = state["b_arr"][i]
 
-        area1, error1, intabs1, intmmn1 = intfun(vfunc, a1, b1, (), **kwargs)
+        area1, error1, intabs1, intmmn1 = intfun(vfunc, a1, b1, ())
         state["neval"] += 1
-        area2, error2, intabs2, intmmn2 = intfun(vfunc, a2, b2, (), **kwargs)
+        area2, error2, intabs2, intmmn2 = intfun(vfunc, a2, b2, ())
         state["neval"] += 1
 
-        # ! improve previous approximations to integral
-        # ! and error and test for accuracy.
-
+        # improve previous approximations to integral and error and test for accuracy.
         area12 = area1 + area2
         erro12 = error1 + error2
         state["err_sum"] += erro12 - state["e_arr"][i]
@@ -517,7 +712,9 @@ def adaptive_quadrature(
             _norm(state["r_arr"][i] - area12) <= 0.1e-4 * _norm(area12)
         ) & (erro12 >= 0.99 * jnp.max(state["e_arr"]))
         # are errors getting larger as we go to smaller intervals?
-        state["roundoff2"] += (n > 10) & (erro12 > jnp.max(state["e_arr"]))
+        state["roundoff2"] += (state["ninter"] > 10) & (
+            erro12 > jnp.max(state["e_arr"])
+        )
         state["status"] += 2**ROUNDOFF * (
             (state["roundoff1"] >= 10) | (state["roundoff2"] >= 20)
         )
@@ -532,12 +729,23 @@ def adaptive_quadrature(
 
         # update the arrays of interval starts/ends etc
 
+        # both halves stay inside whichever original sub-interval this one came from,
+        # splitting its span at the midpoint of the fractions
+        owner_i = state["owner"][i]
+        frac_a1 = state["frac_a"][i]
+        frac_b2 = state["frac_b"][i]
+        frac_mid = 0.5 * (frac_a1 + frac_b2)
+        state["owner"] = state["owner"].at[n].set(owner_i)
+
         def error1big(state):
             state["a_arr"] = state["a_arr"].at[n].set(a2)
             state["b_arr"] = state["b_arr"].at[i].set(b1)
             state["b_arr"] = state["b_arr"].at[n].set(b2)
             state["e_arr"] = state["e_arr"].at[i].set(error1)
             state["e_arr"] = state["e_arr"].at[n].set(error2)
+            state["frac_b"] = state["frac_b"].at[i].set(frac_mid)
+            state["frac_a"] = state["frac_a"].at[n].set(frac_mid)
+            state["frac_b"] = state["frac_b"].at[n].set(frac_b2)
             return state
 
         def error2big(state):
@@ -548,6 +756,9 @@ def adaptive_quadrature(
             state["r_arr"] = state["r_arr"].at[n].set(area1)
             state["e_arr"] = state["e_arr"].at[i].set(error2)
             state["e_arr"] = state["e_arr"].at[n].set(error1)
+            state["frac_a"] = state["frac_a"].at[i].set(frac_mid)
+            state["frac_a"] = state["frac_a"].at[n].set(frac_a1)
+            state["frac_b"] = state["frac_b"].at[n].set(frac_mid)
             return state
 
         state = jax.lax.cond(error2 > error1, error2big, error1big, state)
@@ -556,9 +767,4 @@ def adaptive_quadrature(
     state = bounded_while_loop(condfun, bodyfun, state, max_ninter + 1)
 
     y = jnp.sum(state["r_arr"], axis=0)
-    err = state["err_sum"]
-    neval = state["neval"]
-    status = state["status"]
-    info = state if full_output else None
-    out = QuadratureInfo(err, neval, status, info)
-    return y, out
+    return y, state

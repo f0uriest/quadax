@@ -747,3 +747,41 @@ def test_escaped_tracers():
 
     with jax.checking_leaks():
         jax.block_until_ready(integral_rombergts([0.0, 1.0]))
+
+
+@pytest.mark.parametrize("quad", [quadgk, quadcc, quadts])
+@pytest.mark.parametrize("max_ninter", [8, 12, 20, 33])
+def test_subdivision_tiles_the_domain(quad, max_ninter):
+    """The sub-intervals must tile the whole domain, even when max_ninter is hit.
+
+    Regression test: the new half of a bisection used to be written at the interval
+    count *after* incrementing it, which skipped a slot and, on the last iteration,
+    scattered out of bounds. That silently dropped one sub-interval from the mesh, so
+    part of the domain was never integrated and ``ninter`` over-reported by one.
+    """
+    # needs far more subdivisions than allowed, so max_ninter is always reached
+    fun = lambda t: 1.0 / jnp.sqrt(jnp.abs(t - 0.3) + 1e-9)
+    y, info = quad(fun, [0.0, 1.0], (), True, max_ninter=max_ninter)
+
+    a_arr, b_arr = info.info["a_arr"], info.info["b_arr"]
+    ninter = int(info.info["ninter"])
+    # the mapped reference domain is [-1, 1], so the widths must sum to exactly 2
+    np.testing.assert_allclose(float(jnp.sum(b_arr - a_arr)), 2.0, rtol=0, atol=1e-14)
+    # and every counted interval must actually be present
+    assert int(jnp.sum(jnp.asarray(info.info["r_arr"]) != 0)) == ninter
+    assert ninter <= max_ninter
+
+
+@pytest.mark.parametrize("quad", [quadgk, quadcc, quadts])
+def test_truncated_result_is_still_a_partition(quad):
+    """Sub-intervals must be disjoint and contiguous when max_ninter is reached."""
+    fun = lambda t: 1.0 / jnp.sqrt(jnp.abs(t - 0.3) + 1e-9)
+    _, info = quad(fun, [0.0, 1.0], (), True, max_ninter=16)
+    n = int(info.info["ninter"])
+    a = np.asarray(info.info["a_arr"])[:n]
+    b = np.asarray(info.info["b_arr"])[:n]
+    order = np.argsort(a)
+    a, b = a[order], b[order]
+    np.testing.assert_allclose(a[0], -1.0, atol=1e-14)
+    np.testing.assert_allclose(b[-1], 1.0, atol=1e-14)
+    np.testing.assert_allclose(a[1:], b[:-1], atol=1e-14)
