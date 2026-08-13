@@ -8,7 +8,8 @@ quadax
 
 quadax is a library for numerical quadrature and integration using JAX.
 
-- ``vmap``-able, ``jit``-able, differentiable.
+- ``vmap``-able, ``jit``-able, differentiable in both forward and reverse mode.
+- Pluggable ``adjoint`` methods controlling how derivatives are computed.
 - Scalar or vector valued integrands.
 - Finite or infinite domains with discontinuities or singularities within the domain of integration.
 - Globally adaptive Gauss-Kronrod and Clenshaw-Curtis quadrature for smooth integrands (similar to ``scipy.integrate.quad``)
@@ -17,7 +18,6 @@ quadax is a library for numerical quadrature and integration using JAX.
 
 Coming soon:
 
-- Custom JVP/VJP rules (currently AD works by differentiating the loop which isn't the most efficient.)
 - N-D quadrature (cubature)
 - QMC methods
 - Integration with weight functions

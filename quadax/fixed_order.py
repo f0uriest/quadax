@@ -1,10 +1,8 @@
 """Fixed order quadrature."""
 
 import abc
-import functools
-import warnings
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -62,6 +60,39 @@ class AbstractQuadratureRule(eqx.Module):
 
         """
 
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate ``fun(x, *args)`` from a to b, without an error estimate.
+
+        Internal: used by the adjoints where many sub-intervals are evaluated at once
+        and only the values are wanted. Users writing a custom rule do not need to
+        touch this; the default below is correct, and subclasses only override it when
+        they can compute the value more cheaply than by discarding the error estimate
+        from :meth:`integrate`.
+
+        Parameters
+        ----------
+        fun : callable
+            Function to integrate, should have a signature of the form
+            ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
+        a, b : float
+            Lower and upper limits of integration. Must be finite.
+        args : tuple, optional
+            Extra arguments passed to fun.
+
+        Returns
+        -------
+        y : float, Array
+            Estimate of the integral of fun from a to b.
+
+        """
+        return self.integrate(fun, a, b, args)[0]
+
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
         return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
@@ -78,7 +109,7 @@ class NestedRule(AbstractQuadratureRule):
     _xh: jax.Array
     _wh: jax.Array
     _wl: jax.Array
-    _norm: Union[float, int, Callable]
+    _norm: float | int | Callable
 
     @eqx.filter_jit
     def integrate(
@@ -138,9 +169,20 @@ class NestedRule(AbstractQuadratureRule):
             uflow = jnp.finfo(f.dtype).tiny
             eps = jnp.finfo(f.dtype).eps
             abserr = jnp.abs(result_kronrod - result_gauss)
+            # double where trick to avoid nans when ratio would be zero or inf
+            # The scaling is only defined when both quantities are nonzero. The ratio
+            # must also be substituted, not just masked afterwards: ``x ** 1.5`` has an
+            # infinite second derivative at ``x == 0``, so differentiating the
+            # unselected branch twice yields ``inf * 0 == nan``, which ``where``
+            # then propagates.
+            # ``abserr`` is exactly zero whenever the two rules agree to the last bit,
+            # which a smooth enough integrand does reach.
+            scalable = (integral_mmn != 0.0) & (abserr != 0.0)
+            mmn_safe = jnp.where(scalable, integral_mmn, 1.0)
+            ratio = jnp.where(scalable, 200.0 * abserr / mmn_safe, 1.0)
             abserr = jnp.where(
-                (integral_mmn != 0.0) & (abserr != 0.0),
-                integral_mmn * jnp.minimum(1.0, (200.0 * abserr / integral_mmn) ** 1.5),
+                scalable,
+                integral_mmn * jnp.minimum(1.0, ratio**1.5),
                 abserr,
             )
             abserr = jnp.where(
@@ -151,6 +193,25 @@ class NestedRule(AbstractQuadratureRule):
             return result, self.norm(abserr), integral_abs, integral_mmn
 
         return jax.lax.cond(a == b, truefun, falsefun)
+
+    @eqx.filter_jit
+    def _apply(
+        self,
+        fun: Callable[..., jax.Array],
+        a: float,
+        b: float,
+        args: tuple[Any, ...],
+    ) -> jax.Array:
+        """Integrate a function from a to b, without an error estimate.
+
+        Only the high order rule is summed, skipping the low order rule and the two
+        auxiliary sums that ``integrate`` needs for its error estimate.
+        """
+        vfun = wrap_func(fun, args)
+        halflength = (b - a) / 2
+        center = (b + a) / 2
+        f: jax.Array = vfun(center + halflength * self._xh)
+        return _dot(self._wh, f) * halflength
 
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
@@ -175,7 +236,7 @@ class GaussKronrodRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 21, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 21, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         try:
@@ -206,7 +267,7 @@ class ClenshawCurtisRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 32, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         def _cc_get_weights(N):
@@ -249,12 +310,12 @@ class TanhSinhRule(NestedRule):
         should be callable.
     """
 
-    def __init__(self, order: int = 61, norm: Union[Callable, float, int] = jnp.inf):
+    def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):
         self._norm = norm
 
         _xts = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-        _wts = (
-            lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+        _wts = lambda t: (
+            jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
         )
 
         def _get_tmax(xmax):
@@ -281,135 +342,3 @@ class TanhSinhRule(NestedRule):
         self._xh = xh
         self._wh = wh
         self._wl = wl
-
-
-@functools.partial(jax.jit, static_argnums=(0, 4, 5))
-def fixed_quadgk(fun, a, b, args=(), norm=jnp.inf, n=21):
-    """Integrate a function from a to b using a fixed order Gauss-Kronrod rule.
-
-    Integration is performed using an order n Kronrod rule with error estimated
-    using an embedded n//2 order Gauss rule.
-
-    Parameters
-    ----------
-    fun : callable
-        Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Must be finite.
-    args : tuple, optional
-        Extra arguments passed to fun.
-    norm : int, callable
-        Norm to use for measuring error for vector valued integrands. No effect if the
-        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
-        should be callable.
-    n : {15, 21, 31, 41, 51, 61}
-        Order of integration scheme.
-
-    Returns
-    -------
-    y : float, Array
-        Estimate of the integral of fun from a to b
-    err : float
-        Estimate of the absolute error in y from nested Gauss rule.
-    y_abs : float, Array
-        Estimate of the integral of abs(fun) from a to b
-    y_mmn : float, Array
-        Estimate of the integral of abs(fun - <fun>) from a to b, where <fun>
-        is the mean value of fun over the interval.
-
-    """
-    warnings.warn(
-        "fixed_quadgk is deprecated and will be removed in a future release. "
-        "Please use ``quadax.GaussKronrodRule(n, norm).integrate(fun, a, b, args)``",
-        FutureWarning,
-    )
-    return GaussKronrodRule(n, norm).integrate(fun, a, b, args)
-
-
-@functools.partial(jax.jit, static_argnums=(0, 4, 5))
-def fixed_quadcc(fun, a, b, args=(), norm=jnp.inf, n=32):
-    """Integrate a function from a to b using a fixed order Clenshaw-Curtis rule.
-
-    Integration is performed using an order n rule with error estimated
-    using an embedded n//2 order rule.
-
-    Parameters
-    ----------
-    fun : callable
-        Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Must be finite.
-    args : tuple, optional
-        Extra arguments passed to fun.
-    norm : int, callable
-        Norm to use for measuring error for vector valued integrands. No effect if the
-        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
-        should be callable.
-    n : {8, 16, 32, 64, 128, 256}
-        Order of integration scheme.
-
-    Returns
-    -------
-    y : float, Array
-        Estimate of the integral of fun from a to b
-    err : float
-        Estimate of the absolute error in y from nested rule.
-    y_abs : float, Array
-        Estimate of the integral of abs(fun) from a to b
-    y_mmn : float, Array
-        Estimate of the integral of abs(fun - <fun>) from a to b, where <fun>
-        is the mean value of fun over the interval.
-
-    """
-    warnings.warn(
-        "fixed_quadcc is deprecated and will be removed in a future release. "
-        "Please use ``quadax.ClenshawCurtisRule(n, norm).integrate(fun, a, b, args)``",
-        FutureWarning,
-    )
-    return ClenshawCurtisRule(n, norm).integrate(fun, a, b, args)
-
-
-@functools.partial(jax.jit, static_argnums=(0, 4, 5))
-def fixed_quadts(fun, a, b, args=(), norm=jnp.inf, n=61):
-    """Integrate a function from a to b using a fixed order tanh-sinh rule.
-
-    Integration is performed using an order n rule with error estimated
-    using an embedded n//2 order rule.
-
-    Parameters
-    ----------
-    fun : callable
-        Function to integrate, should have a signature of the form
-        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
-    a, b : float
-        Lower and upper limits of integration. Must be finite.
-    args : tuple, optional
-        Extra arguments passed to fun.
-    norm : int, callable
-        Norm to use for measuring error for vector valued integrands. No effect if the
-        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
-        should be callable.
-    n : {41, 61, 81, 101}
-        Order of integration scheme.
-
-    Returns
-    -------
-    y : float, Array
-        Estimate of the integral of fun from a to b
-    err : float
-        Estimate of the absolute error in y from nested rule.
-    y_abs : float, Array
-        Estimate of the integral of abs(fun) from a to b
-    y_mmn : float, Array
-        Estimate of the integral of abs(fun - <fun>) from a to b, where <fun>
-        is the mean value of fun over the interval.
-
-    """
-    warnings.warn(
-        "fixed_quadts is deprecated and will be removed in a future release. "
-        "Please use ``quadax.TanhSinhRule(n, norm).integrate(fun, a, b, args)``",
-        FutureWarning,
-    )
-    return TanhSinhRule(n, norm).integrate(fun, a, b, args)

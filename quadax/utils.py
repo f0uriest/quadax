@@ -2,17 +2,16 @@
 
 import functools
 from collections.abc import Callable
-from typing import Any, NamedTuple, Type, Union
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 
-def errorif(
-    cond: Union[bool, jax.Array], err: Type[Exception] = ValueError, msg: str = ""
-):
+def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str = ""):
     """Raise an error if condition is met.
 
     Similar to assert but allows wider range of Error types, rather than
@@ -192,8 +191,8 @@ def tanhsinh_transform(fun, interval):
 
 # map [-1, 1] to [-inf, inf], but with mass concentrated near 0
 tanhsinh_x = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-tanhsinh_w = (
-    lambda t: jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+tanhsinh_w = lambda t: (
+    jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
 )
 
 
@@ -243,7 +242,7 @@ def _decode_status(status):
     if status == 0:
         msg = messages[0]
     else:
-        status = "{:05b}".format(status)[::-1]
+        status = f"{status:05b}"[::-1]
         msg = ""
         for s, m in zip(status, messages.values()):
             if int(s):
@@ -298,37 +297,49 @@ class QuadratureInfo(NamedTuple):
         details. Only present if ``full_output`` is True.
     """
 
-    err: Union[float, jax.Array]
-    neval: Union[int, jax.Array]
-    status: Union[int, jax.Array]
+    err: float | jax.Array
+    neval: int | jax.Array
+    status: int | jax.Array
     info: Any
 
 
 def bounded_while_loop(condfun, bodyfun, init_val, bound):
-    """While loop for bounded number of iterations, implemented using cond and scan."""
+    """While loop for bounded number of iterations, implemented using cond and scan.
+
+    Implemented with ``scan`` rather than ``lax.while_loop`` so that it can be reverse
+    mode differentiated.
+
+    Each iteration is gated twice. The outer gate is
+    ``unvmap_any(condfun(state))``, a scalar, so it stays a real branch under ``vmap``
+    and the loop stops doing work once *every* batch element has converged. Without it
+    the raw predicate is per-element, the branch degrades to a ``select``, and the body
+    runs for all ``bound`` iterations however few elements still need it. The inner gate
+    is the raw predicate, which unbatched is a second cheap branch and batched is the
+    per-element select that leaves already-converged elements untouched. Results are
+    unchanged either way.
+    """
     # could do some fancy stuff with checkpointing here like in equinox but the loops
     # in quadax usually only do ~100 iterations max so probably not worth it.
 
     def scanfun(state, *args):
-        return jax.lax.cond(condfun(state), bodyfun, lambda x: x, state), None
+        keep = condfun(state)
+
+        def stepfun(state):
+            # Inner branch on the raw predicate. Unbatched this is a second real branch
+            # and costs almost nothing; batched it becomes a select, which is the
+            # per-element masking that keeps already-converged elements untouched.
+            return jax.lax.cond(keep, bodyfun, lambda x: x, state)
+
+        return jax.lax.cond(unvmap_any(keep), stepfun, lambda x: x, state), None
 
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
-
-
-def setdefault(val, default, cond=None) -> Any:
-    """Return val if condition is met, otherwise default.
-
-    If cond is None, then it checks if val is not None, returning val
-    or default accordingly.
-    """
-    return val if cond or (cond is None and val is not None) else default
 
 
 def _get_eps(x: jax.Array) -> jax.Array:
     return jnp.finfo(x.dtype).eps  # pyright: ignore
 
 
-def _pnorm(x: jax.Array, p: Union[int, float, jax.Array]) -> jax.Array:
+def _pnorm(x: jax.Array, p: int | float | jax.Array) -> jax.Array:
     return jnp.linalg.norm(x.flatten(), ord=p)
 
 
