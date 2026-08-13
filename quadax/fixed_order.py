@@ -8,8 +8,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .quad_weights import gk_weights
-from .utils import wrap_func
+from .quad_weights import get_cc_table, get_tanhsinh_table, gk_weights
+from .utils import _real_dtype, tanhsinh_tmax, wrap_func
 
 
 def _dot(w, f):
@@ -128,6 +128,20 @@ class NestedRule(AbstractQuadratureRule):
     _wl: jax.Array
     _norm: float | int | Callable
 
+    def _nodes_weights(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Nodes and weights of the rule for use at abscissa dtype ``xtype``.
+
+        The tables are stored at the highest precision available and cast at the point
+        of use, so a float64 user loses nothing and a float32 user gets a table rounded
+        once from float64 rather than one computed in float32. Only the nodes are cast
+        here; the weights are cast to the accumulation dtype by the caller, which cannot
+        know it until the integrand has been evaluated.
+
+        Subclasses whose *table itself* depends on the precision rather than merely
+        being rounded to it should override this. See ``TanhSinhRule``.
+        """
+        return self._xh.astype(xtype), self._wh, self._wl
+
     @eqx.filter_jit
     def integrate(
         self,
@@ -161,20 +175,25 @@ class NestedRule(AbstractQuadratureRule):
             is the mean value of fun over the interval.
 
         """
-        vfun = wrap_func(fun, args)
-
-        def truefun():
-            f = jax.eval_shape(vfun, jnp.array(0.0))
-            z = jnp.zeros(f.shape, f.dtype)
-            return z, self.norm(z), jnp.abs(z), jnp.abs(z)
+        # The dtype of the limits is the statement of what precision was asked for: the
+        # abscissae, and so the `x` the user's integrand sees, follow it.
+        xtype = jnp.result_type(a, b)
+        vfun = wrap_func(fun, args, xtype)
+        xh, wh_table, wl_table = self._nodes_weights(xtype)
 
         def falsefun():
 
             halflength = (b - a) / 2
             center = (b + a) / 2
-            f: jax.Array = vfun(center + halflength * self._xh)
-            result_kronrod = _dot(self._wh, f) * halflength
-            result_gauss = _dot(self._wl, f) * halflength
+            f: jax.Array = vfun(center + halflength * xh)
+            # An integrand that upcasts internally is respected, so the accumulation
+            # follows both the limits and the integrand. The weights are cast to the
+            # *real* counterpart, which lets a complex integrand promote on its own.
+            etype = _real_dtype(jnp.result_type(xtype, f.dtype))
+            wh = wh_table.astype(etype)
+            wl = wl_table.astype(etype)
+            result_kronrod = _dot(wh, f) * halflength
+            result_gauss = _dot(wl, f) * halflength
 
             # Both of these are sums over the reference interval [-1, 1] and so, like
             # the two results above, need the Jacobian of the map onto [a, b] to be an
@@ -183,17 +202,19 @@ class NestedRule(AbstractQuadratureRule):
             # ``integral_mmn``, so the two have to be on the same scale for the
             # ``200 ... **1.5`` interpolation to mean what it was tuned to mean.
             dhalflength = jnp.abs(halflength)
-            integral_abs = (
-                _dot(self._wh, jnp.abs(f)) * dhalflength
-            )  # ~integral of abs(fun)
+            integral_abs = _dot(wh, jnp.abs(f)) * dhalflength  # ~integral of abs(fun)
             integral_mmn = (
-                _dot(self._wh, jnp.abs(f - result_kronrod / (b - a))) * dhalflength
+                _dot(wh, jnp.abs(f - result_kronrod / (b - a))) * dhalflength
             )  # ~ integral of abs(fun - mean(fun))
 
             result = result_kronrod
 
-            uflow = jnp.finfo(f.dtype).tiny
-            eps = jnp.finfo(f.dtype).eps
+            # Compile time constants, taken as python floats rather than as arrays of
+            # the working dtype: `uflow / (50 * eps)` evaluated *in* half precision is a
+            # needless underflow risk, and as a weakly typed python float the threshold
+            # promotes to whatever it is compared against anyway.
+            uflow = float(jnp.finfo(etype).tiny)
+            eps = float(jnp.finfo(etype).eps)
 
             # The difference between the two rules is dominated by the error of the
             # *low* order one, so it says little about the error of ``result``, which
@@ -234,10 +255,17 @@ class NestedRule(AbstractQuadratureRule):
             # which a smooth enough integrand does reach.
             scalable = (integral_mmn != 0.0) & (abserr != 0.0)
             mmn_safe = jnp.where(scalable, integral_mmn, 1.0)
-            ratio = jnp.where(scalable, 200.0 * abserr / mmn_safe, 1.0)
+            ratio = jnp.where(scalable, abserr / mmn_safe, 1.0)
+
+            # The saturation is applied inside the power rather than outside it:
+            # forming ``200 * ratio`` first overflows in half precision for any
+            # ``ratio > 328``, and the result is then discarded by the outer ``min``
+            # regardless. The inner clamp is the identity whenever the outer one is, so
+            # this is bit for bit ``min(1, (200*ratio)**1.5)`` wherever that expression
+            # does not overflow.
             abserr = jnp.where(
                 scalable,
-                integral_mmn * jnp.minimum(1.0, ratio**1.5),
+                integral_mmn * jnp.minimum(200.0 * jnp.minimum(ratio, 1.0), 1.0) ** 1.5,
                 abserr,
             )
 
@@ -256,6 +284,11 @@ class NestedRule(AbstractQuadratureRule):
             )
             return result, self.norm(abserr), integral_abs, integral_mmn
 
+        def truefun():
+            # Zeros shaped and typed exactly like what the other branch produces.
+            out = jax.eval_shape(falsefun)
+            return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), out)
+
         return jax.lax.cond(a == b, truefun, falsefun)
 
     @eqx.filter_jit
@@ -271,11 +304,14 @@ class NestedRule(AbstractQuadratureRule):
         Only the high order rule is summed, skipping the low order rule and the two
         auxiliary sums that ``integrate`` needs for its error estimate.
         """
-        vfun = wrap_func(fun, args)
+        xtype = jnp.result_type(a, b)
+        vfun = wrap_func(fun, args, xtype)
+        xh, wh_table, _ = self._nodes_weights(xtype)
         halflength = (b - a) / 2
         center = (b + a) / 2
-        f: jax.Array = vfun(center + halflength * self._xh)
-        return _dot(self._wh, f) * halflength
+        f: jax.Array = vfun(center + halflength * xh)
+        etype = _real_dtype(jnp.result_type(xtype, f.dtype))
+        return _dot(wh_table.astype(etype), f) * halflength
 
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
@@ -340,29 +376,9 @@ class ClenshawCurtisRule(NestedRule):
 
     def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
         self._norm = norm
-
-        def _cc_get_weights(N):
-            d = 2 / (1 - (jnp.arange(0, N + 1, 2)) ** 2)
-            d = d.at[0].multiply(1 / 2)
-            d = d.at[-1].multiply(1 / 2)
-            k = jnp.arange(N // 2 + 1)
-            n = jnp.arange(N // 2 + 1)
-            D = 2 / N * jnp.cos(k[:, None] * n[None, :] * jnp.pi / (N // 2))
-            D = jnp.where((n == 0) | (n == N // 2), D * 1 / 2, D)
-            w = D.T @ d  # can be done faster with fft
-            t = jnp.arange(0, 1 + N // 2) * jnp.pi / N
-            x = jnp.cos(t)
-            w = w.at[-1].multiply(2)
-            return x, w
-
         order = 2 * (order // 2)  # make sure its even
-        xh, wh = _cc_get_weights(order)
-        wl = _cc_get_weights(order // 2)[1]
-        wl = jnp.zeros_like(wh).at[::2].set(wl)
-
-        self._xh = jnp.concatenate([xh, -xh[:-1][::-1]])
-        self._wh = jnp.concatenate([wh, wh[:-1][::-1]])
-        self._wl = jnp.concatenate([wl, wl[:-1][::-1]])
+        xh, wh, wl = get_cc_table(order)
+        self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
 
 
 class TanhSinhRule(NestedRule):
@@ -388,35 +404,27 @@ class TanhSinhRule(NestedRule):
     doubly-exponential rule costs far more accuracy than halving a polynomial one.
     """
 
+    _order: int
+
     def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):
         self._norm = norm
-
-        _xts = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-        _wts = lambda t: (
-            jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
+        self._order = 2 * (order // 2) + 1  # make sure its odd
+        # The stored table is the one for the default dtype; `_nodes_weights` rebuilds
+        # it whenever the quadrature actually runs at a different precision.
+        xh, wh, wl = get_tanhsinh_table(
+            self._order, tanhsinh_tmax(jnp.result_type(float))
         )
+        self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
 
-        def _get_tmax(xmax):
-            # Inverse of tanh-sinh transform.
-            tanhinv = lambda x: 1 / 2 * jnp.log((1 + x) / (1 - x))
-            sinhinv = lambda x: jnp.log(x + jnp.sqrt(x**2 + 1))
-            return sinhinv(2 / jnp.pi * tanhinv(xmax))
+    def _nodes_weights(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Rebuild the table at ``xtype`` rather than casting the stored one.
 
-        tmax = _get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0).dtype).eps)
-        a, b = -tmax, tmax
-
-        order = 2 * (order // 2) + 1  # make sure its odd
-
-        th = jnp.linspace(a, b, order)
-        tl = jnp.linspace(a, b, order // 2 + 1)
-
-        xh = _xts(th)
-        wh = _wts(th) * jnp.diff(th)[0]
-        wl = _wts(tl) * jnp.diff(tl)[0]
-        wl = jnp.zeros_like(wh).at[::2].set(wl)
-        wh *= 2 / wh.sum()
-        wl *= 2 / wl.sum()
-
-        self._xh = xh
-        self._wh = wh
-        self._wl = wl
+        The tanh-sinh nodes are cut off at the last one still distinct from the
+        endpoint, so the extent of the table -- not just its rounding -- depends on the
+        precision it will be used at. Casting a float64 table down to bfloat16 would
+        collapse its outer nodes onto the endpoint and silently drop the effective
+        order; rebuilding spreads the same ``order`` nodes over the range that dtype can
+        actually resolve.
+        """
+        xh, wh, wl = get_tanhsinh_table(self._order, tanhsinh_tmax(xtype))
+        return jnp.asarray(xh, xtype), jnp.asarray(wh), jnp.asarray(wl)

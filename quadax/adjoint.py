@@ -29,15 +29,20 @@ class _ConvertedFunction(eqx.Module):
         return self.f_conv(x, self.args, *self.consts)
 
 
-def closure_convert(fun, args):
+def closure_convert(fun, args, xtype):
     """Hoist values closed over by ``fun`` so that they are visible to AD.
 
     Custom derivative rules only see their explicit arguments. Anything ``fun`` closes
     over would otherwise silently get a zero gradient, so pull it out into ``consts``
     and pass it in explicitly.
+
+    ``xtype`` is the dtype the abscissa will be carried at. It matters here rather
+    than only downstream because ``closure_convert`` traces ``fun`` to a jaxpr at the
+    dtype it is given, and that jaxpr is what every later evaluation of the integrand
+    goes through.
     """
     f_conv, consts = jax.closure_convert(
-        lambda x, args_: fun(x, *args_), jnp.array(0.0), args
+        lambda x, args_: fun(x, *args_), jnp.zeros((), xtype), args
     )
     return f_conv, tuple(consts)
 
@@ -46,7 +51,7 @@ def build_integrand(interval, args, consts, *, f_conv):
     """Map the integrand to the reference domain and wrap it for vectorization."""
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_mapped, interval_t = map_interval(fun, interval)
-    return wrap_func(fun_mapped, ()), interval_t
+    return wrap_func(fun_mapped, (), interval_t.dtype), interval_t
 
 
 class QuadratureOps(NamedTuple):

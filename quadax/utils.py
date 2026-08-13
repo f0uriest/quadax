@@ -1,12 +1,14 @@
 """Utility functions for parsing inputs, mapping coordinates etc."""
 
 import functools
+import warnings
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
@@ -19,6 +21,69 @@ def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str 
     """
     if cond:
         raise err(msg)
+
+
+class DTypes(NamedTuple):
+    """The working dtypes of a quadrature.
+
+    quadax takes the dtype of ``interval`` as the statement of what precision the user
+    wants, and derives everything else from it and from the integrand. An integrand that
+    deliberately upcasts is respected: it is still *called* with an abscissa at the
+    requested precision, but its own output dtype is carried through to the result.
+
+    Parameters
+    ----------
+    xtype : dtype
+        Abscissae. The sub-interval endpoints, the node tables, and the ``x`` the user's
+        integrand is called with. Taken from ``interval``.
+    ytype : dtype
+        Integrand values, the per-interval contributions, and the returned integral. May
+        be complex.
+    etype : dtype
+        Real. Weight tables, error estimates, tolerances. The real counterpart of
+        ``ytype``, so that a complex integrand contracted with real weights promotes to
+        complex on its own.
+    toltype : dtype
+        Real. Sets the default ``epsabs``/``epsrel`` of ``sqrt(eps)``. The coarser of
+        ``xtype`` and ``etype``: a float32 abscissa limits the achievable accuracy
+        however precisely the integrand itself is evaluated.
+
+    """
+
+    xtype: Any
+    ytype: Any
+    etype: Any
+    toltype: Any
+
+
+def _real_dtype(dtype) -> Any:
+    """Real counterpart of ``dtype`` (float32 for complex64, and itself for real)."""
+    return jnp.finfo(dtype).dtype
+
+
+def _coarser_dtype(dtype1, dtype2) -> Any:
+    """Whichever of the two has the larger machine epsilon."""
+    if float(jnp.finfo(dtype1).eps) >= float(jnp.finfo(dtype2).eps):
+        return dtype1
+    return dtype2
+
+
+def resolve_dtypes(
+    interval: jax.Array, fun: Callable[..., jax.Array], args: tuple[Any, ...] = ()
+) -> DTypes:
+    """Work out the dtypes of a quadrature from its limits and its integrand.
+
+    The single point at which quadax decides what precision it is working in. See
+    :class:`DTypes` for what each one governs.
+    """
+    xtype = jnp.asarray(interval).dtype
+    # `jnp.zeros((), xtype)` rather than `jnp.array(0.0)`: the latter is *weakly* typed,
+    # which both hides the requested precision and lets different expressions involving
+    # it settle on different dtypes. See the note on `MAPFUNS`.
+    f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
+    ytype = jnp.result_type(xtype, f.dtype)
+    etype = _real_dtype(ytype)
+    return DTypes(xtype, ytype, etype, _coarser_dtype(xtype, etype))
 
 
 def _map_linear(t: jax.Array, a: jax.Array, b: jax.Array):
@@ -80,6 +145,14 @@ def _map_ninfb_inv(x: jax.Array, a: jax.Array, b: jax.Array):
 MAPFUNS = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
 MAPFUNS_INV = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
 
+# These are the branches of a `lax.switch`, so all four have to return the same dtypes,
+# and they only do so if `t`, `a` and `b` agree. Note in particular that they must not
+# be given a *weakly* typed `t`: the four differ in which of `a`/`b` they use, and a
+# weak `t` lets each branch settle on whichever of the two is present. `_map_linear`'s
+# `c * jnp.ones_like(t)` would follow a strong float32 `a`, while `_map_ninfb`'s
+# `2 / (t + 1) ** 2` would stay at the weak default, and the switch would not build.
+# This is why the integrand is probed with `jnp.zeros((), xtype)`, not `jnp.array(0.0)`.
+
 
 def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
     """Map a function over an arbitrary interval [a, b] to the interval [-1, 1].
@@ -103,8 +176,17 @@ def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
         New lower and upper limits of integration with possible breakpoints.
     """
     interval = jnp.asarray(interval)
+    errorif(
+        not jnp.issubdtype(interval.dtype, jnp.floating),
+        TypeError,
+        "integration limits must be real floating point, got dtype "
+        f"{interval.dtype}. Complex limits are not supported: the subdivision has to "
+        "order the breakpoints, which complex numbers do not admit.",
+    )
     a, b = interval[0], interval[-1]
-    sgn = (-1) ** (a > b)
+    # An `xtype` scalar rather than the integer `(-1) ** (a > b)`, so that it cannot
+    # participate in promotion downstream.
+    sgn = jnp.where(a > b, -1, 1).astype(interval.dtype)
     a, b = jnp.minimum(a, b), jnp.maximum(a, b)
     # catch breakpoints that are outside the domain, replace with endpoints
     # this creates intervals of 0 length which will be ignored later
@@ -143,6 +225,37 @@ class _MappedFunction(eqx.Module):
         return self.sgn * w * self.fun(x, *args)
 
 
+def tanhsinh_tmax(dtype) -> float:
+    """Largest ``t`` whose tanh-sinh node is still distinct from the endpoint.
+
+    The tanh-sinh nodes ``x = tanh(pi/2 sinh(t))`` cluster double-exponentially at the
+    endpoints, which is what lets the rule handle an endpoint singularity. A node is
+    only useful while it stays distinguishable from the endpoint, so ``t`` is cut off at
+    ``x = 1 - 10*eps``. That bound, and with it how close to the singularity the rule
+    can look, is set by the precision the nodes will be *used* at -- which is why this
+    takes a dtype rather than being a constant.
+
+    Warns when the precision is coarse enough that the clustering has essentially been
+    lost. Computed in float64 on the host; the result is a compile time constant.
+    """
+    eps = float(jnp.finfo(dtype).eps)
+    closest = 10 * eps
+    if closest > 1e-3:
+        warnings.warn(
+            f"tanh-sinh quadrature in {jnp.dtype(dtype).name} can place a node no "
+            f"closer than {closest:.1e} of the half width from an endpoint (float64 "
+            "reaches 2.2e-15), so the double exponential clustering that makes the "
+            "method good at endpoint singularities is largely gone. Results are still "
+            "valid but no better than a plain trapezoidal rule near the endpoints; use "
+            "float32 or better, or use quadgk/quadcc instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+    tanhinv = lambda x: 0.5 * np.log((1 + x) / (1 - x))
+    sinhinv = lambda x: np.log(x + np.sqrt(x**2 + 1))
+    return float(sinhinv(2 / np.pi * tanhinv(1.0 - closest)))
+
+
 def tanhsinh_transform(fun, interval):
     """Transform a function by mapping with tanh-sinh.
 
@@ -168,6 +281,7 @@ def tanhsinh_transform(fun, interval):
         NotImplementedError,
         "tanh-sinh transformation with breakpoints not supported",
     )
+    xtype = jnp.asarray(interval).dtype
     # map a, b -> [-1, 1]
     fun, interval = map_interval(fun, interval)
 
@@ -176,16 +290,10 @@ def tanhsinh_transform(fun, interval):
     # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
     # we don't want to include the endpoint that maps to x==1 to avoid
     # possible singularities, so we find the largest t s.t. x(t) < 1
-    # and use that as our interval
-    def get_tmax(xmax):
-        """Inverse of tanh-sinh transform."""
-        tanhinv = lambda x: 1 / 2 * jnp.log((1 + x) / (1 - x))
-        sinhinv = lambda x: jnp.log(x + jnp.sqrt(x**2 + 1))
-        return sinhinv(2 / jnp.pi * tanhinv(xmax))
-
-    # inverse of tanh-sinh transformation for x = 1-eps
-    tmax = get_tmax(jnp.array(1.0) - 10 * jnp.finfo(jnp.array(1.0)).eps)
-    interval_t = jnp.array([-tmax, tmax])
+    # and use that as our interval. How large that is depends on the precision the
+    # abscissae are carried at, so it follows `interval`.
+    tmax = tanhsinh_tmax(xtype)
+    interval_t = jnp.array([-tmax, tmax], dtype=xtype)
     return func, interval_t
 
 
@@ -253,9 +361,13 @@ def _decode_status(status):
 STATUS = {i: _decode_status(i) for i in range(int(2**5))}
 
 
-def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...]):
-    """Vectorize, jit, and mask out inf/nan."""
-    f = jax.eval_shape(fun, jnp.array(0.0), *args)
+def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...], xtype):
+    """Vectorize, jit, and mask out inf/nan.
+
+    ``xtype`` is the dtype the integrand will be called at, and the integrand is probed
+    at that dtype rather than at a weakly typed default. See the note on ``MAPFUNS``.
+    """
+    f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
     # need to make sure we get the correct shape for array valued integrands
     outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
@@ -333,10 +445,6 @@ def bounded_while_loop(condfun, bodyfun, init_val, bound):
         return jax.lax.cond(unvmap_any(keep), stepfun, lambda x: x, state), None
 
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
-
-
-def _get_eps(x: jax.Array) -> jax.Array:
-    return jnp.finfo(x.dtype).eps  # pyright: ignore
 
 
 def _pnorm(x: jax.Array, p: int | float | jax.Array) -> jax.Array:

@@ -1,5 +1,10 @@
 """Tests for adaptive quadrature routines."""
 
+import os
+import subprocess
+import sys
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -9,7 +14,9 @@ from jax import config
 
 import quadax
 from quadax import (
+    ClenshawCurtisRule,
     GaussKronrodRule,
+    TanhSinhRule,
     adaptive_quadrature,
     quadcc,
     quadgk,
@@ -897,3 +904,313 @@ class TestErrors:
         """Only the tabulated Gauss-Kronrod orders are available."""
         with pytest.raises(NotImplementedError, match="not implemented"):
             GaussKronrodRule(order=7)
+
+
+# The dtype of `interval` is the statement of what precision the user wants. The tests
+# below pin the four dtypes described by `quadax.utils.DTypes`: the abscissa the
+# integrand is called with, the integrand values and returned integral, the error
+# estimate, and the default tolerances.
+
+adaptive_methods = [quadgk, quadcc, quadts]
+all_methods = adaptive_methods + [romberg, rombergts]
+rules = [GaussKronrodRule, ClenshawCurtisRule, TanhSinhRule]
+
+real_dtypes = [jnp.float64, jnp.float32, jnp.float16, jnp.bfloat16]
+complex_dtypes = [jnp.complex128, jnp.complex64]
+# `interval` is always real; complex is a property of the integrand's values.
+real_of = {jnp.complex128: jnp.float64, jnp.complex64: jnp.float32}
+
+# How much worse than sqrt(eps) a converged result is allowed to be. Generous, because
+# the point of these tests is dtype plumbing, not accuracy.
+_SLOP = 50
+
+
+@pytest.fixture
+def quiet_tanhsinh():
+    """Let the half precision tanh-sinh warning through without failing the test.
+
+    ``pyproject.toml`` turns warnings into errors, which is right for the rest of the
+    suite. The warning itself is asserted on separately in ``TestTanhSinhPrecision``.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*tanh-sinh quadrature in.*")
+        yield
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+class TestWorkingDType:
+    """The dtype of ``interval`` selects the precision, and is respected end to end."""
+
+    @pytest.mark.parametrize("method", all_methods)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_round_trip(self, method, dtype):
+        """Y and err come back at the requested precision, and the answer is right."""
+        interval = jnp.array([0.0, 1.0], dtype=dtype)
+        y, info = method(lambda x: jnp.exp(-x), interval)
+
+        assert y.dtype == dtype
+        assert jnp.asarray(info.err).dtype == dtype
+        # exp(-x) on [0, 1]; only asking for sqrt(eps)-ish accuracy
+        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
+
+    @pytest.mark.parametrize("method", all_methods)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_integrand_is_called_at_the_requested_dtype(self, method, dtype):
+        """The integrand sees ``x`` at the interval's dtype, not the default one.
+
+        A node table stored at float64 would hand the user's function a float64 ``x``
+        whatever precision it asked for. The assert runs at trace time.
+        """
+        seen = []
+
+        def fun(x):
+            seen.append(x.dtype)
+            return jnp.exp(-x)
+
+        method(fun, jnp.array([0.0, 1.0], dtype=dtype))
+        assert seen, "integrand was never traced"
+        assert set(seen) == {jnp.dtype(dtype)}, f"integrand saw {set(seen)}"
+
+    @pytest.mark.parametrize("method", all_methods)
+    def test_integrand_may_upcast(self, method):
+        """An integrand that deliberately upcasts is respected.
+
+        The abscissa stays at the precision that was asked for, but the accumulation and
+        the result follow the integrand.
+        """
+        seen = []
+
+        def fun(x):
+            seen.append(x.dtype)
+            return jnp.exp(-x.astype(jnp.float64))
+
+        y, info = method(fun, jnp.array([0.0, 1.0], dtype=jnp.float32))
+        assert set(seen) == {jnp.dtype(jnp.float32)}
+        assert y.dtype == jnp.float64
+        assert jnp.asarray(info.err).dtype == jnp.float64
+
+    @pytest.mark.parametrize("method", all_methods)
+    @pytest.mark.parametrize("dtype", complex_dtypes)
+    def test_complex_integrand(self, method, dtype):
+        """Complex values, real limits: the error estimate stays real."""
+        rtype = real_of[dtype]
+        interval = jnp.array([0.0, 1.0], dtype=rtype)
+        fun = lambda x: (jnp.exp(-x) + 1j * jnp.sin(x)).astype(dtype)
+        y, info = method(fun, interval)
+
+        assert y.dtype == dtype
+        assert jnp.asarray(info.err).dtype == rtype
+        tol = _SLOP * np.sqrt(float(jnp.finfo(rtype).eps))
+        np.testing.assert_allclose(complex(y).real, 1 - np.exp(-1), atol=tol)
+        np.testing.assert_allclose(complex(y).imag, 1 - np.cos(1), atol=tol)
+
+    @pytest.mark.parametrize("method", all_methods)
+    def test_complex_limits_rejected(self, method):
+        """Complex limits have no ordering, so the subdivision cannot be defined."""
+        with pytest.raises(TypeError, match="real floating point"):
+            method(lambda x: x, jnp.array([0.0 + 0j, 1.0 + 0j]))
+
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_infinite_limits(self, dtype):
+        """All four branches of the interval map agree on a dtype.
+
+        The integrand is probed to determine the output dtype; if that probe is done
+        with a weakly typed scalar the four branches can settle on different dtypes and
+        the ``switch`` between them fails to build.
+        """
+        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        for interval, expected in [
+            ([0.0, jnp.inf], np.sqrt(np.pi) / 2),
+            ([-jnp.inf, 0.0], np.sqrt(np.pi) / 2),
+            ([-jnp.inf, jnp.inf], np.sqrt(np.pi)),
+        ]:
+            y, _ = quadgk(lambda x: jnp.exp(-(x**2)), jnp.array(interval, dtype=dtype))
+            assert y.dtype == dtype
+            np.testing.assert_allclose(float(y), expected, atol=10 * tol, rtol=10 * tol)
+
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_breakpoints_and_vector_valued(self, dtype):
+        """Breakpoints keep the mesh at the abscissa dtype for a vector integrand."""
+        interval = jnp.array([0.0, 0.5, 1.0], dtype=dtype)
+        y, info = quadgk(lambda x: jnp.array([jnp.exp(-x), x**2]), interval)
+        assert y.dtype == dtype
+        assert jnp.asarray(info.err).dtype == dtype
+        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        np.testing.assert_allclose(np.asarray(y), [1 - np.exp(-1), 1 / 3], atol=tol)
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+class TestFixedOrderRuleDTypes:
+    """The fixed order rules are a public entry point in their own right."""
+
+    @pytest.mark.parametrize("rule", rules)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_integrate(self, rule, dtype):
+        """All four outputs of ``integrate`` come back at the abscissa dtype."""
+        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
+        y, err, y_abs, y_mmn = rule().integrate(lambda x: jnp.exp(-x), a, b, ())
+        assert y.dtype == dtype
+        assert err.dtype == y_abs.dtype == y_mmn.dtype == dtype
+        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
+
+    @pytest.mark.parametrize("rule", rules)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_degenerate_interval(self, rule, dtype):
+        """``a == b`` takes the other branch of a ``cond``, which has to agree.
+
+        Both branches are built for any integrand dtype, so the zero branch must be
+        constructed at the same dtype the weights promote the real branch to.
+        """
+        a = jnp.array(0.5, dtype)
+        out = rule().integrate(lambda x: jnp.exp(-x), a, a, ())
+        for v in out:
+            assert v.dtype == dtype
+            np.testing.assert_array_equal(np.asarray(v), 0.0)
+
+    @pytest.mark.parametrize("rule", rules)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_apply(self, rule, dtype):
+        """The low level ``_apply`` keeps the dtype too."""
+        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
+        y = rule()._apply(lambda x: jnp.exp(-x), a, b, ())
+        assert y.dtype == dtype
+
+    @pytest.mark.parametrize("rule", rules)
+    def test_weights_sum_to_two(self, rule):
+        """Both the high and low order rules integrate 1 over [-1, 1] exactly."""
+        r = rule()
+        np.testing.assert_allclose(float(jnp.sum(r._wh)), 2.0, atol=1e-14)
+        np.testing.assert_allclose(float(jnp.sum(r._wl)), 2.0, atol=1e-14)
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+class TestErrorEstimateDTypes:
+    """The reported error must never under-estimate, at any precision."""
+
+    @pytest.mark.parametrize("method", adaptive_methods)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    @pytest.mark.parametrize(
+        "fun, exact",
+        [
+            (lambda x: jnp.exp(-(x**2)), 0.7468241328124271),
+            (lambda x: x**4 - 2 * x + 1, 1 / 5 - 1 + 1),
+        ],
+    )
+    def test_error_is_an_upper_bound(self, method, dtype, fun, exact):
+        """Reported error bounds the true error.
+
+        At float16/bfloat16 this is the only thing worth asserting: the roundoff floor
+        forces the QUADPACK estimator into its saturated regime, where it reports the
+        total variation of the integrand rather than a sharp estimate. Conservative, but
+        valid, which is what this pins.
+        """
+        y, info = method(fun, jnp.array([0.0, 1.0], dtype=dtype))
+        true_err = abs(float(y) - exact)
+        reported = float(jnp.asarray(info.err))
+        assert reported >= true_err, (
+            f"{jnp.dtype(dtype).name}: reported {reported:.3e} < true {true_err:.3e}"
+        )
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+class TestToleranceDTypes:
+    """Default tolerances follow the working dtype."""
+
+    @pytest.mark.parametrize("method", all_methods)
+    @pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+    def test_default_tolerance_tracks_dtype(self, method, dtype):
+        """With no tolerance given, accuracy lands near sqrt(eps) of the dtype."""
+        y, _ = method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+        err = abs(float(y) - (1 - np.exp(-1)))
+        assert err <= _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_explicit_tolerances_do_not_promote(self, dtype):
+        """A python float tolerance must not drag the working dtype up with it."""
+        y, info = quadgk(
+            lambda x: jnp.exp(-x),
+            jnp.array([0.0, 1.0], dtype=dtype),
+            epsabs=1e-3,
+            epsrel=1e-3,
+        )
+        assert y.dtype == dtype
+        assert jnp.asarray(info.err).dtype == dtype
+
+
+class TestTanhSinhPrecision:
+    """Half precision costs the tanh-sinh rules their double exponential clustering."""
+
+    @pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
+    @pytest.mark.parametrize("method", [quadts, rombergts])
+    def test_warns_in_half_precision(self, dtype, method):
+        """The user is told when the rule cannot deliver what it usually does."""
+        with pytest.warns(UserWarning, match="tanh-sinh quadrature in"):
+            method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    @pytest.mark.parametrize("method", [quadts, rombergts])
+    def test_silent_at_float32_and_above(self, dtype, method):
+        """No warning where the clustering is fine."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_quadgk_never_warns(self, dtype):
+        """The warning belongs to the tanh-sinh rules, not to quadrature generally."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            quadgk(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+
+    @pytest.mark.usefixtures("quiet_tanhsinh")
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_nodes_stay_inside_the_interval(self, dtype):
+        """Rebuilt rather than cast, so no node collapses onto the endpoint.
+
+        Casting a float64 table down to bfloat16 would round the outer nodes to exactly
+        +/-1, silently dropping the effective order. Rebuilding at the target dtype
+        spreads the same number of nodes over the range that dtype can resolve.
+        """
+        xh, _, _ = TanhSinhRule(order=61)._nodes_weights(dtype)
+        assert xh.dtype == dtype
+        assert len(np.unique(np.asarray(xh, dtype=np.float64))) == len(xh)
+        assert np.all(np.abs(np.asarray(xh, dtype=np.float64)) < 1.0)
+
+
+def test_x64_disabled():
+    """Everything works, and stays float32, with x64 off.
+
+    A subprocess because ``jax_enable_x64`` is process global and the rest of the suite
+    asserts to float64 precision.
+    """
+    script = """
+import jax.numpy as jnp
+import numpy as np
+from quadax import quadgk, quadcc, quadts, romberg, rombergts
+
+for method in [quadgk, quadcc, quadts, romberg, rombergts]:
+    seen = []
+    def fun(x):
+        seen.append(x.dtype)
+        return jnp.exp(-x)
+    y, info = method(fun, jnp.array([0.0, 1.0]))
+    assert y.dtype == jnp.float32, (method.__name__, y.dtype)
+    assert info.err.dtype == jnp.float32, (method.__name__, info.err.dtype)
+    assert set(seen) == {jnp.dtype(jnp.float32)}, (method.__name__, set(seen))
+    np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=1e-4)
+
+# the default tolerance is sqrt(eps32) here, as it always has been
+y_d, i_d = quadgk(jnp.sin, jnp.array([0.0, 1.0]))
+tol = float(np.sqrt(np.finfo(np.float32).eps))
+y_e, i_e = quadgk(jnp.sin, jnp.array([0.0, 1.0]), epsabs=tol, epsrel=tol)
+np.testing.assert_array_equal(np.asarray(y_d), np.asarray(y_e))
+print("ok")
+"""
+    env = {**os.environ, "JAX_ENABLE_X64": "0"}
+    out = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True
+    )
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout

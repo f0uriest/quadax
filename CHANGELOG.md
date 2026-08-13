@@ -51,6 +51,30 @@ v0.3.0
   ``quadax.AbstractQuadratureRule``.
 - **Breaking**: removed the unused ``norm`` argument to ``adaptive_quadrature``. It had
   no effect; the norm is taken from the rule, ie ``GaussKronrodRule(order, norm)``.
+- quadax now works in the precision you ask for, rather than always in whatever
+  `jax_enable_x64` happens to make the default. The dtype of `interval` is how you ask:
+  the integrand is called with an `x` of that dtype, and the result follows it unless
+  the integrand upcasts internally, in which case that is respected too. `float16`,
+  `bfloat16`, `float32`, `float64` and complex integrands are all supported, and the
+  default `epsabs`/`epsrel` follow the working dtype. See "Precision and dtypes" in the
+  documentation.
+  - Fixes a `TypeError` from `map_interval` that made *any* explicitly-dtyped `interval`
+    other than the default unusable, on all of `quadgk`, `quadcc`, `quadts`, `romberg`
+    and `rombergts`, for finite and infinite intervals alike.
+  - Fixes a `TypeError` from `GaussKronrodRule`/`ClenshawCurtisRule`/`TanhSinhRule`'s
+    `integrate` when the integrand's dtype was not the JAX default.
+  - The node and weight tables are now built in float64 on the host and rounded once to
+    the working dtype. Previously the Clenshaw-Curtis and tanh-sinh tables were
+    *computed* in float32 whenever x64 was off, which is less accurate. Building them
+    with numpy also makes them independent of the backend's transcendental functions,
+    which are not all as accurate as the host's; as a result `quadts` and `rombergts`
+    results move in the last ulp or two. `quadgk` and `quadcc` are bit-identical.
+  - `simpson` and `cumulative_simpson` no longer return the default float dtype
+    regardless of their inputs.
+  - No change for float64, or for any configuration that worked before: the default
+    tolerances resolve to exactly what they used to in each case.
+- `quadts` and `rombergts` now warn when used at `float16`/`bfloat16`, where the
+  tanh-sinh clustering can no longer get close enough to an endpoint to be worth having.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and
