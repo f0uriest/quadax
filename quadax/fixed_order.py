@@ -104,6 +104,23 @@ class NestedRule(AbstractQuadratureRule):
     Nested rules consist of a set of nodes (xh) and weights (wh) for a high order rule,
     along with an additional set of weights (wl) for a lower order rule that shares
     nodes with the high order rule.
+
+    Notes
+    -----
+    The error estimate is derived from the difference between the two rules, so it is
+    only meaningful while the nodes resolve the integrand. For oscillatory integrands,
+    below roughly three points per oscillation both rules alias and agree spuriously,
+    and the estimate can fall well below the true error; above roughly eight it is
+    reliably conservative. This is a property of nested rules in general rather than of
+    any particular order, since raising the order only raises the frequency at which it
+    sets in. Strongly oscillatory integrands are better served by a specialized method.
+
+    References
+    ----------
+    .. [1] R. Piessens, E. de Doncker-Kapenga, C. W. Überhuber, D. K. Kahaner.
+           "QUADPACK: A Subroutine Package for Automatic Integration". Springer Series
+           in Computational Mathematics, vol. 1. Springer-Verlag, Berlin, 1983.
+           doi:10.1007/978-3-642-61786-7
     """
 
     _xh: jax.Array
@@ -159,16 +176,54 @@ class NestedRule(AbstractQuadratureRule):
             result_kronrod = _dot(self._wh, f) * halflength
             result_gauss = _dot(self._wl, f) * halflength
 
-            integral_abs = _dot(self._wh, jnp.abs(f))  # ~integral of abs(fun)
-            integral_mmn = _dot(
-                self._wh, jnp.abs(f - result_kronrod / (b - a))
+            # Both of these are sums over the reference interval [-1, 1] and so, like
+            # the two results above, need the Jacobian of the map onto [a, b] to be an
+            # estimate of an integral over [a, b]. QUADPACK scales all four by
+            # ``dhlgth``; the error estimate below compares ``abserr`` against
+            # ``integral_mmn``, so the two have to be on the same scale for the
+            # ``200 ... **1.5`` interpolation to mean what it was tuned to mean.
+            dhalflength = jnp.abs(halflength)
+            integral_abs = (
+                _dot(self._wh, jnp.abs(f)) * dhalflength
+            )  # ~integral of abs(fun)
+            integral_mmn = (
+                _dot(self._wh, jnp.abs(f - result_kronrod / (b - a))) * dhalflength
             )  # ~ integral of abs(fun - mean(fun))
 
             result = result_kronrod
 
             uflow = jnp.finfo(f.dtype).tiny
             eps = jnp.finfo(f.dtype).eps
+
+            # The difference between the two rules is dominated by the error of the
+            # *low* order one, so it says little about the error of ``result``, which
+            # comes from the high order rule and is typically far smaller. It is only a
+            # starting point, and is rescaled below rather than reported directly.
             abserr = jnp.abs(result_kronrod - result_gauss)
+
+            # Measure that discrepancy against how much the integrand varies over the
+            # interval. This rescaling, and the 200 and 1.5 in it, are QUADPACK's, fit
+            # empirically there rather than derived; see [1] and the ``dqk*`` routines,
+            # which use the same two constants at every order from 15 through 61.
+            # With ``r = abserr / integral_mmn`` the estimate becomes
+            # ``integral_mmn * min(1, (200*r)**1.5)``, which has three regimes:
+            #   - ``r >= 1/200``: saturate at ``integral_mmn``. The rules disagree at
+            #     the scale of the variation of the integrand, so nothing has been
+            #     resolved and the whole variation is the only honest bound.
+            #   - middle: inflate the raw difference, by up to ~200x. This is most of
+            #     the useful range, so the rescaling is usually pessimistic rather than
+            #     optimistic, contrary to how the formula first reads.
+            #   - ``r < 200**-1.5``: deflate, the regime where the two rules agree to
+            #     near machine precision and the difference genuinely overstates the
+            #     error of the high order rule.
+            # The exponent is the ratio of the two rules' convergence rates: a rule
+            # exact to degree ``d`` has local error ``~h**(d+2)``, giving
+            # ``(d_high+2)/(d_low+2)``. 1.5 is the large-order limit of that ratio for
+            # Gauss-Kronrod, and a lower bound across every rule implemented here, so it
+            # is the conservative choice, a larger exponent would shrink the estimate.
+            # The guard covers a constant integrand, where ``integral_mmn`` is zero and
+            # the ratio would be 0/0.
+
             # double where trick to avoid nans when ratio would be zero or inf
             # The scaling is only defined when both quantities are nonzero. The ratio
             # must also be substituted, not just masked afterwards: ``x ** 1.5`` has an
@@ -185,6 +240,15 @@ class NestedRule(AbstractQuadratureRule):
                 integral_mmn * jnp.minimum(1.0, ratio**1.5),
                 abserr,
             )
+
+            # No error estimate can be meaningful below the noise of the evaluation
+            # itself. This floor is not a count of summed terms (XLA's pairwise
+            # reduction holds summation error near ``eps`` whatever the rule size) but
+            # covers the conditioning of the integrand: nodes carry ``~eps*|x|``, which
+            # the integrand amplifies by ``|f'|``, so the achievable accuracy degrades
+            # as the integrand varies faster. 50 is a compromise across that, generous
+            # for smooth integrands and mildly optimistic for strongly oscillatory ones.
+            # The ``uflow`` guard keeps the product from underflowing to zero.
             abserr = jnp.where(
                 (integral_abs > uflow / (50.0 * eps)),
                 jnp.maximum((eps * 50.0) * integral_abs, abserr),
@@ -265,6 +329,13 @@ class ClenshawCurtisRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+
+    Notes
+    -----
+    On integrands with an endpoint singularity the error estimate can under-state the
+    true error, increasingly so at higher order, because the endpoint-clustered nodes
+    make the two rules agree while neither has converged. An adaptive integration may
+    then report success while missing the requested tolerance.
     """
 
     def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
@@ -308,6 +379,13 @@ class TanhSinhRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+
+    Notes
+    -----
+    Below about order 15 the embedded rule is too coarse for the error estimate to be
+    trusted on any integrand with structure, including peaked and endpoint-singular ones
+    that the other rules handle at much lower order; halving the points of a
+    doubly-exponential rule costs far more accuracy than halving a polynomial one.
     """
 
     def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):

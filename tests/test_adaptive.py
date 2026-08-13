@@ -7,6 +7,7 @@ import pytest
 import scipy
 from jax import config
 
+import quadax
 from quadax import (
     GaussKronrodRule,
     adaptive_quadrature,
@@ -169,25 +170,28 @@ class TestQuadGK:
     def test_prob6(self):
         """Test for example problem #6."""
         self._base(6, 1e-4, order=15)
-        self._base(6, 1e-8, 100, order=15)
+        # endpoint singularity: order 15 tops out around 1e-8 however much budget it is
+        # given, so it exhausts the subdivision limit rather than reaching the tolerance
+        self._base(6, 1e-8, 100, order=15, status=2)
         self._base(6, 1e-12, 1e5, order=15, max_ninter=100, status=8)
 
     def test_prob7(self):
         """Test for example problem #7."""
         self._base(7, 1e-4, order=61)
         self._base(7, 1e-8, order=61)
-        self._base(7, 1e-12, order=61, status=4)
+        self._base(7, 1e-12, order=61)
 
     def test_prob8(self):
         """Test for example problem #8."""
         self._base(8, 1e-4, order=51)
         self._base(8, 1e-8, order=51)
-        self._base(8, 1e-12, order=51, status=4)
+        self._base(8, 1e-12, order=51)
 
     def test_prob9(self):
         """Test for example problem #9."""
         self._base(9, 1e-4, order=15)
-        self._base(9, 1e-8, 100, order=15)
+        # as for problem 6, order 15 cannot certify 1e-8 on this endpoint singularity
+        self._base(9, 1e-8, 100, order=15, status=2)
         self._base(9, 1e-12, 1e4, order=15, max_ninter=100, status=8)
 
     def test_prob10(self):
@@ -199,7 +203,9 @@ class TestQuadGK:
     def test_prob11(self):
         """Test for example problem #11."""
         self._base(11, 1e-4, order=21)
-        self._base(11, 1e-8, 100, order=21)
+        # bisection concentrates on the singularity at t=0 until the sub-intervals stop
+        # being resolvable, at a true error just above 1e-8
+        self._base(11, 1e-8, 100, order=21, status=8)
         self._base(11, 1e-12, 1e4, order=21, status=8, max_ninter=100)
 
     def test_prob12(self):
@@ -296,20 +302,21 @@ class TestQuadCC:
     def test_prob6(self):
         """Test for example problem #6."""
         self._base(6, 1e-4)
-        self._base(6, 1e-8, 100)
+        # endpoint singularity, see TestQuadGK.test_prob6
+        self._base(6, 1e-8, 100, status=2)
         self._base(6, 1e-12, 1e5, max_ninter=100, status=8)
 
     def test_prob7(self):
         """Test for example problem #7."""
         self._base(7, 1e-4)
         self._base(7, 1e-8, 10)
-        self._base(7, 1e-12, status=8)
+        self._base(7, 1e-12)
 
     def test_prob8(self):
         """Test for example problem #8."""
         self._base(8, 1e-4)
         self._base(8, 1e-8)
-        self._base(8, 1e-12, status=8)
+        self._base(8, 1e-12)
 
     def test_prob9(self):
         """Test for example problem #9."""
@@ -326,7 +333,8 @@ class TestQuadCC:
     def test_prob11(self):
         """Test for example problem #11."""
         self._base(11, 1e-4)
-        self._base(11, 1e-8, 100)
+        # singularity at t=0, see TestQuadGK.test_prob11
+        self._base(11, 1e-8, 100, status=8)
         self._base(11, 1e-12, 1e4, status=8)
 
     def test_prob12(self):
@@ -400,7 +408,11 @@ class TestQuadTS:
         """Test for example problem #2."""
         self._base(2, 1e-4, order=41)
         self._base(2, 1e-8, order=41)
-        self._base(2, 1e-12, order=41)
+        # The answer here is exact to machine precision, but at order 41 the error
+        # *estimate* comes down slowly enough that it is still ~15% above the bound when
+        # the subdivision limit is reached (a larger max_ninter does get under it). The
+        # value is still checked against 1e-12 below.
+        self._base(2, 1e-12, order=41, status=2)
 
     def test_prob3(self):
         """Test for example problem #3."""
@@ -424,7 +436,7 @@ class TestQuadTS:
         """Test for example problem #6."""
         self._base(6, 1e-4)
         self._base(6, 1e-8)
-        self._base(6, 1e-12, 1e4, status=4)
+        self._base(6, 1e-12, 1e4, status=8)
 
     def test_prob7(self):
         """Test for example problem #7."""
@@ -454,7 +466,7 @@ class TestQuadTS:
         """Test for example problem #11."""
         self._base(11, 1e-4)
         self._base(11, 1e-8)
-        self._base(11, 1e-12, 1e4, status=4)
+        self._base(11, 1e-12, 1e4, status=2)
 
     def test_prob12(self):
         """Test for example problem #12."""
@@ -793,6 +805,71 @@ def test_truncated_result_is_still_a_partition(quad):
     np.testing.assert_allclose(a[0], -1.0, atol=1e-14)
     np.testing.assert_allclose(b[-1], 1.0, atol=1e-14)
     np.testing.assert_allclose(a[1:], b[:-1], atol=1e-14)
+
+
+@pytest.mark.parametrize("max_ninter", [22, 23, 24, 25, 26])
+def test_converged_iteration_exits_clean(max_ninter):
+    """Meeting the tolerance as the budget runs out is not a failure.
+
+    QUADPACK jumps past every ``ier`` assignment once ``errsum <= errbnd``, so an
+    iteration that reaches the tolerance exits with ``ier = 0`` even if it also
+    consumed the last subdivision slot. The flags used to be set unconditionally, with
+    termination left to the loop predicate on the next pass, so an iteration that did
+    both reported a spurious failure.
+    """
+    tol = 1e-10
+    y, info = quadgk(
+        lambda t: jnp.log(t),
+        jnp.array([0.0, 1.0]),
+        epsabs=tol,
+        epsrel=tol,
+        max_ninter=max_ninter,
+    )
+    err = float(info.err)
+    if 0 <= err <= max(tol, tol * abs(float(y))):
+        assert int(info.status) == 0, f"reported failure at err={err:.3e} <= {tol:.0e}"
+
+
+# A tall narrow peak: 1e8 at its top, integral 3.1e4, so the error estimates the loop
+# starts from are ~15 orders of magnitude above the total it ends at.
+_PEAK = lambda t: 1 / ((t - 0.5) ** 2 + 1e-8)
+_PEAK_VAL = 31411.926535951257  # mpmath, split at the peak
+
+
+def test_no_spurious_roundoff_on_unresolved_integrand():
+    """A peaked but tractable integrand must not be written off as roundoff-limited.
+
+    Two regressions here. The stagnation test compared the bisected halves against
+    ``r_arr[i]`` *after* it had been overwritten with the left half, so it was really
+    asking whether the right half was negligible rather than whether subdivision had
+    stopped moving the parent's value. And neither counter was gated on QUADPACK's
+    ``defab == error`` check, which suppresses them when the local rule did not resolve
+    a half at all, since a stagnant area is then evidence of an unresolved integrand
+    rather than of roundoff. Together they made the loop give up early here, reporting
+    ROUNDOFF with an error five orders of magnitude worse than achievable.
+    """
+    y, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-12, epsrel=1e-12)
+    assert int(info.status) == 0, quadax.STATUS[int(info.status)]
+    np.testing.assert_allclose(float(y), _PEAK_VAL, rtol=1e-13, atol=0)
+
+
+def test_tolerance_below_roundoff_floor_reports_roundoff():
+    """Asking for more precision than the arithmetic allows is a ROUNDOFF verdict.
+
+    The local rule floors each sub-interval's error estimate at ``50*eps*int|f|``, so
+    the total cannot fall below that floor summed over the partition however fine the
+    mesh gets. Here that floor is ~1.1e-14 relative, so a request of 1e-14 is out of
+    reach.
+    quadax tests for this only before the subdivision loop, as QUADPACK does, which left
+    such a request to burn through the whole subdivision budget and report MAX_NINTER --
+    true, but not the reason.
+    """
+    _, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-14, epsrel=1e-14)
+    assert int(info.status) & 2**2, quadax.STATUS[int(info.status)]
+    # and the error it stopped at really is the accumulated floor
+    np.testing.assert_allclose(
+        float(info.err), 50 * np.finfo(np.float64).eps * _PEAK_VAL, rtol=1e-3
+    )
 
 
 class TestErrors:
