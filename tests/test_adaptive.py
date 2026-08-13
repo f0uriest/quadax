@@ -7,7 +7,15 @@ import pytest
 import scipy
 from jax import config
 
-from quadax import quadcc, quadgk, quadts, romberg, rombergts
+from quadax import (
+    GaussKronrodRule,
+    adaptive_quadrature,
+    quadcc,
+    quadgk,
+    quadts,
+    romberg,
+    rombergts,
+)
 
 config.update("jax_enable_x64", True)
 
@@ -785,3 +793,30 @@ def test_truncated_result_is_still_a_partition(quad):
     np.testing.assert_allclose(a[0], -1.0, atol=1e-14)
     np.testing.assert_allclose(b[-1], 1.0, atol=1e-14)
     np.testing.assert_allclose(a[1:], b[:-1], atol=1e-14)
+
+
+class TestErrors:
+    """Invalid arguments must raise, rather than silently doing something else."""
+
+    def test_rule_must_be_a_quadrature_rule(self):
+        """Passing a bare callable for ``rule`` was deprecated and now raises.
+
+        Custom rules must subclass ``AbstractQuadratureRule`` so that the adjoints have
+        a real object to hand back to AD.
+        """
+        with pytest.raises(TypeError, match="should be an instance of"):
+            adaptive_quadrature(
+                lambda fun, a, b, args: 0.0,  # pyright: ignore[reportArgumentType]
+                lambda t: t,
+                jnp.array([0.0, 1.0]),
+            )
+
+    def test_max_ninter_must_cover_the_breakpoints(self):
+        """``max_ninter`` below the number of breakpoints cannot be satisfied."""
+        with pytest.raises(ValueError, match="is not enough for"):
+            quadgk(lambda t: t, jnp.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0]), max_ninter=2)
+
+    def test_unsupported_rule_order(self):
+        """Only the tabulated Gauss-Kronrod orders are available."""
+        with pytest.raises(NotImplementedError, match="not implemented"):
+            GaussKronrodRule(order=7)
