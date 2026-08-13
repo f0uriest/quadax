@@ -104,6 +104,16 @@ class NestedRule(AbstractQuadratureRule):
     Nested rules consist of a set of nodes (xh) and weights (wh) for a high order rule,
     along with an additional set of weights (wl) for a lower order rule that shares
     nodes with the high order rule.
+
+    Notes
+    -----
+    The error estimate is derived from the difference between the two rules, so it is
+    only meaningful while the nodes resolve the integrand. For oscillatory integrands,
+    below roughly three points per oscillation both rules alias and agree spuriously,
+    and the estimate can fall well below the true error; above roughly eight it is
+    reliably conservative. This is a property of nested rules in general rather than of
+    any particular order, since raising the order only raises the frequency at which it
+    sets in. Strongly oscillatory integrands are better served by a specialized method.
     """
 
     _xh: jax.Array
@@ -263,6 +273,13 @@ class ClenshawCurtisRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+
+    Notes
+    -----
+    On integrands with an endpoint singularity the error estimate can under-state the
+    true error, increasingly so at higher order, because the endpoint-clustered nodes
+    make the two rules agree while neither has converged. An adaptive integration may
+    then report success while missing the requested tolerance.
     """
 
     def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
@@ -306,6 +323,13 @@ class TanhSinhRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+
+    Notes
+    -----
+    Below about order 15 the embedded rule is too coarse for the error estimate to be
+    trusted on any integrand with structure, including peaked and endpoint-singular ones
+    that the other rules handle at much lower order; halving the points of a
+    doubly-exponential rule costs far more accuracy than halving a polynomial one.
     """
 
     def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):

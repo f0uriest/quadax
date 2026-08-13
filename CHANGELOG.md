@@ -34,6 +34,10 @@ v0.3.0
   ``ROUNDOFF``, rather than subdividing until the ``max_ninter`` limit is reached. Such
   integrations also finish sooner.
 - The reported error estimate can no longer come back negative.
+- Documented when the nested-rule error estimate can under-state the true error: on
+  integrands sampled at fewer than about three points per oscillation (any rule, any
+  order), on endpoint singularities under ``ClenshawCurtisRule``, and for
+  ``TanhSinhRule`` below order 15. Behaviour is unchanged; this is guidance only.
 - ``y_abs`` and ``y_mmn`` returned by ``AbstractQuadratureRule.integrate`` are now the
   integrals over ``[a, b]`` that their docstrings describe; they were previously scaled
   by a factor of ``2 / (b - a)``. Relevant when calling a rule directly or implementing
