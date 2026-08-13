@@ -159,9 +159,18 @@ class NestedRule(AbstractQuadratureRule):
             result_kronrod = _dot(self._wh, f) * halflength
             result_gauss = _dot(self._wl, f) * halflength
 
-            integral_abs = _dot(self._wh, jnp.abs(f))  # ~integral of abs(fun)
-            integral_mmn = _dot(
-                self._wh, jnp.abs(f - result_kronrod / (b - a))
+            # Both of these are sums over the reference interval [-1, 1] and so, like
+            # the two results above, need the Jacobian of the map onto [a, b] to be an
+            # estimate of an integral over [a, b]. QUADPACK scales all four by
+            # ``dhlgth``; the error estimate below compares ``abserr`` against
+            # ``integral_mmn``, so the two have to be on the same scale for the
+            # ``200 ... **1.5`` interpolation to mean what it was tuned to mean.
+            dhalflength = jnp.abs(halflength)
+            integral_abs = (
+                _dot(self._wh, jnp.abs(f)) * dhalflength
+            )  # ~integral of abs(fun)
+            integral_mmn = (
+                _dot(self._wh, jnp.abs(f - result_kronrod / (b - a))) * dhalflength
             )  # ~ integral of abs(fun - mean(fun))
 
             result = result_kronrod

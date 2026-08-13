@@ -19,6 +19,25 @@ v0.3.0
 - ``vmap``-ed integrations should now be faster, by stopping evaluation once every batch
   element has converged, rather than running for the full ``max_ninter`` iterations
   whenever any single element still needs them. Results are unchanged.
+- Improved the accuracy of the error estimates used by all the adaptive integrators.
+  Reported ``err`` values and iteration counts change throughout, and integrands whose
+  error was previously under-estimated now take more work to reach a given tolerance.
+  Some integrations that used to report ``status == 0`` while quietly missing the
+  requested tolerance now report a non-zero status instead; the values they return are
+  more accurate than before, not less.
+- ``status`` is no longer set on an iteration that reaches the requested tolerance. An
+  integration that converged just as it ran out of sub-intervals previously reported
+  ``MAX_NINTER`` despite having succeeded.
+- Integrands that are simply unresolved, rather than limited by roundoff, are no longer
+  written off as ``ROUNDOFF`` while they are still converging.
+- Asking for a tolerance tighter than the arithmetic can deliver is now reported as
+  ``ROUNDOFF``, rather than subdividing until the ``max_ninter`` limit is reached. Such
+  integrations also finish sooner.
+- The reported error estimate can no longer come back negative.
+- ``y_abs`` and ``y_mmn`` returned by ``AbstractQuadratureRule.integrate`` are now the
+  integrals over ``[a, b]`` that their docstrings describe; they were previously scaled
+  by a factor of ``2 / (b - a)``. Relevant when calling a rule directly or implementing
+  a custom one.
 - **Breaking**: removed ``fixed_quadgk``, ``fixed_quadcc``, and ``fixed_quadts``,
   deprecated since v0.2.2. Use ``GaussKronrodRule``, ``ClenshawCurtisRule``, and
   ``TanhSinhRule`` instead, eg
