@@ -30,6 +30,13 @@ adaptive_methods = [quadgk, quadcc, quadts]
 romberg_methods = [romberg, rombergts]
 all_methods = adaptive_methods + romberg_methods
 
+# The three adaptive routines differ only in the local rule applied on each
+# sub-interval; the subdivision loop and the adjoints wrapped around it are the same
+# code, so tests of that machinery run through one of them rather than all three. The
+# checks on the derivative itself keep the full list, since there each rule's own
+# accuracy is part of what is under test.
+machinery_methods = [quadgk]
+
 # problems exercising the paths that differ: plain, interior breakpoints, an infinite
 # limit, and a vector valued integrand.
 example_problems = [
@@ -155,28 +162,28 @@ class TestDirectAdjointEquivalence:
         new = transform(make(DirectAdjoint()))(x)
         return np.asarray(jax.tree.leaves(old)[0]), np.asarray(jax.tree.leaves(new)[0])
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", range(len(example_problems)))
     def test_jacfwd_wrt_args(self, quad, i):
         """Forward mode w.r.t. args matches unrolled loop."""
         old, new = self._jacs(quad, example_problems[i], False, jax.jacfwd)
         np.testing.assert_allclose(old, new, rtol=ULP_RTOL, atol=ULP_ATOL)
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", range(len(example_problems)))
     def test_jacfwd_wrt_interval(self, quad, i):
         """Forward mode w.r.t. limits and breakpoints matches unrolled loop."""
         old, new = self._jacs(quad, example_problems[i], True, jax.jacfwd)
         np.testing.assert_allclose(old, new, rtol=ULP_RTOL, atol=ULP_ATOL)
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", range(len(example_problems)))
     def test_jacrev_wrt_args(self, quad, i):
         """Reverse mode w.r.t. args matches unrolled loop."""
         old, new = self._jacs(quad, example_problems[i], False, jax.jacrev)
         np.testing.assert_allclose(old, new, rtol=ULP_RTOL, atol=ULP_ATOL)
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", range(len(example_problems)))
     def test_jacrev_matches_own_jacfwd(self, quad, i):
         """Direct adjoint's forward and reverse modes agree with each other."""
@@ -215,7 +222,7 @@ class TestBreakpointBoundaryTerm:
             np.asarray(transform(f)(self.interval)), self.expected, atol=1e-12
         )
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     def test_matches_unrolled(self, quad):
         """And agrees with differentiating through the loop."""
         mk = lambda adj: lambda v: quad(self.fun, v, self.args, adjoint=adj)[0]
@@ -230,7 +237,7 @@ class TestBreakpointBoundaryTerm:
 class TestLeibnizAdjoints:
     """The Leibniz adjoints give the derivative its own error control."""
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", SMOOTH_PROBLEMS)
     def test_forward_matches_finite_difference(self, quad, i):
         """Leibniz adjoint agrees with finite differences in forward mode."""
@@ -244,7 +251,7 @@ class TestLeibnizAdjoints:
             rtol=1e-4,
         )
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("i", SMOOTH_PROBLEMS)
     def test_reverse_matches_finite_difference(self, quad, i):
         """Leibniz adjoint agrees with finite differences in reverse mode."""
@@ -258,7 +265,7 @@ class TestLeibnizAdjoints:
             rtol=1e-4,
         )
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     def test_leibniz_agrees_with_direct(self, quad):
         """Leibniz agrees with DirectAdjoint on a well resolved problem, both modes."""
         prob = example_problems[0]
@@ -387,6 +394,25 @@ class TestTransforms:
             rtol=1e-12,
         )
 
+    @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
+    def test_hessian(self, adjoint):
+        """Reverse inside forward works, not just forward inside forward.
+
+        ``jax.hessian`` is ``jacfwd(jacrev(...))``, which linearizes through the custom
+        rule rather than nesting two JVPs, and so reaches machinery that
+        ``test_second_derivatives`` does not.
+        """
+        fun = lambda t, c: jnp.sum(jnp.exp(-c * t))
+        interval = jnp.array([0.0, 1.0])
+        f = lambda c: quadgk(fun, interval, (c,), adjoint=adjoint)[0]
+        # int_0^1 sum_i exp(-c_i t) dt = sum_i (1 - exp(-c_i))/c_i, so the Hessian is
+        # diagonal; check against the unrolled reference, which carries no custom rule.
+        g = lambda c: quadgk(fun, interval, (c,), adjoint=_UnrolledDirectAdjoint())[0]
+        c = jnp.linspace(0.5, 2.0, 3)
+        got = np.asarray(jax.hessian(f)(c))
+        assert got.shape == (3, 3)
+        np.testing.assert_allclose(got, np.asarray(jax.hessian(g)(c)), rtol=1e-6)
+
     def test_closed_over_values_get_gradients(self):
         """Values closed over by the integrand must not silently get zero gradients."""
 
@@ -422,7 +448,7 @@ class TestUnifiedLeibnizAdjoint:
         f = lambda c: quad(self.fun, self.interval, (c,), adjoint=DirectAdjoint())[0]
         return np.asarray(jax.jacfwd(f)(self.args))
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize(
         "transform", [jax.jacfwd, jax.jacrev, jax.grad, lambda f: jax.jit(jax.grad(f))]
     )
@@ -433,7 +459,7 @@ class TestUnifiedLeibnizAdjoint:
             np.asarray(transform(f)(self.args)), self._ref(quad), rtol=1e-8
         )
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     def test_jvp_matches_a_directional_derivative(self, quad):
         """Forward mode contracts with the tangent rather than forming the Jacobian."""
         f = lambda c: quad(self.fun, self.interval, (c,), adjoint=LeibnizAdjoint())[0]
@@ -444,7 +470,7 @@ class TestUnifiedLeibnizAdjoint:
             rtol=1e-8,
         )
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("quad", machinery_methods)
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
     def test_wrt_interval(self, quad, transform):
         """Derivatives with respect to the limits work in both modes."""
@@ -479,6 +505,59 @@ class TestUnifiedLeibnizAdjoint:
             rtol=1e-10,
         )
         assert np.asarray(jax.hessian(f)(self.args)).shape == (3, 3)
+
+    @pytest.mark.parametrize("quad", machinery_methods)
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev, jax.grad])
+    @pytest.mark.parametrize("wrt_interval", [False, True])
+    def test_python_float_tolerances(self, quad, transform, wrt_interval):
+        """A tolerance given as a python float must differentiate like any other.
+
+        Every other test here leaves the tolerances at their default, which the solver
+        turns into arrays. A concrete float instead reaches the primitive as a jaxpr
+        literal, and reverse mode used to lose that operand when the transpose rule
+        rebuilt its cotangent tree by filtering values for inexact arrays -- returning
+        one cotangent fewer than the primitive had linear operands.
+        """
+        if wrt_interval and transform is jax.grad:
+            pytest.skip("grad needs a scalar output; jacrev covers the same path")
+        kwargs = {"epsabs": 1e-8, "epsrel": 1e-8}
+        if wrt_interval:
+            f = lambda v: quad(
+                self.fun, v, (self.args,), adjoint=LeibnizAdjoint(), **kwargs
+            )[0]  # noqa: E501
+            target = self.interval
+        else:
+            f = lambda c: quad(
+                self.fun, self.interval, (c,), adjoint=LeibnizAdjoint(), **kwargs
+            )[0]  # noqa: E501
+            target = self.args
+        np.testing.assert_allclose(
+            np.asarray(transform(f)(target)),
+            self._ref(quad, wrt_interval=wrt_interval),
+            rtol=1e-7,
+        )
+
+    @pytest.mark.parametrize("quad", romberg_methods)
+    def test_python_float_tolerances_romberg_direct(self, quad):
+        """Romberg reaches the same primitive under ``DirectAdjoint``.
+
+        It has no subdivision to reuse, so ``DirectAdjoint`` freezes the level count and
+        routes through ``_leibniz`` to get a transposable rule -- which means the
+        literal tolerance bug reached ``DirectAdjoint`` too, by this path only.
+        """
+        f = lambda c: quad(  # noqa: E731
+            self.fun,
+            self.interval,
+            (c,),
+            adjoint=DirectAdjoint(),
+            epsabs=1e-8,
+            epsrel=1e-8,
+        )[0]
+        np.testing.assert_allclose(
+            np.asarray(jax.grad(f)(self.args)),
+            np.asarray(jax.jacfwd(f)(self.args)),
+            rtol=1e-7,
+        )
 
 
 @pytest.mark.parametrize("quad", all_methods)

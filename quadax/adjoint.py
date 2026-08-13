@@ -8,6 +8,7 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax._src import core as jcore
 from jax.extend.core import Primitive
 from jax.flatten_util import ravel_pytree
@@ -101,13 +102,20 @@ def _with_checkpoint(ops, checkpoint):
 
 
 def _zero_tangent(tree):
-    """Zero tangent for a pytree, using None for non-inexact leaves."""
+    """Zero tangent for a pytree, materialized rather than symbolic.
+
+    Nothing in the integrator state is differentiable, so every leaf gets an explicit
+    zero: an ordinary zeros array for the inexact leaves, and a ``float0`` array (the
+    tangent type of a non-inexact primal, and zero-sized) for the integer and boolean
+    bookkeeping. Returning ``None`` for the latter would be more natural but this causes
+    problems with jax 0.7.0 and 0.7.1.
+    """
 
     def z(x):
         x = jnp.asarray(x)
         if jnp.issubdtype(x.dtype, jnp.inexact):
             return jnp.zeros_like(x)
-        return None
+        return np.zeros(x.shape, dtype=jax.dtypes.float0)
 
     return jax.tree.map(z, tree)
 
@@ -137,42 +145,8 @@ class AbstractAdjoint(eqx.Module):
     which runs the primal solve and attaches whatever custom differentiation rule it
     wants.
 
-    Notes
-    -----
-    There are two, both supporting forward and reverse mode.
-
-    :class:`DirectAdjoint` is the default. It differentiates the discretization the
-    primal solve settled on, so it spends no extra integrand evaluations on the
-    derivative and is the fastest option in forward mode.
-
-    :class:`LeibnizAdjoint` instead evaluates the derivative with a second adaptive
-    solve, giving it its own error control rather than inheriting the subdivision chosen
-    for the integral. This buys:
-
-    * **Accuracy.** When the derivative of the integrand is sharply peaked somewhere the
-      integrand itself is smooth, the subdivision that resolves the integral need not
-      resolve its derivative. On such a problem at a loose tolerance the difference can
-      be several orders of magnitude; at a tolerance tight enough that the integral's
-      subdivision resolves the derivative anyway, it may be less of an issue.
-    * **Speed of gradients.** Reverse mode through the quadrature is expensive and gets
-      more so as ``max_ninter`` grows, while evaluating the adjoint integral does not,
-      so ``jax.grad`` of a scalar-valued integral is often several times faster and can
-      be far more than that when the integrand is expensive.
-
-    Both pick up the jump term from differentiating with respect to a breakpoint that
-    sits on a discontinuity. Neither can see a discontinuity that has no breakpoint at
-    it -- declare one there.
-
-    These are rules of thumb, not laws. The balance shifts with how expensive the
-    integrand is relative to the quadrature around it, how hard its derivative is to
-    integrate compared to the integrand, and how many parameters are involved. Time both
-    on your own problem before caring much about the difference.
-
-    Whichever you pick, ``max_ninter`` costs something even on a problem that converges
-    immediately, because the sub-interval arrays are sized by it rather than by the
-    number of sub-intervals actually used. With ``checkpoint`` left on that cost is
-    modest, but it is not zero, so prefer sizing it to the problem over leaving it
-    generous.
+    See the Adjoints section of the API documentation for the adjoints quadax ships and
+    how to choose between them.
     """
 
     @abc.abstractmethod
@@ -238,18 +212,20 @@ class DirectAdjoint(AbstractAdjoint):
     Commonly called "discretize then optimize": the quadrature is discretized first, and
     the derivative is then taken of that discretization.
 
-    This is the default. It is usually the fastest option for forward mode. For a
-    gradient of a scalar-valued integral via ``jax.grad``, :class:`LeibnizAdjoint` can
-    be often several times faster; see :class:`AbstractAdjoint` for the trade-offs.
+    This is the default, and is the cheaper option for a cheap integrand in either mode.
+    When one evaluation of the integrand is expensive, :class:`LeibnizAdjoint` can be an
+    order of magnitude faster or more; see the Adjoints section of the API documentation
+    for the trade-offs.
 
     It works by running the primal solve recording the final adaptive mesh, and then
     using the same mesh (with corrections when differentiating the interval itself) to
     integrate the derivative of the integrand.
 
     The derivative therefore inherits the subdivision chosen for the integral, and no
-    extra integrand evaluations are spent on error control for it. That is what makes
-    this the cheapest option, and also the reason to reach for a Leibniz adjoint when
-    the derivative needs resolving that the integral did not pay for.
+    error control of its own is paid for. That is the reason to reach for a Leibniz
+    adjoint when the derivative needs resolving that the integral did not pay for, and
+    the reason a derivative costs roughly what the converged subdivision costs however
+    generous ``max_ninter`` was.
 
     Methods with no subdivision to reuse (Romberg) are handled the same way in spirit:
     the number of Richardson levels the solve settled on is frozen instead of a mesh.
@@ -264,13 +240,11 @@ class DirectAdjoint(AbstractAdjoint):
         backward pass rather than storing it. Without it reverse mode keeps the
         integrand's value at every node of every sub-interval, which dominates its
         memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by a factor of ten or more and is usually also faster,
-        so it is on by default. Turn it off when the integrand is expensive enough that
-        evaluating it twice costs more than storing the results. No effect in forward
-        mode. Applies to whatever part of a derivative is taken on a fixed subdivision:
-        for :class:`DirectAdjoint` that is the whole of it, for :class:`LeibnizAdjoint`
-        only the derivative with respect to the integration limits, since its derivative
-        with respect to ``args`` comes from a separate solve that stores nothing.
+        recomputing cuts that by around 3x at the default budget and by 30x or more
+        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
+        default. Turning it off has not been found to pay for itself even on integrands
+        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
+        effect in forward mode.
 
     """
 
@@ -335,29 +309,43 @@ def _direct_jvp(primals, tangents, *, ops):
 
 
 # ---------------------------------------------------------------------------------
-# Unified Leibniz adjoint.
+# Leibniz adjoint.
 #
 # JAX allows a function to carry a custom JVP rule or a custom VJP rule, but not both,
-# which is why the two Leibniz adjoints above are each single-mode. The way around that
-# is to put the *tangent* map in a primitive of its own. The integral itself stays an
-# ordinary custom_jvp (it is not linear in the parameters), but its JVP rule emits this
-# primitive, which is linear in the tangent and carries an explicit transpose rule. JAX
-# then gets forward mode from the JVP and reverse mode by transposing it, and each
-# direction runs the solve it actually needs: a scalar integrand contracted with the
-# tangent going forwards, the vector-valued adjoint integrand coming back.
+# The way around that is to put the *tangent* map in a primitive of its own. The
+# integral itself stays an ordinary custom_jvp (it is not linear in the parameters), but
+# its JVP rule emits this primitive, which is linear in the tangent and carries an
+# explicit transpose rule. JAX then gets forward mode from the JVP and reverse mode by
+# transposing it, and each direction runs the solve it actually needs: a scalar
+# integrand contracted with the tangent going forwards, the vector-valued adjoint
+# integrand coming back.
 _leibniz_p = Primitive("quadax_leibniz_tangent")
 
 
 def _leibniz_unpack(flat, n, treedef, static, frozen_treedef):
-    """Split the operands back into (tangent, primal, frozen discretization)."""
+    """Split the operands into (tangent, differentiable primal, primal, frozen)."""
+    # ``treedef`` is the authority on which leaves are differentiable. It was recorded
+    # when the primitive was bound, and the tangent, the residuals and the cotangents
+    # all use it, so the three stay in step by construction.
+
+    # Recovering that structure from the operand *values* instead -- filtering the
+    # reassembled primals for inexact arrays -- looks equivalent but is not. An operand
+    # that was a concrete python float at bind time (a tolerance passed as
+    # ``epsabs=1e-8`` rather than left to default) becomes a jaxpr literal, and
+    # ``backward_pass`` hands literals back as raw python floats. Filtering drops them,
+    # and the transpose rule then returns fewer cotangents than the primitive has linear
+    # operands, which JAX reports as "foreach() argument 2 is shorter than argument 1".
+    # Hence ``jnp.asarray``: the residuals are all inexact by construction, so promoting
+    # a literal back to an array just undoes the unwrapping.
+
     tangent = jax.tree.unflatten(treedef, list(flat[:n]))
-    dyn = jax.tree.unflatten(treedef, list(flat[n : 2 * n]))
+    dyn = jax.tree.unflatten(treedef, [jnp.asarray(x) for x in flat[n : 2 * n]])
     frozen = (
         None
         if frozen_treedef is None
         else jax.tree.unflatten(frozen_treedef, list(flat[2 * n :]))
     )
-    return tangent, eqx.combine(dyn, static), frozen
+    return tangent, dyn, eqx.combine(dyn, static), frozen
 
 
 def _run_solve(ops, rule, integrand, interval_t, epsabs, epsrel, kwargs, frozen):
@@ -380,10 +368,11 @@ def _leibniz_impl(
     out_sds,
 ):
     """Forward direction: integrate the tangent of the mapped integrand."""
-    dyn_t, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
+    dyn_t, dyn, primals, frozen = _leibniz_unpack(
+        flat, n, treedef, static, frozen_treedef
+    )
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)
-    dyn = eqx.filter(primals, eqx.is_inexact_array)
     _, interval_t = ops.build(interval, args, consts)
 
     def dvfunc(t):
@@ -466,10 +455,9 @@ def _leibniz_transpose(
 ):
     """Reverse direction: integrate the cotangent of the mapped integrand."""
     del out_sds
-    _, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
+    _, dyn, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)
-    dyn = eqx.filter(primals, eqx.is_inexact_array)
     _, interval_t = ops.build(interval, args, consts)
     _, unravel = ravel_pytree(dyn)
 
@@ -534,8 +522,8 @@ class LeibnizAdjoint(AbstractAdjoint):
     r"""Differentiate by the Leibniz rule, either mode, with its own error control.
 
     The derivative is evaluated with its own adaptive solve, so it gets its own error
-    control rather than inheriting the subdivision chosen for the integral -- see
-    :class:`AbstractAdjoint` for when that is worth paying for.
+    control rather than inheriting the subdivision chosen for the integral, see the
+    Adjoints section of the API documentation for when that is worth paying for.
 
     Because each mode picks its own subdivision, forward and reverse results agree to
     quadrature accuracy rather than exactly.
@@ -554,13 +542,11 @@ class LeibnizAdjoint(AbstractAdjoint):
         backward pass rather than storing it. Without it reverse mode keeps the
         integrand's value at every node of every sub-interval, which dominates its
         memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by a factor of ten or more and is usually also faster,
-        so it is on by default. Turn it off when the integrand is expensive enough that
-        evaluating it twice costs more than storing the results. No effect in forward
-        mode. Applies to whatever part of a derivative is taken on a fixed subdivision:
-        for :class:`DirectAdjoint` that is the whole of it, for :class:`LeibnizAdjoint`
-        only the derivative with respect to the integration limits, since its derivative
-        with respect to ``args`` comes from a separate solve that stores nothing.
+        recomputing cuts that by around 3x at the default budget and by 30x or more
+        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
+        default. Turning it off has not been found to pay for itself even on integrands
+        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
+        effect in forward mode.
     """
 
     checkpoint: bool = True
