@@ -15,22 +15,55 @@ jobs:
     outputs:
       jax-versions: ${{ steps.discover.outputs.versions }}
     steps:
+      - uses: actions/checkout@v6
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Read minimum supported JAX version from pyproject.toml
+        id: minimum
+        run: |
+          # Single source for the oldest version we test: the lower bound of the jax
+          # pin in project dependencies. Upper bound is still whatever the latest is on
+          # pypi, we want to test new versions as they come out before bumping
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              deps = tomllib.load(f)["project"]["dependencies"]
+
+          # `\b` keeps this from matching the "jaxlib" requirement if one is
+          # ever added alongside "jax".
+          jax = next(d for d in deps if re.match(r"^jax\b", d))
+          match = re.search(r">=\s*([0-9]+(?:\.[0-9]+)*)", jax)
+          if match is None:
+              raise SystemExit(f"no lower bound in jax requirement {jax!r}")
+
+          # normalize to major.minor.patch so the jq comparison below can treat
+          # it as a fixed length list of numbers
+          parts = (match.group(1).split(".") + ["0", "0"])[:3]
+          print(f"version={'.'.join(parts)}")
+          PY
       - name: Discover available JAX versions from PyPI
         id: discover
         run: |
-          # Fetch every stable, non-yanked JAX release >= 0.4.36 from PyPI and
-          # emit them as a JSON array for the test matrix below. Missing
-          # versions and any newly released versions are handled
+          # Fetch every stable, non-yanked JAX release >= the minimum we
+          # support from PyPI and emit them as a JSON array for the test matrix
+          # below. Missing versions and any newly released versions are handled
           # automatically. jaxlib only became pip-installable at 0.4.18, so
           # older jax cannot get a matching jaxlib here.
           versions=$(curl -s https://pypi.org/pypi/jax/json | jq -c \
-            '[.releases | to_entries[]
+            --arg min "${{ steps.minimum.outputs.version }}" \
+            '($min | split(".") | map(tonumber)) as $minimum
+             | [.releases | to_entries[]
               | select(.value | length > 0)
               | select(.value[0].yanked == false)
               | .key
               | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))
-              | select((split(".") | map(tonumber)) >= [0, 4, 36])]
+              | select((split(".") | map(tonumber)) >= $minimum)]
              | sort_by(. | split(".") | map(tonumber))')
+          echo "testing jax >= ${{ steps.minimum.outputs.version }}: ${versions}"
           echo "versions=${versions}" >> "$GITHUB_OUTPUT"
 
   jax_tests:
