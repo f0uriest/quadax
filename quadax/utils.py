@@ -335,15 +335,6 @@ def bounded_while_loop(condfun, bodyfun, init_val, bound):
     return jax.lax.scan(scanfun, init_val, None, bound)[0]
 
 
-def setdefault(val, default, cond=None) -> Any:
-    """Return val if condition is met, otherwise default.
-
-    If cond is None, then it checks if val is not None, returning val
-    or default accordingly.
-    """
-    return val if cond or (cond is None and val is not None) else default
-
-
 def _get_eps(x: jax.Array) -> jax.Array:
     return jnp.finfo(x.dtype).eps  # pyright: ignore
 
