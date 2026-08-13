@@ -309,16 +309,16 @@ def _direct_jvp(primals, tangents, *, ops):
 
 
 # ---------------------------------------------------------------------------------
-# Unified Leibniz adjoint.
+# Leibniz adjoint.
 #
 # JAX allows a function to carry a custom JVP rule or a custom VJP rule, but not both,
-# which is why the two Leibniz adjoints above are each single-mode. The way around that
-# is to put the *tangent* map in a primitive of its own. The integral itself stays an
-# ordinary custom_jvp (it is not linear in the parameters), but its JVP rule emits this
-# primitive, which is linear in the tangent and carries an explicit transpose rule. JAX
-# then gets forward mode from the JVP and reverse mode by transposing it, and each
-# direction runs the solve it actually needs: a scalar integrand contracted with the
-# tangent going forwards, the vector-valued adjoint integrand coming back.
+# The way around that is to put the *tangent* map in a primitive of its own. The
+# integral itself stays an ordinary custom_jvp (it is not linear in the parameters), but
+# its JVP rule emits this primitive, which is linear in the tangent and carries an
+# explicit transpose rule. JAX then gets forward mode from the JVP and reverse mode by
+# transposing it, and each direction runs the solve it actually needs: a scalar
+# integrand contracted with the tangent going forwards, the vector-valued adjoint
+# integrand coming back.
 _leibniz_p = Primitive("quadax_leibniz_tangent")
 
 

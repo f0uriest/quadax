@@ -223,9 +223,21 @@ class NestedRule(AbstractQuadratureRule):
             # is the conservative choice, a larger exponent would shrink the estimate.
             # The guard covers a constant integrand, where ``integral_mmn`` is zero and
             # the ratio would be 0/0.
+
+            # double where trick to avoid nans when ratio would be zero or inf
+            # The scaling is only defined when both quantities are nonzero. The ratio
+            # must also be substituted, not just masked afterwards: ``x ** 1.5`` has an
+            # infinite second derivative at ``x == 0``, so differentiating the
+            # unselected branch twice yields ``inf * 0 == nan``, which ``where``
+            # then propagates.
+            # ``abserr`` is exactly zero whenever the two rules agree to the last bit,
+            # which a smooth enough integrand does reach.
+            scalable = (integral_mmn != 0.0) & (abserr != 0.0)
+            mmn_safe = jnp.where(scalable, integral_mmn, 1.0)
+            ratio = jnp.where(scalable, 200.0 * abserr / mmn_safe, 1.0)
             abserr = jnp.where(
-                (integral_mmn != 0.0) & (abserr != 0.0),
-                integral_mmn * jnp.minimum(1.0, (200.0 * abserr / integral_mmn) ** 1.5),
+                scalable,
+                integral_mmn * jnp.minimum(1.0, ratio**1.5),
                 abserr,
             )
 
