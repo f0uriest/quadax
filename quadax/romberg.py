@@ -75,11 +75,12 @@ def romberg(
         should be callable.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which gives the exact derivative of the discretized problem in either mode, and
-        is usually the fastest option. ``LeibnizAdjoint`` is slower but gives the
-        derivative its own error control (ie, can better approximate the true
-        continuous derivative), and in reverse mode uses much less memory; see
-        ``AbstractAdjoint`` for when that is worth paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -315,11 +316,12 @@ def rombergts(
         should be callable.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which gives the exact derivative of the discretized problem in either mode, and
-        is usually the fastest option. ``LeibnizAdjoint`` is slower but gives the
-        derivative its own error control (ie, can better approximate the true
-        continuous derivative), and in reverse mode uses much less memory; see
-        ``AbstractAdjoint`` for when that is worth paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
 
     Returns

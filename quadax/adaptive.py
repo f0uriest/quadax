@@ -6,6 +6,7 @@ from functools import partial
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 from .adjoint import (
@@ -83,12 +84,12 @@ def quadgk(
         should be callable.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, supports both
-        forward and reverse mode, and is usually the fastest option.
-        ``LeibnizAdjoint`` is slower but gives the derivative its own error control
-        (ie, can better approximate the true continuous derivative), and in reverse
-        mode uses much less memory; see ``AbstractAdjoint`` for when that is worth
-        paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -193,12 +194,12 @@ def quadcc(
         should be callable.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, supports both
-        forward and reverse mode, and is usually the fastest option.
-        ``LeibnizAdjoint`` is slower but gives the derivative its own error control
-        (ie, can better approximate the true continuous derivative), and in reverse
-        mode uses much less memory; see ``AbstractAdjoint`` for when that is worth
-        paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -302,12 +303,12 @@ def quadts(
         should be callable.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, supports both
-        forward and reverse mode, and is usually the fastest option.
-        ``LeibnizAdjoint`` is slower but gives the derivative its own error control
-        (ie, can better approximate the true continuous derivative), and in reverse
-        mode uses much less memory; see ``AbstractAdjoint`` for when that is worth
-        paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
 
     Returns
     -------
@@ -405,12 +406,12 @@ def adaptive_quadrature(
         algorithm.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, supports both
-        forward and reverse mode, and is usually the fastest option.
-        ``LeibnizAdjoint`` is slower but gives the derivative its own error control
-        (ie, can better approximate the true continuous derivative), and in reverse
-        mode uses much less memory; see ``AbstractAdjoint`` for when that is worth
-        paying for.
+        which is gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
+        its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter``
+        is generous; see the Adjoints section of the API documentation for when that
+        is worth paying for.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -499,21 +500,30 @@ _CHUNK = 8
 
 
 def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
-    """Apply the local rule on a fixed subdivision and sum the contributions.
+    """Apply the local rule on a fixed subdivision and sum the contributions."""
+    # Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
+    # block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make
+    # a gradient cost ``max_ninter`` rather than the number of sub-intervals actually
+    # used, because reverse mode stacks residuals for every iteration whether or not it
+    # did any work. A plain ``vmap`` fixes that but materializes the whole subdivision
+    # at once.
 
-    Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
-    block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make a
-    gradient cost ``max_ninter`` rather than the number of sub-intervals actually used,
-    because reverse mode stacks residuals for every iteration whether or not it did any
-    work. A plain ``vmap`` fixes that but materializes the whole subdivision at once.
+    # Slots past the end of the subdivision are empty (``a == b``). A block with no used
+    # slot in it is skipped entirely with a ``cond``, which is what keeps the cost of a
+    # derivative tracking the sub-intervals the solve actually used rather than
+    # ``max_ninter``; the solve fills slots from the front, so the used blocks are the
+    # leading ones. The predicate is reduced with ``unvmap_any`` so that it stays a
+    # scalar under ``vmap`` and the skip survives batching, at the cost of a block being
+    # evaluated for every batch element as soon as one of them needs it.
 
-    Slots past the end of the subdivision are empty (``a == b``). They are handed a real
-    sub-interval and masked out afterwards rather than skipped with a ``cond``: under
-    ``vmap`` a batched ``cond`` becomes a ``select`` carrying a ``stop_gradient`` that
-    cannot be transposed. Substituting a real sub-interval also stops an integrand that
-    is singular somewhere in the mapped domain from poisoning the unused slots with a
-    NaN that the mask would then propagate.
-    """
+    # Within a block the empty slots are still handed a real sub-interval and masked out
+    # afterwards rather than skipped: a per-slot ``cond`` sits inside the ``vmap``,
+    # where a batched ``cond`` becomes a ``select`` carrying a ``stop_gradient`` that
+    # cannot be transposed. Substituting a real sub-interval also stops an integrand
+    # that is singular somewhere in the mapped domain from poisoning the unused slots
+    # with a NaN that the mask would then propagate. So the granularity of the skip is
+    # ``_CHUNK``.
+
     del kwargs
     used = a_arr != b_arr
     a_safe = jnp.where(used, a_arr, a_arr[0])
@@ -533,9 +543,23 @@ def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
 
     def bodyfun(total, block):
         a, b, m = block
-        y = jax.vmap(apply1)(a, b)
-        y = y * m.reshape((-1,) + (1,) * (y.ndim - 1))
-        return total + jnp.sum(y, axis=0), None
+
+        def evaluate(_):
+            y = jax.vmap(apply1)(a, b)
+            y = y * m.reshape((-1,) + (1,) * (y.ndim - 1))
+            return jnp.sum(y, axis=0)
+
+        # `unvmap_any` keeps the predicate a scalar under `vmap`, so the block is
+        # skipped whenever *no* batch element uses it instead of degrading to a select
+        # that evaluates every block. No inner per-element gate is needed: `m` already
+        # zeroes the slots an individual element does not use.
+        contrib = jax.lax.cond(
+            unvmap_any(jnp.any(m != 0)),
+            evaluate,
+            lambda _: jnp.zeros(sds.shape, sds.dtype),
+            None,
+        )
+        return total + contrib, None
 
     if checkpoint:
         # Recompute each block during the backward pass instead of keeping the

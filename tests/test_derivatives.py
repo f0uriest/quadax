@@ -506,6 +506,59 @@ class TestUnifiedLeibnizAdjoint:
         )
         assert np.asarray(jax.hessian(f)(self.args)).shape == (3, 3)
 
+    @pytest.mark.parametrize("quad", machinery_methods)
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev, jax.grad])
+    @pytest.mark.parametrize("wrt_interval", [False, True])
+    def test_python_float_tolerances(self, quad, transform, wrt_interval):
+        """A tolerance given as a python float must differentiate like any other.
+
+        Every other test here leaves the tolerances at their default, which the solver
+        turns into arrays. A concrete float instead reaches the primitive as a jaxpr
+        literal, and reverse mode used to lose that operand when the transpose rule
+        rebuilt its cotangent tree by filtering values for inexact arrays -- returning
+        one cotangent fewer than the primitive had linear operands.
+        """
+        if wrt_interval and transform is jax.grad:
+            pytest.skip("grad needs a scalar output; jacrev covers the same path")
+        kwargs = {"epsabs": 1e-8, "epsrel": 1e-8}
+        if wrt_interval:
+            f = lambda v: quad(
+                self.fun, v, (self.args,), adjoint=LeibnizAdjoint(), **kwargs
+            )[0]  # noqa: E501
+            target = self.interval
+        else:
+            f = lambda c: quad(
+                self.fun, self.interval, (c,), adjoint=LeibnizAdjoint(), **kwargs
+            )[0]  # noqa: E501
+            target = self.args
+        np.testing.assert_allclose(
+            np.asarray(transform(f)(target)),
+            self._ref(quad, wrt_interval=wrt_interval),
+            rtol=1e-7,
+        )
+
+    @pytest.mark.parametrize("quad", romberg_methods)
+    def test_python_float_tolerances_romberg_direct(self, quad):
+        """Romberg reaches the same primitive under ``DirectAdjoint``.
+
+        It has no subdivision to reuse, so ``DirectAdjoint`` freezes the level count and
+        routes through ``_leibniz`` to get a transposable rule -- which means the
+        literal tolerance bug reached ``DirectAdjoint`` too, by this path only.
+        """
+        f = lambda c: quad(  # noqa: E731
+            self.fun,
+            self.interval,
+            (c,),
+            adjoint=DirectAdjoint(),
+            epsabs=1e-8,
+            epsrel=1e-8,
+        )[0]
+        np.testing.assert_allclose(
+            np.asarray(jax.grad(f)(self.args)),
+            np.asarray(jax.jacfwd(f)(self.args)),
+            rtol=1e-7,
+        )
+
 
 @pytest.mark.parametrize("quad", all_methods)
 @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
