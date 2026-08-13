@@ -114,6 +114,13 @@ class NestedRule(AbstractQuadratureRule):
     reliably conservative. This is a property of nested rules in general rather than of
     any particular order, since raising the order only raises the frequency at which it
     sets in. Strongly oscillatory integrands are better served by a specialized method.
+
+    References
+    ----------
+    .. [1] R. Piessens, E. de Doncker-Kapenga, C. W. Überhuber, D. K. Kahaner.
+           "QUADPACK: A Subroutine Package for Automatic Integration". Springer Series
+           in Computational Mathematics, vol. 1. Springer-Verlag, Berlin, 1983.
+           doi:10.1007/978-3-642-61786-7
     """
 
     _xh: jax.Array
@@ -187,12 +194,49 @@ class NestedRule(AbstractQuadratureRule):
 
             uflow = jnp.finfo(f.dtype).tiny
             eps = jnp.finfo(f.dtype).eps
+
+            # The difference between the two rules is dominated by the error of the
+            # *low* order one, so it says little about the error of ``result``, which
+            # comes from the high order rule and is typically far smaller. It is only a
+            # starting point, and is rescaled below rather than reported directly.
             abserr = jnp.abs(result_kronrod - result_gauss)
+
+            # Measure that discrepancy against how much the integrand varies over the
+            # interval. This rescaling, and the 200 and 1.5 in it, are QUADPACK's, fit
+            # empirically there rather than derived; see [1] and the ``dqk*`` routines,
+            # which use the same two constants at every order from 15 through 61.
+            # With ``r = abserr / integral_mmn`` the estimate becomes
+            # ``integral_mmn * min(1, (200*r)**1.5)``, which has three regimes:
+            #   - ``r >= 1/200``: saturate at ``integral_mmn``. The rules disagree at
+            #     the scale of the variation of the integrand, so nothing has been
+            #     resolved and the whole variation is the only honest bound.
+            #   - middle: inflate the raw difference, by up to ~200x. This is most of
+            #     the useful range, so the rescaling is usually pessimistic rather than
+            #     optimistic, contrary to how the formula first reads.
+            #   - ``r < 200**-1.5``: deflate, the regime where the two rules agree to
+            #     near machine precision and the difference genuinely overstates the
+            #     error of the high order rule.
+            # The exponent is the ratio of the two rules' convergence rates: a rule
+            # exact to degree ``d`` has local error ``~h**(d+2)``, giving
+            # ``(d_high+2)/(d_low+2)``. 1.5 is the large-order limit of that ratio for
+            # Gauss-Kronrod, and a lower bound across every rule implemented here, so it
+            # is the conservative choice, a larger exponent would shrink the estimate.
+            # The guard covers a constant integrand, where ``integral_mmn`` is zero and
+            # the ratio would be 0/0.
             abserr = jnp.where(
                 (integral_mmn != 0.0) & (abserr != 0.0),
                 integral_mmn * jnp.minimum(1.0, (200.0 * abserr / integral_mmn) ** 1.5),
                 abserr,
             )
+
+            # No error estimate can be meaningful below the noise of the evaluation
+            # itself. This floor is not a count of summed terms (XLA's pairwise
+            # reduction holds summation error near ``eps`` whatever the rule size) but
+            # covers the conditioning of the integrand: nodes carry ``~eps*|x|``, which
+            # the integrand amplifies by ``|f'|``, so the achievable accuracy degrades
+            # as the integrand varies faster. 50 is a compromise across that, generous
+            # for smooth integrands and mildly optimistic for strongly oscillatory ones.
+            # The ``uflow`` guard keeps the product from underflowing to zero.
             abserr = jnp.where(
                 (integral_abs > uflow / (50.0 * eps)),
                 jnp.maximum((eps * 50.0) * integral_abs, abserr),
