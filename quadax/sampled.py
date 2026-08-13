@@ -220,8 +220,10 @@ def _basic_simpson(
         h = jnp.diff(x, axis=axis)
         sl0 = _tupleset(slice_all, axis, slice(start, stop, step))
         sl1 = _tupleset(slice_all, axis, slice(start + 1, stop + 1, step))
-        h0 = h[sl0].astype(float)
-        h1 = h[sl1].astype(float)
+        # The spacings only need to be made *inexact*; a plain `.astype(float)` would
+        # also drag an already-float32 `x` up to float64 under x64.
+        h0 = _ensure_float_array(h[sl0])
+        h1 = _ensure_float_array(h[sl1])
         hsum = h0 + h1
         hprod = h0 * h1
         h0divh1 = jnp.where(h1 == 0, 0, h0 / h1)
@@ -287,8 +289,12 @@ def simpson(
             raise ValueError("If given, length of x along axis must be the same as y.")
 
     if N % 2 == 0:
-        val = jnp.array(0.0)
-        result = jnp.array(0.0)
+        # Weak python floats rather than `jnp.array(0.0)`. The latter is a *strong*
+        # array at the default dtype, so under x64 it dragged the whole even-N branch up
+        # to float64 regardless of what `y` and `x` were; these just take the dtype of
+        # whatever they are combined with.
+        val = 0.0
+        result = 0.0
         slice_all = (slice(None),) * nd
 
         if N == 2:
@@ -309,7 +315,7 @@ def simpson(
             slice2 = _tupleset(slice_all, axis, -2)
             slice3 = _tupleset(slice_all, axis, -3)
 
-            h = jnp.asarray([dx, dx])
+            h = jnp.full((2,), dx, _float_dtype(y))
             if x is not None:
                 # grab the last two spacings from the appropriate axis
                 hm2 = _tupleset(slice_all, axis, slice(-2, -1, 1))
@@ -345,7 +351,7 @@ def simpson(
 
             result += alpha * y[slice1] + beta * y[slice2] - eta * y[slice3]
 
-        result = result + val
+        result = jnp.asarray(result + val)
     else:
         result = _basic_simpson(y, 0, N - 2, x, dx, axis)
     return result
@@ -492,7 +498,7 @@ def _cumulatively_sum_simpson_integrals(
 
     shape = list(sub_integrals_h1.shape)
     shape[-1] += 1
-    sub_integrals = jnp.empty(shape)
+    sub_integrals = jnp.empty(shape, sub_integrals_h1.dtype)
     sub_integrals = sub_integrals.at[..., :-1:2].set(sub_integrals_h1[..., ::2])
     sub_integrals = sub_integrals.at[..., 1::2].set(sub_integrals_h2[..., ::2])
     # Integral over last subinterval can only be calculated from
@@ -530,6 +536,19 @@ def _cumulative_simpson_unequal_intervals(y: jax.Array, dx: jax.Array) -> jax.Ar
     coeff3 = -x21x21_x31x32
 
     return x21 / 6 * (coeff1 * f1 + coeff2 * f2 + coeff3 * f3)
+
+
+def _float_dtype(arr: ArrayLike):
+    """The dtype of ``arr``, made inexact.
+
+    The working dtype of a sampled integral: whatever the samples are carried at, except
+    that integer samples fall back to the default float, since there is no float dtype
+    they imply.
+    """
+    dtype = jnp.asarray(arr).dtype
+    if jnp.issubdtype(dtype, jnp.integer):
+        return jnp.result_type(float)
+    return dtype
 
 
 def _ensure_float_array(arr: ArrayLike) -> jax.Array:

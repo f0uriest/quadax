@@ -608,3 +608,48 @@ def test_romberg_differentiates_the_extrapolation(quad):
     np.testing.assert_allclose(fwd, rev, rtol=ULP_RTOL, atol=ULP_ATOL)
     # and accurate to Romberg's standard, not the trapezoid rule's
     assert abs(float(fwd[0]) - exact) < 1e-9
+
+
+class TestDerivativeDTypes:
+    """Derivatives keep the working dtype set by ``interval``.
+
+    The dtype plumbing itself is covered in ``test_adaptive.py``; here it only has to
+    survive the adjoints.
+    """
+
+    # how much worse than sqrt(eps) a converged result is allowed to be, since these
+    # check dtype plumbing rather than accuracy
+    slop = 50
+
+    @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
+    @pytest.mark.parametrize("method", adaptive_methods)
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_grad_dtype(self, adjoint, method, dtype):
+        """Reverse mode returns a gradient at the interval's dtype, and correct."""
+
+        def total(c):
+            y, _ = method(
+                lambda x, c: jnp.exp(-c * x),
+                jnp.array([0.0, 1.0], dtype=dtype),
+                args=(c,),
+                adjoint=adjoint,
+            )
+            return y
+
+        c = jnp.array(1.0, dtype)
+        g = jax.grad(total)(c)
+        assert g.dtype == dtype
+        # d/dc int_0^1 exp(-c x) dx = (exp(-c)*(c+1) - 1)/c^2
+        expected = (np.exp(-1) * 2 - 1) / 1.0
+        np.testing.assert_allclose(
+            float(g), expected, rtol=self.slop * np.sqrt(float(jnp.finfo(dtype).eps))
+        )
+
+    @pytest.mark.parametrize("method", adaptive_methods)
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_jvp_dtype(self, method, dtype):
+        """Forward mode keeps both the primal and the tangent at that dtype."""
+        f = lambda a: method(jnp.sin, jnp.array([0.0, 1.0], dtype=dtype) * a)[0]
+        y, y_dot = jax.jvp(f, (jnp.array(1.0, dtype),), (jnp.array(1.0, dtype),))
+        assert y.dtype == dtype
+        assert y_dot.dtype == dtype

@@ -1,5 +1,7 @@
 """Quadrature nodes and weights."""
 
+import functools
+
 import numpy as np
 
 kronrod_15_weights = np.array(
@@ -768,3 +770,59 @@ gk_weights = {
         "wg": gauss_30_weights,
     },
 }
+
+
+@functools.lru_cache
+def get_cc_table(order: int):
+    """Clenshaw-Curtis nodes and weights, built in float64 on the host.
+
+    In numpy rather than with ``jnp`` ops so that the table does not inherit whatever
+    the JAX default dtype happens to be. Building the DCT matrix in float32 and using it
+    in float32 is strictly worse than building it in float64 and rounding it once.
+    """
+
+    def _cc_get_weights(N):
+        d = 2 / (1 - np.arange(0, N + 1, 2, dtype=float) ** 2)
+        d[0] *= 1 / 2
+        d[-1] *= 1 / 2
+        k = np.arange(N // 2 + 1)
+        n = np.arange(N // 2 + 1)
+        D = 2 / N * np.cos(k[:, None] * n[None, :] * np.pi / (N // 2))
+        D = np.where((n == 0) | (n == N // 2), D * 1 / 2, D)
+        w = D.T @ d  # can be done faster with fft
+        t = np.arange(0, 1 + N // 2) * np.pi / N
+        x = np.cos(t)
+        w[-1] *= 2
+        return x, w
+
+    xh, wh = _cc_get_weights(order)
+    wl = np.zeros_like(wh)
+    wl[::2] = _cc_get_weights(order // 2)[1]
+
+    return (
+        np.concatenate([xh, -xh[:-1][::-1]]),
+        np.concatenate([wh, wh[:-1][::-1]]),
+        np.concatenate([wl, wl[:-1][::-1]]),
+    )
+
+
+@functools.lru_cache
+def get_tanhsinh_table(order: int, tmax: float):
+    """Tanh-sinh nodes and weights on ``[-tmax, tmax]``, built in float64 on the host.
+
+    ``tmax`` is a parameter rather than being derived here because it depends on the
+    precision the nodes will be *used* at; see ``quadax.utils.tanhsinh_tmax``.
+    """
+    _xts = lambda t: np.tanh(np.pi / 2 * np.sinh(t))
+    _wts = lambda t: np.pi / 2 * np.cosh(t) / np.cosh(np.pi / 2 * np.sinh(t)) ** 2
+
+    th = np.linspace(-tmax, tmax, order)
+    tl = np.linspace(-tmax, tmax, order // 2 + 1)
+
+    xh = _xts(th)
+    wh = _wts(th) * np.diff(th)[0]
+    wl = np.zeros_like(wh)
+    wl[::2] = _wts(tl) * np.diff(tl)[0]
+    wh *= 2 / wh.sum()
+    wl *= 2 / wl.sum()
+    return xh, wh, wl

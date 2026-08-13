@@ -22,7 +22,13 @@ from .fixed_order import (
     GaussKronrodRule,
     TanhSinhRule,
 )
-from .utils import QuadratureInfo, _get_eps, bounded_while_loop, errorif
+from .utils import (
+    QuadratureInfo,
+    _real_dtype,
+    bounded_while_loop,
+    errorif,
+    resolve_dtypes,
+)
 
 NORMAL_EXIT = 0
 MAX_NINTER = 1
@@ -62,17 +68,22 @@ def quadgk(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
-        denote infinite intervals.
+        denote infinite intervals. Its dtype sets the working precision: the integrand
+        is called with an ``x`` of this dtype, and the result follows it unless the
+        integrand upcasts. A integer types or python floats falls back to the JAX
+        default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is square root of
-        machine precision. Algorithm tries to obtain an accuracy of
-        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
-        `fun` over `interval`, and ``result`` is the numerical approximation.
+        Absolute and relative error tolerance. Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two. Algorithm tries to obtain an
+        accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` =
+        integral of `fun` over `interval`, and ``result`` is the numerical
+        approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -172,17 +183,22 @@ def quadcc(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
-        denote infinite intervals.
+        denote infinite intervals. Its dtype sets the working precision: the integrand
+        is called with an ``x`` of this dtype, and the result follows it unless the
+        integrand upcasts. A integer types or python floats falls back to the JAX
+        default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is square root of
-        machine precision. Algorithm tries to obtain an accuracy of
-        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
-        `fun` over `interval`, and ``result`` is the numerical approximation.
+        Absolute and relative error tolerance. Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two. Algorithm tries to obtain an
+        accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` =
+        integral of `fun` over `interval`, and ``result`` is the numerical
+        approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -281,17 +297,22 @@ def quadts(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
-        denote infinite intervals.
+        denote infinite intervals. Its dtype sets the working precision: the integrand
+        is called with an ``x`` of this dtype, and the result follows it unless the
+        integrand upcasts. A integer types or python floats falls back to the JAX
+        default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is square root of
-        machine precision. Algorithm tries to obtain an accuracy of
-        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
-        `fun` over `interval`, and ``result`` is the numerical approximation.
+        Absolute and relative error tolerance. Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two. Algorithm tries to obtain an
+        accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` =
+        integral of `fun` over `interval`, and ``result`` is the numerical
+        approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -390,17 +411,22 @@ def adaptive_quadrature(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
-        denote infinite intervals.
+        denote infinite intervals. Its dtype sets the working precision: the integrand
+        is called with an ``x`` of this dtype, and the result follows it unless the
+        integrand upcasts. A integer types or python floats falls back to the JAX
+        default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float, optional
-        Absolute and relative error tolerance. Default is square root of
-        machine precision. Algorithm tries to obtain an accuracy of
-        ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` = integral of
-        `fun` over `interval`, and ``result`` is the numerical approximation.
+        Absolute and relative error tolerance. Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two. Algorithm tries to obtain an
+        accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` =
+        integral of `fun` over `interval`, and ``result`` is the numerical
+        approximation.
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
@@ -460,14 +486,15 @@ def adaptive_quadrature(
         ValueError,
         f"max_ninter={max_ninter} is not enough for {len(interval) - 1} breakpoints",
     )
+    dtypes = resolve_dtypes(interval, fun, args)
     if epsabs is None:
-        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+        epsabs = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
     if epsrel is None:
-        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
-    epsabs = jnp.asarray(epsabs)
-    epsrel = jnp.asarray(epsrel)
+        epsrel = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
+    epsabs = jnp.asarray(epsabs, dtypes.etype)
+    epsrel = jnp.asarray(epsrel, dtypes.etype)
 
-    f_conv, consts = closure_convert(fun, args)
+    f_conv, consts = closure_convert(fun, args, dtypes.xtype)
 
     ops = QuadratureOps(
         build=partial(build_integrand, f_conv=f_conv),
@@ -536,10 +563,13 @@ def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
         -1, chunk
     )
     a_c, b_c = reshape(a_safe, a_arr[0]), reshape(b_safe, b_arr[0])
-    used_c = reshape(used.astype(a_arr.dtype), 0.0)
 
     apply1 = lambda a, b: rule._apply(vfunc, a, b, ())
     sds = jax.eval_shape(apply1, a_arr[0], b_arr[0])
+    # The mask multiplies the *values*, so it takes their (real) dtype rather than the
+    # mesh's. With the mesh at float64 and the values at float32 the latter would
+    # otherwise be promoted straight back to float64 here.
+    used_c = reshape(used.astype(_real_dtype(sds.dtype)), 0.0)
 
     def bodyfun(total, block):
         a, b, m = block
@@ -627,32 +657,45 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
     intfun = partial(rule.integrate, **kwargs) if kwargs else rule.integrate
     _norm = rule.norm
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)
-    epmach = _get_eps(f)
     shape = f.shape
+    # Derived here rather than threaded in, so that this stays correct when the adjoints
+    # call it with a tangent integrand whose dtype is not the primal's. `vfunc` has
+    # already been through `map_interval`, whose Jacobian is at `xtype`, so its output
+    # dtype is the accumulation dtype by construction.
+    xtype = interval.dtype
+    ytype = f.dtype
+    etype = _real_dtype(ytype)  # errors and the integral of |f| are real
+    # Roundoff in the arithmetic that forms the sums, versus roundoff in the mesh: the
+    # first bounds how small an error estimate can honestly be, the second how narrow a
+    # sub-interval can get before its endpoints stop being distinguishable.
+    epmach = float(jnp.finfo(etype).eps)
+    epmach_x = float(jnp.finfo(xtype).eps)
 
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
     state["ninter"] = len(interval) - 1  # current number of intervals
     state["r_arr"] = jnp.zeros(
-        (max_ninter, *shape), f.dtype
+        (max_ninter, *shape), ytype
     )  # local results from each interval
-    state["e_arr"] = jnp.zeros(max_ninter)  # local error est. from each interval
-    state["a_arr"] = jnp.zeros(max_ninter)  # start of each interval
-    state["b_arr"] = jnp.zeros(max_ninter)  # end of each interval
+    state["e_arr"] = jnp.zeros(max_ninter, etype)  # local error est. from each interval
+    state["a_arr"] = jnp.zeros(max_ninter, xtype)  # start of each interval
+    state["b_arr"] = jnp.zeros(max_ninter, xtype)  # end of each interval
     state["s_arr"] = jnp.zeros(
-        (max_ninter, *shape), f.dtype
+        (max_ninter, *shape), ytype
     )  # global est. of I from n intervals
     state["f_arr"] = jnp.zeros(
-        (max_ninter, *shape), f.dtype
+        (max_ninter, *shape), etype
     )  # local est. of integral of abs(fun) from each interval
     state["a_arr"] = state["a_arr"].at[: state["ninter"]].set(interval[:-1])
     state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
     state["roundoff1"] = 0  # for keeping track of roundoff errors
     state["roundoff2"] = 0  # for keeping track of roundoff errors
     state["status"] = 0  # error flag
-    state["err_bnd"] = 0.0  # error bound we're trying to reach
-    state["area"] = jnp.zeros(shape, f.dtype)  # current best estimate for I
-    state["err_sum"] = 0.0  # current estimate for error in I
+    # Explicitly typed rather than left as weak python floats: these are `scan` carries,
+    # so their dtype has to match what the loop body writes back into them.
+    state["err_bnd"] = jnp.zeros((), etype)  # error bound we're trying to reach
+    state["area"] = jnp.zeros(shape, ytype)  # current best estimate for I
+    state["err_sum"] = jnp.zeros((), etype)  # current estimate for error in I
     # Where each sub-interval sits relative to the *original* sub-intervals: which one
     # it was carved out of, and the fractions of the way along it that its ends lie at.
     # These are what stay fixed when a limit or breakpoint moves, so recording them lets
@@ -662,8 +705,8 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
         .at[: state["ninter"]]
         .set(jnp.arange(state["ninter"]))
     )
-    state["frac_a"] = jnp.zeros(max_ninter)
-    state["frac_b"] = jnp.zeros(max_ninter).at[: state["ninter"]].set(1.0)
+    state["frac_a"] = jnp.zeros(max_ninter, xtype)
+    state["frac_b"] = jnp.zeros(max_ninter, xtype).at[: state["ninter"]].set(1.0)
 
     def init_body(i, state):
         a = state["a_arr"][i]
@@ -770,9 +813,16 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
 
         # test for roundoff error
         # is the area estimate not changing and error not getting smaller?
+        # QUADPACK's threshold is a flat 1e-5, which is only meaningful while it sits
+        # above the noise floor of the difference it is applied to, ~eps*|area12|. It
+        # does at float32 and float64 (`50*eps` is 6e-6 and 1.1e-14, so the maximum is
+        # 1e-5 either way and this is QUADPACK's test unchanged) but not in half
+        # precision, where a flat 1e-5 is below the noise and this counter could never
+        # fire. `50` is the same as in the local rule's roundoff floor.
+        stagnant = max(1e-5, 50 * epmach)
         state["roundoff1"] += (
             resolved
-            & (_norm(area_i - area12) <= 0.1e-4 * _norm(area12))
+            & (_norm(area_i - area12) <= stagnant * _norm(area12))
             & (erro12 >= 0.99 * err_i)
         )
         # are errors getting larger as we go to smaller intervals?
@@ -801,10 +851,12 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
         state["status"] += 2**MAX_NINTER * ~converged * (state["ninter"] >= max_ninter)
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
+        # This one is about the *mesh*, not the values, so it scales with the precision
+        # the abscissae are carried at rather than the precision of the sums.
         state["status"] += (
             2**BAD_INTEGRAND
             * ~converged
-            * (jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach))
+            * (jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach_x))
         )
 
         # update the arrays of interval starts/ends etc

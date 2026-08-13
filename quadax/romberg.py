@@ -18,11 +18,12 @@ from .adjoint import (
 )
 from .utils import (
     QuadratureInfo,
-    _get_eps,
     _pnorm,
+    _real_dtype,
     bounded_while_loop,
     errorif,
     map_interval,
+    resolve_dtypes,
     tanhsinh_transform,
     wrap_func,
 )
@@ -55,6 +56,10 @@ def romberg(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+        Its dtype sets the working precision: the integrand is called with an ``x`` of
+        this dtype, and the result follows it unless the integrand upcasts. A integer
+        types or python floats falls back to the JAX default. Must be real; complex
+        integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun
     full_output : bool, optional
@@ -63,8 +68,9 @@ def romberg(
     epsabs, epsrel : float
         Absolute and relative tolerances. If I1 and I2 are two
         successive approximations to the integral, algorithm terminates
-        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is square root of
-        machine precision.
+        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two.
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
@@ -117,12 +123,13 @@ def romberg(
         NotImplementedError,
         "Romberg integration with breakpoints not supported",
     )
+    dtypes = resolve_dtypes(interval, fun, args)
     if epsabs is None:
-        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+        epsabs = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
     if epsrel is None:
-        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
-    epsabs = jnp.asarray(epsabs)
-    epsrel = jnp.asarray(epsrel)
+        epsrel = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
+    epsabs = jnp.asarray(epsabs, dtypes.etype)
+    epsrel = jnp.asarray(epsrel, dtypes.etype)
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -139,17 +146,28 @@ def romberg(
         _norm,
         adjoint,
         build_integrand,
+        dtypes.xtype,
     )
 
 
 def _romberg(
-    fun, interval, args, full_output, epsabs, epsrel, divmax, _norm, adjoint, build
+    fun,
+    interval,
+    args,
+    full_output,
+    epsabs,
+    epsrel,
+    divmax,
+    _norm,
+    adjoint,
+    build,
+    xtype,
 ):
     """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
     # Closure conversion has to happen on the user's function, before any wrapping:
     # once a transformed integrand crosses a filter_jit boundary its leaves become
     # tracers that closure_convert cannot hoist.
-    f_conv, consts = closure_convert(fun, args)
+    f_conv, consts = closure_convert(fun, args, xtype)
     # Romberg has no subdivision to reuse, so `rebuild`/`on_mesh` are left unset and
     # DirectAdjoint falls back to differentiating through the loop.
     ops = QuadratureOps(
@@ -175,7 +193,7 @@ def _build_tanhsinh(interval, args, consts, *, f_conv):
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_t, interval_t = tanhsinh_transform(fun, interval)
     fun_m, interval_m = map_interval(fun_t, interval_t)
-    return wrap_func(fun_m, ()), interval_m
+    return wrap_func(fun_m, (), interval_m.dtype), interval_m
 
 
 def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _norm):
@@ -187,7 +205,10 @@ def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _no
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     result = result.at[0, 0].set(vfunc(a) + vfunc(b))
     neval = 2
-    err = jnp.inf
+    # Explicitly typed rather than left a weak python float: this is a loop carry, and
+    # has to match what `_norm` writes back into it. Real, because the error in a
+    # complex valued integral is still real.
+    err = jnp.array(jnp.inf, _real_dtype(f.dtype))
     state = (result, 1, neval, err)
 
     def ncond(state):
@@ -296,6 +317,10 @@ def rombergts(
         ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+        Its dtype sets the working precision: the integrand is called with an ``x`` of
+        this dtype, and the result follows it unless the integrand upcasts. A integer
+        types or python floats falls back to the JAX default. Must be real; complex
+        integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun
     full_output : bool, optional
@@ -304,8 +329,9 @@ def rombergts(
     epsabs, epsrel : float
         Absolute and relative tolerances. If I1 and I2 are two
         successive approximations to the integral, algorithm terminates
-        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is square root of
-        machine precision.
+        when abs(I1-I2) < max(epsabs, epsrel*|I2|). Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two.
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
@@ -359,12 +385,13 @@ def rombergts(
         NotImplementedError,
         "tanh-sinh transformation with breakpoints not supported",
     )
+    dtypes = resolve_dtypes(interval, fun, args)
     if epsabs is None:
-        epsabs = jnp.sqrt(_get_eps(jnp.array(1.0)))
+        epsabs = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
     if epsrel is None:
-        epsrel = jnp.sqrt(_get_eps(jnp.array(1.0)))
-    epsabs = jnp.asarray(epsabs)
-    epsrel = jnp.asarray(epsrel)
+        epsrel = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
+    epsabs = jnp.asarray(epsabs, dtypes.etype)
+    epsrel = jnp.asarray(epsrel, dtypes.etype)
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -381,4 +408,5 @@ def rombergts(
         _norm,
         adjoint,
         _build_tanhsinh,
+        dtypes.xtype,
     )
