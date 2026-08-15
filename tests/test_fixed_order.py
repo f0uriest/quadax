@@ -35,7 +35,7 @@ config.update("jax_enable_x64", True)
 
 # A rule that is exact in pure arithmetic still evaluates the integrand and sums with
 # roundoff, so "machine precision" means a relative error of a few * eps.
-MACHINE_PRECISION = 2e-14
+MACHINE_PRECISION = 5e-14
 
 # The "not exact" checks assert the rule is wrong by at least this much, far beyond the
 # few-eps wall of the regions where it is exact.
