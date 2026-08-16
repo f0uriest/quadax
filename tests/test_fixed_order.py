@@ -8,8 +8,8 @@ Each rule has a defining property, and these tests pin it down:
   ``~3/2 the order``).
 - ``ClenshawCurtisRule`` exactly integrates all polynomials up to degree ``order``.
 - ``TanhSinhRule`` is a doubly-exponential trapezoidal rule: for analytic integrands
-  each doubling of the order squares the error once inside the asymptotic tail, which is
-  far faster than any algebraic convergence rate.
+  each doubling of the order raises the error to a power near two once inside the
+  asymptotic tail, which is far faster than any algebraic convergence rate.
 
 Polynomial exactness is checked in the Chebyshev basis rather than with the monomial
 ``x**k``. ``{T_0, ..., T_D}`` spans the polynomials of degree at most ``D``, so checking
@@ -182,12 +182,20 @@ ANALYTIC_INTEGRANDS = [
 ]
 
 # The first doubling (9 -> 17) is pre-asymptotic and only monotonicity is required of
-# it; from 17 on the error is required to square per doubling until it bottoms out in
-# rounding.
+# it; from 17 on the error is required to take a power per doubling until it bottoms out
+# in rounding.
 TANHSINH_ORDERS = [9, 17, 33, 65, 129]
 # Up to this error the convolved factors of ~eps make the observed error, and so its
 # behavior under doubling, dominated by rounding rather than by the quadrature error.
 ROUNDOFF_FLOOR = 2e-14
+
+# Required power e0 -> e0**p per doubling. The tanh-sinh error behaves like
+# exp(-c*n/log(n)), so a doubling raises the power by 2*log(n)/(log(n) + log(2)), which
+# approaches but never reaches 2: near squaring while the error is coarse, and
+# measurably under it once the error is small enough for the log(n) to matter. The
+# threshold sits below that band so the test measures the rate rather than the exact
+# factor, which is sensitive to the node range at the few percent level.
+CONVERGENCE_POWER = 1.5
 
 
 @pytest.mark.parametrize("fun, exact", ANALYTIC_INTEGRANDS)
@@ -196,7 +204,7 @@ class TestTanhSinhConvergence:
     """For analytic integrands the error decays faster than any algebraic rate."""
 
     def test_tanhsinh_exponential_convergence(self, fun, exact, a, b):
-        """Doubling ``order`` squares the error until rounding sets in."""
+        """Doubling ``order`` raises the error to a power > 1 until rounding sets in."""
         target = exact(a, b)
         errors = [
             abs(float(TanhSinhRule(order=order).integrate(fun, a, b, ())[0]) - target)
@@ -208,13 +216,14 @@ class TestTanhSinhConvergence:
             if e0 > ROUNDOFF_FLOOR:
                 assert e1 <= e0
 
-        # inside the asymptotic tail (from 17 -> 33 on) each doubling squares the error.
-        # A rule with algebraic convergence of any order would improve by a fixed factor
-        # per point doubling instead, so this separates the doubly-exponential tanh-sinh
-        # behavior from polynomial-rate methods.
+        # inside the asymptotic tail (from 17 -> 33 on) each doubling raises the error
+        # to a power well above one. Algebraic convergence gives a fixed factor per
+        # point doubling instead, ie a power tending to one, so over the orders swept
+        # here this rejects any algebraic rate up to about n**-13 and separates the
+        # doubly exponential tanh-sinh behavior from the polynomial-rate rules above.
         for e0, e1 in zip(errors[1:], errors[2:]):
             if e1 > ROUNDOFF_FLOOR:
-                assert e1 <= e0**2
+                assert e1 <= e0**CONVERGENCE_POWER
 
         # the sweep ends in rounding noise rather than a stalled algebraic tail
         assert errors[-1] < ROUNDOFF_FLOOR

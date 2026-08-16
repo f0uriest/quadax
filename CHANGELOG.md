@@ -75,6 +75,12 @@ v0.3.0
     tolerances resolve to exactly what they used to in each case.
 - `quadts` and `rombergts` now warn when used at `float16`/`bfloat16`, where the
   tanh-sinh clustering can no longer get close enough to an endpoint to be worth having.
+- Finite intervals are no longer mapped twice - this helps to reduce roundoff error
+- Semi-infinite intervals now use a more numerically stable map to similarly avoid
+  roundoff
+- Tanh-sinh nodes now sit closer to the endpoints of the domain, improving convergence
+  for integrands that are singular at an endpoint. Additional care is also taken when
+  constructing tanh-sinh nodes in reduced precision to ensure the nodes are distinct.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and
