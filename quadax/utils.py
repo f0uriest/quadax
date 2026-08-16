@@ -431,7 +431,7 @@ def _decode_status(status):
     if status == 0:
         msg = messages[0]
     else:
-        status = f"{status:05b}"[::-1]
+        status = f"{status:06b}"[::-1]
         msg = ""
         for s, m in zip(status, messages.values()):
             if int(s):
@@ -439,7 +439,7 @@ def _decode_status(status):
     return msg
 
 
-STATUS = {i: _decode_status(i) for i in range(int(2**5))}
+STATUS = {i: _decode_status(i) for i in range(int(2**6))}
 
 
 def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...], xtype):
