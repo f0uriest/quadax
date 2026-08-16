@@ -412,7 +412,7 @@ class TanhSinhRule(NestedRule):
         # The stored table is the one for the default dtype; `_nodes_weights` rebuilds
         # it whenever the quadrature actually runs at a different precision.
         xh, wh, wl = get_tanhsinh_table(
-            self._order, tanhsinh_tmax(jnp.result_type(float))
+            self._order, tanhsinh_tmax(jnp.result_type(float), self._order)
         )
         self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
 
@@ -426,5 +426,5 @@ class TanhSinhRule(NestedRule):
         order; rebuilding spreads the same ``order`` nodes over the range that dtype can
         actually resolve.
         """
-        xh, wh, wl = get_tanhsinh_table(self._order, tanhsinh_tmax(xtype))
+        xh, wh, wl = get_tanhsinh_table(self._order, tanhsinh_tmax(xtype, self._order))
         return jnp.asarray(xh, xtype), jnp.asarray(wh), jnp.asarray(wl)

@@ -203,7 +203,8 @@ def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _no
     f = jax.eval_shape(vfunc, (a + b) / 2)
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    result = result.at[0, 0].set(vfunc(a) + vfunc(b))
+    # The trapezoid rule at one interval.
+    result = result.at[0, 0].set((b - a) / 2 * (vfunc(a) + vfunc(b)))
     neval = 2
     # Explicitly typed rather than left a weak python float: this is a loop carry, and
     # has to match what `_norm` writes back into it. Real, because the error in a
@@ -269,7 +270,8 @@ def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax):
     a, b = interval[0], interval[-1]
     f = jax.eval_shape(vfunc, (a + b) / 2)
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    result = result.at[0, 0].set(vfunc(a) + vfunc(b))
+    # The trapezoid rule at one interval.
+    result = result.at[0, 0].set((b - a) / 2 * (vfunc(a) + vfunc(b)))
 
     def nloop(k, result):
         h = (b - a) / 2**k

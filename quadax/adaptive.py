@@ -670,6 +670,8 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
     # sub-interval can get before its endpoints stop being distinguishable.
     epmach = float(jnp.finfo(etype).eps)
     epmach_x = float(jnp.finfo(xtype).eps)
+    # "Too narrow" is only meaningful against the span being subdivided.
+    halfspan = jnp.abs(interval[-1] - interval[0]) / 2
 
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
@@ -856,7 +858,10 @@ def _adaptive_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter
         state["status"] += (
             2**BAD_INTEGRAND
             * ~converged
-            * (jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2)) <= (100.0 * epmach_x))
+            * (
+                jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2))
+                <= (100.0 * epmach_x * halfspan)
+            )
         )
 
         # update the arrays of interval starts/ends etc

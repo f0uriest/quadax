@@ -71,7 +71,10 @@ example_problems = [
 # reference is wanted and the quadrature must be well converged
 SMOOTH_PROBLEMS = [0, 2]
 
-# DirectAdjoint and UnrolledDirectAdjoint should agree to ~1 ULP
+# Tolerance for two routes to the same computation - a different adjoint, jit against
+# eager, forward mode against reverse - which should agree to ~1 ULP. Tight enough that
+# any real difference in what is being computed shows up, loose enough not to depend on
+# the operation order XLA happens to choose.
 ULP_RTOL = 1e-13
 ULP_ATOL = 1e-15
 
@@ -342,7 +345,9 @@ class TestRomberg:
         ref = quad(prob["fun"], interval, prob["args"])[0]
         for adj in [LeibnizAdjoint()]:
             y = quad(prob["fun"], interval, prob["args"], adjoint=adj)[0]
-            np.testing.assert_array_equal(np.asarray(ref), np.asarray(y))
+            np.testing.assert_allclose(
+                np.asarray(ref), np.asarray(y), rtol=ULP_RTOL, atol=ULP_ATOL
+            )
 
 
 class TestTransforms:
@@ -354,8 +359,11 @@ class TestTransforms:
         prob = example_problems[0]
         interval = jnp.asarray(prob["interval"])
         f = lambda a: quadgk(prob["fun"], interval, a, adjoint=adjoint)[0]
-        np.testing.assert_array_equal(
-            np.asarray(f(prob["args"])), np.asarray(jax.jit(f)(prob["args"]))
+        np.testing.assert_allclose(
+            np.asarray(f(prob["args"])),
+            np.asarray(jax.jit(f)(prob["args"])),
+            rtol=ULP_RTOL,
+            atol=ULP_ATOL,
         )
 
     @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
@@ -598,13 +606,16 @@ def test_romberg_differentiates_the_extrapolation(quad):
 
     fwd = np.asarray(jax.jacfwd(direct)(c))
     rev = np.asarray(jax.grad(lambda x: direct(x).sum())(c))
-    # Bitwise identical to differentiating the entire loop, which includes the
-    # extrapolation. This is the property that matters: it pins that the derivative runs
-    # through the whole Richardson table rather than just the finest trapezoid level.
-    np.testing.assert_array_equal(fwd, np.asarray(jax.jacfwd(unrolled)(c)))
+    # Matches differentiating the entire loop, which includes the extrapolation. This is
+    # the property that matters: it pins that the derivative runs through the whole
+    # Richardson table rather than just the finest trapezoid level. Differentiating only
+    # the finest level lands orders of magnitude away, far outside this tolerance.
+    np.testing.assert_allclose(
+        fwd, np.asarray(jax.jacfwd(unrolled)(c)), rtol=ULP_RTOL, atol=ULP_ATOL
+    )
     # Forward and reverse are transposes of the same frozen linear functional, so they
-    # agree to within rounding. Not asserted bitwise: for rombergts the integrand also
-    # carries a tanh-sinh transform, whose own jvp and vjp can differ in the last bit.
+    # agree to within rounding. For rombergts the integrand also carries a tanh-sinh
+    # transform, whose own jvp and vjp can differ in the last bit.
     np.testing.assert_allclose(fwd, rev, rtol=ULP_RTOL, atol=ULP_ATOL)
     # and accurate to Romberg's standard, not the trapezoid rule's
     assert abs(float(fwd[0]) - exact) < 1e-9
