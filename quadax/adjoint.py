@@ -360,6 +360,36 @@ def _run_solve(ops, rule, integrand, interval_t, epsabs, epsrel, kwargs, frozen)
     return ops.frozen_solve(rule, integrand, interval_t, frozen, kwargs)
 
 
+def _endpoint_term(vfunc, interval_t, *, ops, static):
+    """The boundary half of the Leibniz rule, as a function of the primals.
+
+    Differentiating ``int_a^b f`` gives an integral of ``df``, plus the boundary term
+    ``f(b) db - f(a) da``. The solve supplies the first half by integrating the tangent
+    between fixed limits, so whatever dependence on the limits survives ``ops.build``
+    (that is, whatever ends up in ``interval_t`` rather than folded into the integrand)
+    is missing from it and has to be added back.
+
+    Whether anything survives depends on the mapping. ``tanhsinh_transform`` and the
+    mappings for an infinite interval both hand back a fixed domain, so the term is
+    identically zero and costs only two evaluations of the integrand. A finite interval
+    left alone by ``map_interval`` is the case that needs it: the mapping is the
+    identity, so the limits are exactly where the whole derivative lives.
+
+    The integrand is held at its primal value here, so only the limits are
+    differentiated and the term comes out as the ``f(b) db - f(a) da`` above. Whatever
+    is left of the chain rule (how ``interval_t`` depends on the original limits,
+    including the reordering ``map_interval`` does for reversed ones) is left to AD.
+    """
+    lo, hi = vfunc(interval_t[0]), vfunc(interval_t[-1])
+
+    def term(dyn_):
+        _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
+        _, limits = ops.build(interval, args, consts)
+        return hi * limits[-1] - lo * limits[0]
+
+    return term
+
+
 def _leibniz_impl(
     *flat,
     ops,
@@ -370,6 +400,7 @@ def _leibniz_impl(
     frozen_treedef,
     freeze,
     split,
+    interval_from_solve,
     out_sds,
 ):
     """Forward direction: integrate the tangent of the mapped integrand."""
@@ -378,7 +409,7 @@ def _leibniz_impl(
     )
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)
-    _, interval_t = ops.build(interval, args, consts)
+    vfunc, interval_t = ops.build(interval, args, consts)
 
     def dvfunc(t):
         def at_t(dyn_):
@@ -393,7 +424,7 @@ def _leibniz_impl(
     # differentiable) for the adaptive routines. Romberg has neither a subdivision nor
     # breakpoints, so there is nothing to split and its level loop cannot be transposed.
     if freeze or not split:
-        return _run_solve(
+        y_dot = _run_solve(
             ops,
             rule,
             dvfunc,
@@ -403,6 +434,13 @@ def _leibniz_impl(
             kwargs,
             frozen if freeze else None,
         )
+        if interval_from_solve:
+            # Integrating the tangent between fixed limits misses the boundary term
+            # whenever the limits themselves carry a derivative, which is exactly when
+            # the solve is the thing that has to produce it.
+            term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
+            y_dot = y_dot + jax.jvp(term, (dyn,), (dyn_t,))[1]
+        return y_dot
 
     # Split the tangent. Derivatives with respect to the *limits* have to go through the
     # subdivision, because a breakpoint sitting on a discontinuity contributes a jump
@@ -456,6 +494,7 @@ def _leibniz_transpose(
     frozen_treedef,
     freeze,
     split,
+    interval_from_solve,
     out_sds,
 ):
     """Reverse direction: integrate the cotangent of the mapped integrand."""
@@ -463,7 +502,7 @@ def _leibniz_transpose(
     _, dyn, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)
-    _, interval_t = ops.build(interval, args, consts)
+    vfunc, interval_t = ops.build(interval, args, consts)
     _, unravel = ravel_pytree(dyn)
 
     def adjoint_integrand(t):
@@ -502,6 +541,11 @@ def _leibniz_transpose(
             interval,
         )[1](ct)[0]
         ct_tree = (ct_tree[0], ct_iv, *ct_tree[2:])
+    elif interval_from_solve:
+        # The adjoint integrand carries the limits' cotangent only through the
+        # integrand, so the boundary term is added here, as in forward mode.
+        term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
+        ct_tree = jax.tree.map(jnp.add, ct_tree, jax.vjp(term, dyn)[1](ct)[0])
     ct_leaves = jax.tree.flatten(ct_tree)[0]
     # cotangents for the linear operands, then None for every residual operand
     n_res = len(flat) - n
@@ -589,11 +633,13 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
     # and carries the mesh around. Only do it when the limits are actually being
     # differentiated, which filter_custom_jvp tells us at trace time by handing us a
     # `None` tangent for anything that is not. Romberg has no subdivision to split.
-    split = (
-        not freeze
-        and ops.rebuild is not None
-        and any(t is not None for t in jax.tree.leaves(tangents[1]))
-    )
+    interval_perturbed = any(t is not None for t in jax.tree.leaves(tangents[1]))
+    split = not freeze and ops.rebuild is not None and interval_perturbed
+    # Whether the solve is the thing that has to produce the limits' cotangent. It is
+    # not when they are not being differentiated, and not when `split` takes them
+    # through the subdivision instead; that leaves only the methods with no subdivision
+    # to rebuild (Romberg), where the solve is all there is.
+    interval_from_solve = interval_perturbed and not split
     if freeze or split:
         frozen_leaves, frozen_treedef = jax.tree.flatten(
             jax.lax.stop_gradient(ops.frozen(state))
@@ -612,6 +658,7 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
         frozen_treedef=frozen_treedef,
         freeze=freeze,
         split=split,
+        interval_from_solve=interval_from_solve,
         out_sds=jax.ShapeDtypeStruct(jnp.shape(y), jnp.result_type(y)),
     )
     return (y, state), (y_dot, _zero_tangent(state))

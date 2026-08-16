@@ -81,6 +81,8 @@ v0.3.0
 - Tanh-sinh nodes now sit closer to the endpoints of the domain, improving convergence
   for integrands that are singular at an endpoint. Additional care is also taken when
   constructing tanh-sinh nodes in reduced precision to ensure the nodes are distinct.
+- ``romberg`` and ``rombergts`` now have the option to turn Richardson extrapolation off
+  via ``extrapolate=False``.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and

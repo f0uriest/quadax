@@ -113,6 +113,11 @@ example_problems = [
     },
 ]
 
+# Where extrapolation is off and on are meant to produce the same quantity, they are
+# entitled to differ in the last place or two and no further.
+ULP_RTOL = 1e-13
+ULP_ATOL = 1e-15
+
 
 class TestQuadGK:
     """Tests for Gauss-Kronrod quadrature."""
@@ -750,6 +755,129 @@ class TestRomberg:
         self._base(16, 1e-4)
         self._base(16, 1e-8)
         self._base(16, 1e-12)
+
+
+class TestRombergExtrapolationFlag:
+    """Richardson extrapolation, on and off, over the whole example suite.
+
+    Romberg's method *is* the trapezoidal rule plus Richardson, so this flag turns it
+    into something else rather than merely tuning it: the same nodes and the same
+    halving schedule, reading the un-extrapolated column. The two methods want opposite
+    things from it, which is why it is a flag and not a fixed choice.
+
+    ``divmax`` is well below the default here so the plain mode is affordable to test.
+    Without extrapolation the trapezoidal rule needs O(h**2) refinement, so its
+    evaluation count runs to millions on the harder problems, and the contrast the tests
+    below check for is visible long before that.
+    """
+
+    DIVMAX = 14
+    TOL = 1e-8
+    # problems with a smooth integrand and finite limits, where Richardson's error
+    # expansion in even powers of the step is valid and it should pay for itself
+    SMOOTH = [0, 1, 2, 3, 13, 14, 16]
+
+    def _run(self, method, i, extrapolate, tol=None, divmax=None):
+        prob = example_problems[i]
+        y, info = method(
+            prob["fun"],
+            jnp.asarray(prob["interval"], float),
+            epsabs=tol or self.TOL,
+            epsrel=tol or self.TOL,
+            divmax=divmax or self.DIVMAX,
+            full_output=True,
+            extrapolate=extrapolate,
+        )
+        exact = np.asarray(prob["val"])
+        scale = max(np.max(np.abs(exact)), 1e-300)
+        err = float(np.max(np.abs(np.asarray(y) - exact)) / scale)
+        return y, err, int(info.status), int(info.neval)
+
+    def _suite(self):
+        """The example problems Romberg can accept, ie the ones with no breakpoints."""
+        for i, prob in enumerate(example_problems):
+            if len(np.atleast_1d(np.asarray(prob["interval"], float))) == 2:
+                yield i
+
+    @pytest.mark.parametrize("method", [romberg, rombergts], ids=["romberg", "ts"])
+    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    def test_no_problem_returns_garbage(self, method, extrapolate):
+        """Neither setting may produce a NaN or an infinity on any problem.
+
+        Deliberately over the whole suite, including the problems neither setting can
+        actually solve: what matters there is that a failure to converge stays a large
+        finite error with a status to match, rather than becoming a NaN.
+        """
+        for i in self._suite():
+            y, err, status, _ = self._run(method, i, extrapolate)
+            assert np.all(np.isfinite(np.asarray(y))), f"problem {i}"
+            assert np.isfinite(err), f"problem {i}"
+
+    def test_richardson_is_what_makes_romberg_work(self):
+        """Without it the trapezoidal rule cannot keep up on a smooth integrand.
+
+        This is the justification for the flag defaulting to on. The gap is not
+        marginal: Richardson reaches machine precision in tens of evaluations where
+        bisection alone is still several digits short after tens of thousands.
+        """
+        for i in self.SMOOTH:
+            _, err_on, _, neval_on = self._run(romberg, i, True)
+            _, err_off, _, neval_off = self._run(romberg, i, False)
+            assert err_on < err_off, f"problem {i}: {err_on:.2e} vs {err_off:.2e}"
+            assert neval_on < neval_off, f"problem {i}"
+
+    def test_tanh_sinh_gains_nothing_from_richardson(self):
+        """On tanh-sinh it is at best neutral, and usually just costs evaluations.
+
+        The rule already converges doubly exponentially, so there is no expansion in
+        powers of the step for Richardson to cancel. Measured over the suite it helps
+        nothing, is slightly worse on a few problems, and reaches the same accuracy in
+        fewer evaluations on around half of them.
+        """
+        for i in self._suite():
+            _, err_on, _, _ = self._run(rombergts, i, True)
+            _, err_off, _, _ = self._run(rombergts, i, False)
+            floor = 1e-14 * max(
+                np.max(np.abs(np.asarray(example_problems[i]["val"]))), 1
+            )
+            assert err_off <= max(10 * err_on, floor), (
+                f"problem {i}: turning extrapolation off made it worse, "
+                f"{err_off:.2e} vs {err_on:.2e}"
+            )
+
+    @pytest.mark.parametrize("method", [romberg, rombergts], ids=["romberg", "ts"])
+    def test_the_flag_does_not_change_the_table_shape(self, method):
+        """``full_output`` keeps its contract either way, column 0 always filled.
+
+        The two settings do not generally stop at the same level (they are comparing
+        different estimates from one refinement to the next, so they meet the tolerance
+        at different depths) but the trapezoidal column is the same computation in
+        both, so wherever they both reached it holds the same numbers. Only what is
+        built on top of it differs.
+        """
+        prob = example_problems[0]
+        tables = {}
+        for extrapolate in (False, True):
+            _, info = method(
+                prob["fun"],
+                jnp.asarray(prob["interval"], float),
+                epsabs=self.TOL,
+                epsrel=self.TOL,
+                divmax=self.DIVMAX,
+                full_output=True,
+                extrapolate=extrapolate,
+            )
+            tables[extrapolate] = np.asarray(info.info)
+        assert tables[False].shape == tables[True].shape
+        columns = [tables[e][:, 0] for e in (False, True)]
+        # How far each column got: the length of its leading run of nonzeros. Counted
+        # as a run rather than located as the first zero, because a column filled to
+        # the end has no zero in it and a search would have to report its absence.
+        depth = min(*(int((c != 0).cumprod().sum()) for c in columns), self.DIVMAX)
+        assert depth > 1, "neither setting filled the trapezoidal column"
+        np.testing.assert_allclose(
+            columns[0][:depth], columns[1][:depth], rtol=ULP_RTOL, atol=ULP_ATOL
+        )
 
 
 def test_escaped_tracers():

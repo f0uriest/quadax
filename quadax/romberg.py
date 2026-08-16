@@ -39,6 +39,7 @@ def romberg(
     epsrel: ArrayLike | None = None,
     divmax: int = 20,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Romberg integration of a callable function or method.
@@ -79,6 +80,13 @@ def romberg(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by Richardson extrapolation, which is what
+        makes this Romberg's method rather than plain repeated bisection. On by default.
+        Turning it off leaves the same nodes and the same halving schedule, reading the
+        un-extrapolated estimate instead, which is worth having when the integrand is
+        not smooth enough for the extrapolation's error expansion to hold. There it
+        can amplify rather than cancel, and the honest estimate is the better one.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the
@@ -104,7 +112,8 @@ def romberg(
           Only present if ``full_output`` is True. Contains the following:
 
           * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
-            from each level of discretization and each step of extrapolation.
+            from each level of discretization and each step of extrapolation. With
+            ``extrapolate=False`` only the first column is filled.
 
     Notes
     -----
@@ -147,6 +156,7 @@ def romberg(
         adjoint,
         build_integrand,
         dtypes.xtype,
+        extrapolate,
     )
 
 
@@ -162,6 +172,7 @@ def _romberg(
     adjoint,
     build,
     xtype,
+    extrapolate,
 ):
     """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
     # Closure conversion has to happen on the user's function, before any wrapping:
@@ -172,7 +183,9 @@ def _romberg(
     # DirectAdjoint falls back to differentiating through the loop.
     ops = QuadratureOps(
         build=partial(build, f_conv=f_conv),
-        solve=partial(_romberg_solve, divmax=divmax, _norm=_norm),
+        solve=partial(
+            _romberg_solve, divmax=divmax, _norm=_norm, extrapolate=extrapolate
+        ),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
         # the integrand, which is what DirectAdjoint needs to differentiate in either
@@ -180,7 +193,7 @@ def _romberg(
         # differentiated directly, because evaluating it still involves a fori_loop with
         # dynamic bounds that JAX cannot reverse differentiate.
         frozen=lambda state: state["n"],
-        frozen_solve=partial(_romberg_levels, divmax=divmax),
+        frozen_solve=partial(_romberg_levels, divmax=divmax, extrapolate=extrapolate),
     )
     y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
     info = state["table"] if full_output else None
@@ -196,11 +209,23 @@ def _build_tanhsinh(interval, args, consts, *, f_conv):
     return wrap_func(fun_m, (), interval_m.dtype), interval_m
 
 
-def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _norm):
-    """Run the Romberg/Richardson extrapolation loop."""
+def _romberg_solve(
+    rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _norm, extrapolate=True
+):
+    """Run the refinement loop, with Richardson extrapolation if it is switched on.
+
+    Without it this is plain adaptive bisection of the trapezoidal rule (or of the
+    tanh-sinh rule, for ``rombergts``): the same nodes and the same halving schedule,
+    reading the un-extrapolated column of the table instead of its diagonal.
+    """
     del rule, kwargs
     a, b = interval
     f = jax.eval_shape(vfunc, (a + b) / 2)
+
+    # Which entry of row `k` is the estimate. Richardson's is the diagonal, having
+    # applied `k` rounds of extrapolation to the trapezoidal values in column 0; without
+    # it the estimate is that column, and the rest of the table is never written.
+    best = (lambda res, k: res[k, k]) if extrapolate else (lambda res, k: res[k, 0])
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     # The trapezoid rule at one interval.
@@ -215,7 +240,7 @@ def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _no
     def ncond(state):
         result, n, neval, err = state
         return (n < divmax + 1) & (
-            err > jnp.maximum(epsabs, epsrel * _norm(result[n, n]))
+            err > jnp.maximum(epsabs, epsrel * _norm(best(result, n)))
         )
 
     def nloop(state):
@@ -241,13 +266,14 @@ def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _no
             result = result.at[n, m].set(result[n, m - 1] + temp)
             return result
 
-        result = jax.lax.fori_loop(1, n + 1, mloop, result)
-        err = _norm(result[n, n] - result[n - 1, n - 1])
+        if extrapolate:
+            result = jax.lax.fori_loop(1, n + 1, mloop, result)
+        err = _norm(best(result, n) - best(result, n - 1))
         return result, n + 1, neval, err
 
     result, n, neval, err = bounded_while_loop(ncond, nloop, state, divmax + 1)
 
-    y = result[n - 1, n - 1]
+    y = best(result, n - 1)
     status = 2 * (err > jnp.maximum(epsabs, epsrel * _norm(y)))
     state = {
         "table": result,
@@ -259,12 +285,13 @@ def _romberg_solve(rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _no
     return y, state
 
 
-def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax):
-    """Evaluate the Richardson table at a fixed number of levels.
+def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=True):
+    """Evaluate the table at a fixed number of levels.
 
     With ``n`` fixed this is a fixed linear combination of the integrand at fixed nodes,
     so its forward and reverse derivatives are exact transposes of one another. Mirrors
-    the loop in ``_romberg_solve`` exactly so the two agree.
+    the loop in ``_romberg_solve`` exactly so the two agree, including which entry of
+    the table is read.
     """
     del rule, kwargs
     a, b = interval[0], interval[-1]
@@ -286,10 +313,12 @@ def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax):
             temp = 1 / (4.0**m - 1.0) * (result[k, m - 1] - result[k - 1, m - 1])
             return result.at[k, m].set(result[k, m - 1] + temp)
 
+        if not extrapolate:
+            return result
         return jax.lax.fori_loop(1, k + 1, mloop, result)
 
     result = jax.lax.fori_loop(1, n, nloop, result)
-    return result[n - 1, n - 1]
+    return result[n - 1, n - 1] if extrapolate else result[n - 1, 0]
 
 
 @eqx.filter_jit
@@ -302,6 +331,7 @@ def rombergts(
     epsrel: ArrayLike | None = None,
     divmax: int = 20,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
@@ -342,6 +372,13 @@ def rombergts(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by Richardson extrapolation, which is what
+        makes this Romberg's method rather than plain repeated bisection. On by default.
+        Turning it off leaves the same nodes and the same halving schedule, reading the
+        un-extrapolated estimate instead, which is worth having when the integrand is
+        not smooth enough for the extrapolation's error expansion to hold. There it
+        can amplify rather than cancel, and the honest estimate is the better one.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the
@@ -368,7 +405,8 @@ def rombergts(
           Only present if ``full_output`` is True. Contains the following:
 
           * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
-            from each level of discretization and each step of extrapolation.
+            from each level of discretization and each step of extrapolation. With
+            ``extrapolate=False`` only the first column is filled.
 
     Notes
     -----
@@ -411,4 +449,5 @@ def rombergts(
         adjoint,
         _build_tanhsinh,
         dtypes.xtype,
+        extrapolate,
     )

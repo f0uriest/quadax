@@ -653,3 +653,84 @@ class TestDerivativeDTypes:
         y, y_dot = jax.jvp(f, (jnp.array(1.0, dtype),), (jnp.array(1.0, dtype),))
         assert y.dtype == dtype
         assert y_dot.dtype == dtype
+
+
+adjoints = [DirectAdjoint(), LeibnizAdjoint()]
+adjoint_ids = ["direct", "leibniz"]
+
+
+class TestRombergWithoutRichardson:
+    """Turning Richardson off must not cost Romberg its derivatives.
+
+    ``DirectAdjoint`` freezes the number of levels the solve settled on and
+    differentiates that fixed discretization through a custom primitive, so the frozen
+    evaluation has to read the same entry of the table as the solve did. Reading the
+    diagonal when the solve read column zero would give the derivative of a quantity
+    that was never returned, and nothing about the value itself would show it.
+    """
+
+    fun = staticmethod(lambda t, c: jnp.exp(-c * t**2))
+    interval = jnp.array([0.0, 2.0])
+    args = jnp.asarray(0.7)
+
+    def _quad(self, method, extrapolate, adjoint):
+        return lambda c: method(
+            self.fun,
+            self.interval,
+            (c,),
+            epsabs=1e-10,
+            epsrel=1e-10,
+            divmax=14,
+            extrapolate=extrapolate,
+            adjoint=adjoint,
+        )[0]
+
+    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
+    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    def test_modes_agree(self, method, extrapolate, adjoint):
+        """Forward and reverse give the same derivative in either setting."""
+        f = self._quad(method, extrapolate, adjoint)
+        np.testing.assert_allclose(
+            np.asarray(jax.jacfwd(f)(self.args)),
+            np.asarray(jax.grad(f)(self.args)),
+            rtol=1e-10,
+        )
+
+    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
+    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    def test_matches_finite_differences(self, method, extrapolate):
+        """And it is the right derivative, not merely a self-consistent one.
+
+        The check that catches a frozen evaluation reading the wrong column: both modes
+        would still agree with each other, because they would agree about the *wrong*
+        quantity.
+        """
+        f = self._quad(method, extrapolate, DirectAdjoint())
+        got = float(jax.jacfwd(f)(self.args))
+        h = 1e-6
+        fd = (float(f(self.args + h)) - float(f(self.args - h))) / (2 * h)
+        np.testing.assert_allclose(got, fd, rtol=1e-6)
+
+    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
+    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    def test_wrt_interval(self, method, extrapolate):
+        """Derivatives with respect to the limits work in either setting."""
+        f = lambda iv: method(  # noqa: E731
+            self.fun,
+            iv,
+            (self.args,),
+            epsabs=1e-10,
+            epsrel=1e-10,
+            divmax=14,
+            extrapolate=extrapolate,
+        )[0]
+        got = np.asarray(jax.jacfwd(f)(self.interval))
+        # d/db of int_a^b f = f(b), and d/da = -f(a)
+        expected = np.array(
+            [
+                -float(self.fun(self.interval[0], self.args)),
+                float(self.fun(self.interval[1], self.args)),
+            ]
+        )
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-9)
