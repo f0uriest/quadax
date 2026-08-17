@@ -58,7 +58,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .utils import _real_dtype
+from .utils import _real_dtype, tree_where
 
 # Cap on the number of partial sums the table holds. Never reached in practice: the
 # adaptive loop stops at the sub-interval width floor after ~48 bisections at float64,
@@ -132,6 +132,24 @@ def init_table(shape: tuple[int, ...], ytype: Any) -> EpsilonTable:
 def append(state: EpsilonTable, value: jax.Array) -> EpsilonTable:
     """Record a partial sum without extrapolating from it."""
     return state._replace(table=state.table.at[state.n].set(value), n=state.n + 1)
+
+
+def ready(state: EpsilonTable) -> jax.Array:
+    """Whether the next partial sum fed to the table can be extrapolated from."""
+    # The recursion needs three entries before it can take a Shanks step at all.
+    return state.n > 1
+
+
+def step(state: EpsilonTable, value: jax.Array, norm: Callable):
+    """Feed a partial sum to the table, extrapolating from it once there is enough.
+
+    Until the table holds enough entries the value is only recorded, and those calls
+    must not count as extrapolations for the purpose of the error estimate; ``ready``
+    says which of the two happened.
+    """
+    return tree_where(
+        ready(state), extrapolate(state, value, norm), append(state, value)
+    )
 
 
 def _gather(table, idx):

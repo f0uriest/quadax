@@ -14,6 +14,7 @@ from jax import config
 
 from quadax import (
     DirectAdjoint,
+    GaussKronrodRule,
     LeibnizAdjoint,
     quadcc,
     quadgk,
@@ -21,7 +22,14 @@ from quadax import (
     romberg,
     rombergts,
 )
-from quadax.adjoint import _UnrolledDirectAdjoint
+from quadax.adaptive import _adaptive_solve
+from quadax.adjoint import (
+    _frozen_replay,
+    _replay_solve,
+    _UnrolledDirectAdjoint,
+    build_integrand,
+    closure_convert,
+)
 
 config.update("jax_enable_x64", True)
 
@@ -725,8 +733,13 @@ class TestRombergWithoutRichardson:
 
     @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
     @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
-    def test_wrt_interval(self, method, extrapolate):
-        """Derivatives with respect to the limits work in either setting."""
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
+    def test_wrt_interval(self, method, extrapolate, transform):
+        """Derivatives with respect to the limits work in either setting.
+
+        Both modes, because on a finite interval the whole of this derivative is the
+        boundary term rather than anything the solve integrates.
+        """
         f = lambda iv: method(  # noqa: E731
             self.fun,
             iv,
@@ -736,7 +749,7 @@ class TestRombergWithoutRichardson:
             divmax=14,
             extrapolate=extrapolate,
         )[0]
-        got = np.asarray(jax.jacfwd(f)(self.interval))
+        got = np.asarray(transform(f)(self.interval))
         # d/db of int_a^b f = f(b), and d/da = -f(a)
         expected = np.array(
             [
@@ -745,3 +758,251 @@ class TestRombergWithoutRichardson:
             ]
         )
         np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-9)
+
+
+# Smooth enough that the subdivision converges on its own and the table is never
+# consulted, so `extrapolate=True` must change nothing at all.
+UNACCELERATED_PROBLEMS = [
+    {
+        "name": "gaussian",
+        "fun": lambda x, c: jnp.exp(-c * x**2),
+        "interval": [0.0, 3.0],
+        "args": jnp.asarray(1.0),
+    },
+    {
+        "name": "oscillatory",
+        "fun": lambda x, c: jnp.sin(c * x),
+        "interval": [0.0, 10.0],
+        "args": jnp.asarray(3.0),
+    },
+]
+
+
+# Integrands whose derivative is worth taking through an extrapolation: each has a
+# singularity the subdivision alone cannot resolve, so the accelerated primal is a
+# different value from the mesh sum and the adjoint has to reproduce which one was
+# returned. `exact` is d/dc of the integral where it is available in closed form.
+EXTRAPOLATED_PROBLEMS = [
+    {
+        "name": "endpoint x**-0.5",
+        "fun": lambda x, c: c * x**-0.5,
+        "interval": [0.0, 1.0],
+        "args": jnp.asarray(2.0),
+        "exact": 2.0,
+    },
+    {
+        "name": "endpoint x**-0.9",
+        "fun": lambda x, c: c * x**-0.9,
+        "interval": [0.0, 1.0],
+        "args": jnp.asarray(1.0),
+        "exact": 10.0,
+    },
+    {
+        "name": "semi-infinite exp(-x)/sqrt(x)",
+        "fun": lambda x, c: c * jnp.exp(-x) / jnp.sqrt(x),
+        "interval": [0.0, jnp.inf],
+        "args": jnp.asarray(1.0),
+        "exact": float(np.sqrt(np.pi)),
+    },
+    {
+        "name": "interior, not at a breakpoint",
+        "fun": lambda x, c: jnp.abs(x - 0.3) ** -0.5 * jnp.exp(-c * x),
+        "interval": [0.0, 1.0],
+        "args": jnp.asarray(1.0),
+        "exact": None,
+    },
+    {
+        "name": "interior, marked as a breakpoint",
+        "fun": lambda x, c: jnp.abs(x - 0.3) ** -0.5 * jnp.exp(-c * x),
+        "interval": [0.0, 0.3, 1.0],
+        "args": jnp.asarray(1.0),
+        "exact": None,
+    },
+    {
+        "name": "vector, one component singular",
+        "fun": lambda x, c: jnp.array([c * x**-0.5, jnp.exp(-c * x)]),
+        "interval": [0.0, 1.0],
+        "args": jnp.asarray(1.0),
+        "exact": None,
+    },
+]
+
+
+def _integrate(prob, adjoint, extrapolate, wrt_interval=False):
+    """`quadgk` on one of the problems above, as a function of what is varied."""
+    interval = jnp.asarray(prob["interval"], float)
+
+    def f(z):
+        args, iv = (prob["args"], z) if wrt_interval else (z, interval)
+        return quadgk(
+            prob["fun"],
+            iv,
+            args=(args,),
+            epsabs=1e-12,
+            epsrel=1e-12,
+            order=21,
+            max_ninter=100,
+            adjoint=adjoint,
+            extrapolate=extrapolate,
+        )[0]
+
+    return f, (interval if wrt_interval else prob["args"])
+
+
+class TestExtrapolatedAdjoints:
+    """Differentiating a quadrature whose value came from an extrapolation.
+
+    With ``extrapolate=True`` the value returned may be the epsilon algorithm's estimate
+    of the limit of the running totals rather than the sum over the final subdivision,
+    and the adjoints have to differentiate whichever one was returned. Everything the
+    acceleration decided was decided on error estimates and is integer or boolean, so
+    the derivative is taken with those decisions frozen, the same discretize-then-
+    optimize bargain :class:`DirectAdjoint` already makes for the mesh.
+
+    Derivatives with respect to a limit that sits *on* a singularity are excluded
+    throughout. They are genuinely infinite -- ``d/da`` of ``int_a^1 x**-0.5`` is
+    ``-a**-0.5`` -- so there is no value for a test to check against, with or without
+    acceleration. Limits away from the singularity are covered below.
+    """
+
+    @pytest.mark.parametrize("prob", EXTRAPOLATED_PROBLEMS, ids=lambda p: p["name"])
+    def test_replay_reproduces_the_accelerated_value(self, prob):
+        """The function being differentiated is the one whose value was returned.
+
+        This is the structural property the rest of the class rests on. A derivative
+        taken on a replay that lands somewhere else is answering a different question,
+        and no comparison against finite differences would reveal it, because the two
+        would be wrong together.
+        """
+        interval = jnp.asarray(prob["interval"], float)
+        f_conv, consts = closure_convert(prob["fun"], (prob["args"],), interval.dtype)
+        vfunc, interval_t = build_integrand(
+            interval, (prob["args"],), consts, f_conv=f_conv
+        )
+        rule = GaussKronrodRule(21)
+        y, state = _adaptive_solve(
+            rule,
+            vfunc,
+            interval_t,
+            jnp.asarray(1e-12),
+            jnp.asarray(1e-12),
+            {},
+            max_ninter=100,
+            extrapolate=True,
+        )
+        replayed = _replay_solve(rule, vfunc, interval_t, _frozen_replay(state), {})
+        # Not bit-identical: the replay rebuilds the running totals by accumulating
+        # births and deaths where the solve re-sums the whole subdivision each pass, and
+        # the epsilon algorithm amplifies the difference. The mesh path has the same
+        # property, for the same reason.
+        np.testing.assert_allclose(
+            np.asarray(replayed), np.asarray(y), rtol=1e-11, atol=1e-14
+        )
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("prob", EXTRAPOLATED_PROBLEMS, ids=lambda p: p["name"])
+    def test_modes_agree(self, prob, adjoint):
+        """Forward and reverse give the same derivative through an extrapolation."""
+        f, x = _integrate(prob, adjoint, True)
+        np.testing.assert_allclose(
+            np.asarray(jax.jacfwd(f)(x)),
+            np.asarray(jax.jacrev(f)(x)),
+            rtol=1e-9,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize(
+        "prob",
+        [p for p in EXTRAPOLATED_PROBLEMS if p["exact"] is not None],
+        ids=lambda p: p["name"],
+    )
+    def test_derivative_is_at_least_as_good_as_the_mesh(self, prob, adjoint):
+        """Accelerating the integral must not cost accuracy in its derivative.
+
+        On these integrands it gains: the subdivision stops at the width floor with the
+        mesh still far from the limit, and the derivative inherits exactly that error.
+        """
+        exact = prob["exact"]
+        errs = {}
+        for extrapolate in (False, True):
+            f, x = _integrate(prob, adjoint, extrapolate)
+            got = np.max(np.abs(np.atleast_1d(np.asarray(jax.jacfwd(f)(x)))))
+            errs[extrapolate] = abs(got - exact) / abs(exact)
+        assert errs[True] <= errs[False], (
+            f"{prob['name']}: extrapolated derivative is worse "
+            f"({errs[True]:.2e} vs {errs[False]:.2e})"
+        )
+        assert errs[True] < 1e-10
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("prob", UNACCELERATED_PROBLEMS, ids=lambda p: p["name"])
+    def test_smooth_problems_differentiate_identically(self, prob, adjoint):
+        """Where the table is never consulted the flag must cost nothing.
+
+        The subdivision converges and no extrapolated value is accepted, so both
+        settings return the same sum, but only one of them carries the table through
+        the loop, so they are separate programs whose shared arithmetic is free to be
+        reassociated between them, and the agreement is to rounding rather than bit for
+        bit. The derivative has a second reason to differ in the last place: the replay
+        reconstructs the subdivision's total from births and deaths, which is a
+        different summation order from the blocked accumulation the mesh path uses, and
+        neither is more correct than the other.
+        """
+        off, on = (_integrate(prob, adjoint, e)[0] for e in (False, True))
+        np.testing.assert_allclose(
+            np.asarray(on(prob["args"])),
+            np.asarray(off(prob["args"])),
+            rtol=ULP_RTOL,
+            atol=ULP_ATOL,
+        )
+        for transform in (jax.jacfwd, jax.jacrev):
+            np.testing.assert_allclose(
+                np.asarray(transform(on)(prob["args"])),
+                np.asarray(transform(off)(prob["args"])),
+                rtol=ULP_RTOL,
+                atol=ULP_ATOL,
+            )
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    def test_wrt_a_limit_away_from_the_singularity(self, adjoint):
+        """The limits still move the mesh correctly under an extrapolation.
+
+        The singularity sits at an interior breakpoint, so both limits are regular and
+        ``d/db`` is just the integrand there.
+        """
+        prob = {
+            "fun": lambda x, c: jnp.abs(x - 0.3) ** -0.5 * jnp.exp(-c * x),
+            "interval": [0.0, 0.3, 1.0],
+            "args": jnp.asarray(1.0),
+        }
+        expected = float(np.abs(1.0 - 0.3) ** -0.5 * np.exp(-1.0))
+        for transform in (jax.jacfwd, jax.jacrev):
+            f, iv = _integrate(prob, adjoint, True, wrt_interval=True)
+            got = np.asarray(transform(f)(iv))
+            np.testing.assert_allclose(got[-1], expected, rtol=1e-10)
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    def test_transforms(self, adjoint):
+        """jit, vmap and second derivatives all survive the replay."""
+        prob = EXTRAPOLATED_PROBLEMS[0]
+        f, x = _integrate(prob, adjoint, True)
+        ref = np.asarray(jax.jacfwd(f)(x))
+        np.testing.assert_allclose(np.asarray(jax.jit(jax.grad(f))(x)), ref, rtol=1e-9)
+        batch = jnp.stack([x, x * 1.5])
+        np.testing.assert_allclose(
+            np.asarray(jax.vmap(jax.grad(f))(batch)),
+            np.stack([np.asarray(jax.grad(f)(b)) for b in batch]),
+            rtol=1e-9,
+        )
+
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("d1", [jax.jacfwd, jax.jacrev], ids=["jacfwd", "jacrev"])
+    @pytest.mark.parametrize("d2", [jax.jacfwd, jax.jacrev], ids=["jacfwd", "jacrev"])
+    def test_second_derivatives(self, adjoint, d1, d2):
+        """d2/dc2 of a linear-in-c integral is zero, for all combos of fwd/rev."""
+        prob = EXTRAPOLATED_PROBLEMS[0]
+        f, x = _integrate(prob, adjoint, True)
+        second = np.asarray(d1(d2(f))(x))
+        assert np.all(np.isfinite(second))
+        np.testing.assert_allclose(second, 0.0, atol=1e-9)

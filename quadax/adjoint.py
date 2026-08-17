@@ -9,13 +9,15 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from equinox.internal import unvmap_any
 from jax._src import core as jcore
 from jax.extend.core import Primitive
 from jax.flatten_util import ravel_pytree
 from jax.interpreters import ad, batching, mlir
 
+from . import _acceleration
 from .fixed_order import AbstractQuadratureRule
-from .utils import map_interval, wrap_func
+from .utils import _real_dtype, map_interval, tree_where, wrap_func
 
 
 class _ConvertedFunction(eqx.Module):
@@ -81,11 +83,17 @@ class QuadratureOps(NamedTuple):
         ``frozen(state) -> discretization``. Extracts whatever the primal solve settled
         on, for methods whose fixed-discretization evaluation JAX cannot differentiate
         in reverse (Romberg, whose level loop has dynamic bounds). Set together with
-        ``frozen_solve``; when both are set ``DirectAdjoint`` routes through a custom
-        primitive instead of differentiating the evaluation directly.
+        ``frozen_solve``; when both are set and there is no subdivision to rebuild,
+        ``DirectAdjoint`` routes through a custom primitive instead of differentiating
+        the evaluation directly.
     frozen_solve : callable or None
         ``frozen_solve(rule, vfunc, interval_t, discretization, kwargs) -> y``.
         Evaluates the quadrature on a fixed discretization.
+    mesh_is_primal : bool
+        Whether the value the solve returns is the sum over the subdivision. False when
+        convergence acceleration may return an extrapolated value instead; the
+        adjoints then take their derivative from ``frozen_solve``, which reproduces the
+        extrapolation as well as the mesh, rather than from ``on_mesh``.
     """
 
     build: Callable
@@ -94,6 +102,7 @@ class QuadratureOps(NamedTuple):
     on_mesh: Callable | None = None
     frozen: Callable | None = None
     frozen_solve: Callable | None = None
+    mesh_is_primal: bool = True
 
 
 def _with_checkpoint(ops, checkpoint):
@@ -104,6 +113,276 @@ def _with_checkpoint(ops, checkpoint):
     if ops.rebuild is not None and ops.frozen_solve is not None:
         upd["frozen_solve"] = partial(ops.frozen_solve, checkpoint=checkpoint)
     return ops._replace(**upd) if upd else ops
+
+
+# ---------------------------------------------------------------------------------
+# Fixed-discretization evaluation for the adaptive methods.
+#
+# These are the ``QuadratureOps`` fields that only the adjoints call: rebuilding the
+# subdivision the primal solve settled on as a smooth function of the integration
+# limits, and evaluating the quadrature on it. The primal solve never uses them, it
+# builds the subdivision as it goes.
+
+
+def _rebuild_mesh(interval, frozen):
+    """Rebuild the subdivision from `interval`, as a function of the integration limits.
+
+    Bisection never crosses a breakpoint, so every sub-interval stays inside whichever
+    of the original sub-intervals it was carved out of, at a fixed dyadic fraction of
+    the way along it. The primal loop records that owner and those fractions, which are
+    exactly the parts that do not vary smoothly. Rebuilding the mesh is then a gather
+    and a rescale, no loop, and no dependence on how many bisections were performed,
+    while still letting the mesh move when a limit or a breakpoint moves.
+    """
+    owner, frac_a, frac_b = frozen
+    lo = interval[owner]
+    hi = interval[owner + 1]
+    width = hi - lo
+    return lo + frac_a * width, lo + frac_b * width
+
+
+# How many sub-intervals of a fixed subdivision are evaluated at once. Evaluating all of
+# them together is fastest but makes peak memory scale with ``max_ninter``, which is a
+# safety bound users tend to set generously; evaluating one at a time streams but
+# serializes. Measured on a scalar integrand with an order 21 rule, 8 is where the curve
+# turns over: it matches one-at-a-time peak memory at large ``max_ninter`` while being
+# noticeably faster in reverse mode, and larger blocks buy little more speed for a lot
+# more memory.
+_CHUNK = 8
+
+
+def _block_mesh(rule, vfunc, a_arr, b_arr):
+    """Group a fixed subdivision into blocks of sub-intervals ready for evaluation.
+
+    Returns the blocked endpoints and mask to scan over, a function evaluating one
+    block, the shape and dtype of one sub-interval's contribution, and how many slots
+    the subdivision has.
+    """
+    # Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
+    # block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make
+    # a gradient cost ``max_ninter`` rather than the number of sub-intervals actually
+    # used, because reverse mode stacks residuals for every iteration whether or not it
+    # did any work. A plain ``vmap`` fixes that but materializes the whole subdivision
+    # at once.
+
+    # Slots past the end of the subdivision are empty (``a == b``). A block with no used
+    # slot in it is skipped entirely with a ``cond``, which is what keeps the cost of a
+    # derivative tracking the sub-intervals the solve actually used rather than
+    # ``max_ninter``; the solve fills slots from the front, so the used blocks are the
+    # leading ones. The predicate is reduced with ``unvmap_any`` so that it stays a
+    # scalar under ``vmap`` and the skip survives batching, at the cost of a block being
+    # evaluated for every batch element as soon as one of them needs it.
+
+    # Within a block the empty slots are still handed a real sub-interval and masked out
+    # afterwards rather than skipped: a per-slot ``cond`` sits inside the ``vmap``,
+    # where a batched ``cond`` becomes a ``select`` carrying a ``stop_gradient`` that
+    # cannot be transposed. Substituting a real sub-interval also stops an integrand
+    # that is singular somewhere in the mapped domain from poisoning the unused slots
+    # with a NaN that the mask would then propagate. So the granularity of the skip is
+    # ``_CHUNK``.
+    used = a_arr != b_arr
+    a_safe = jnp.where(used, a_arr, a_arr[0])
+    b_safe = jnp.where(used, b_arr, b_arr[0])
+
+    nslot = a_arr.shape[0]
+    chunk = min(_CHUNK, nslot)
+    pad = -nslot % chunk
+    reshape = lambda x, fill: jnp.pad(x, (0, pad), constant_values=fill).reshape(
+        -1, chunk
+    )
+
+    apply1 = lambda a, b: rule._apply(vfunc, a, b, ())
+    sds = jax.eval_shape(apply1, a_arr[0], b_arr[0])
+    # The mask multiplies the *values*, so it takes their (real) dtype rather than the
+    # mesh's. With the mesh at float64 and the values at float32 the latter would
+    # otherwise be promoted straight back to float64 here.
+    blocks = (
+        reshape(a_safe, a_arr[0]),
+        reshape(b_safe, b_arr[0]),
+        reshape(used.astype(_real_dtype(sds.dtype)), 0.0),
+    )
+
+    def evaluate(block):
+        """One block's masked contributions, zeros if no slot in it is used."""
+        a, b, m = block
+
+        def run(_):
+            y = jax.vmap(apply1)(a, b)
+            return y * m.reshape((-1,) + (1,) * (y.ndim - 1))
+
+        # `unvmap_any` keeps the predicate a scalar under `vmap`, so the block is
+        # skipped whenever *no* batch element uses it instead of degrading to a select
+        # that evaluates every block. No inner per-element gate is needed: `m` already
+        # zeroes the slots an individual element does not use.
+        return jax.lax.cond(
+            unvmap_any(jnp.any(m != 0)),
+            run,
+            lambda _: jnp.zeros((chunk, *sds.shape), sds.dtype),
+            None,
+        )
+
+    return blocks, evaluate, sds, nslot
+
+
+def _checkpointed(bodyfun, checkpoint):
+    """Recompute a scan body during the backward pass rather than storing it.
+
+    Without this reverse mode keeps the integrand's value at every node of every
+    sub-interval, which dominates its memory; recomputing them is nearly free here.
+    """
+    return jax.checkpoint(bodyfun) if checkpoint else bodyfun
+
+
+def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
+    """Apply the local rule on a fixed subdivision and sum the contributions."""
+    del kwargs
+    blocks, evaluate, sds, _ = _block_mesh(rule, vfunc, a_arr, b_arr)
+
+    def bodyfun(total, block):
+        return total + jnp.sum(evaluate(block), axis=0), None
+
+    total, _ = jax.lax.scan(
+        _checkpointed(bodyfun, checkpoint), jnp.zeros(sds.shape, sds.dtype), blocks
+    )
+    return total
+
+
+def _values_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
+    """Apply the local rule on a fixed subdivision, keeping the contributions separate.
+
+    As ``_quad_on_mesh``, except that the per-sub-interval values are returned rather
+    than summed, because the replay has to recombine them in more than one way.
+    """
+    del kwargs
+    blocks, evaluate, sds, nslot = _block_mesh(rule, vfunc, a_arr, b_arr)
+
+    def bodyfun(carry, block):
+        return carry, evaluate(block)
+
+    _, values = jax.lax.scan(_checkpointed(bodyfun, checkpoint), None, blocks)
+    return values.reshape(-1, *sds.shape)[:nslot]
+
+
+def _frozen_mesh(state):
+    """The parts of the subdivision that do not vary smoothly with the limits."""
+    return (state["owner"], state["frac_a"], state["frac_b"])
+
+
+def _mesh_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
+    """Quadrature on the subdivision implied by `frozen`, as a function of interval."""
+    a_arr, b_arr = _rebuild_mesh(interval, frozen)
+    return _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, checkpoint=checkpoint)
+
+
+class _ReplayRecord(NamedTuple):
+    """What an accelerated solve settled on, enough to reproduce it differentiably.
+
+    Every field is integer or boolean apart from the fractions, so nothing here carries
+    a derivative: these are exactly the decisions the primal made, frozen. Each is
+    carried under its own name in the integrator state.
+
+    ``mesh`` is the final subdivision, as for a plain solve. ``parents`` describes the
+    sub-intervals that no longer exist -- each was bisected, so each is the *parent* of
+    one step -- and the birth times record when every sub-interval entered and left the
+    running total, which is what lets the whole sequence of running totals be rebuilt.
+    Both the parent arrays and the birth times are indexed by the slot the bisection
+    created, which is unique to that step, so the step needs no separate counter.
+    """
+
+    owner: jax.Array
+    frac_a: jax.Array
+    frac_b: jax.Array
+    birth: jax.Array
+    p_owner: jax.Array
+    p_frac_a: jax.Array
+    p_frac_b: jax.Array
+    p_birth: jax.Array
+    append_mask: jax.Array
+    accel_ncall: jax.Array
+    used_accel: jax.Array
+
+    @property
+    def mesh(self):
+        """Frozen description of the final subdivision, for ``_rebuild_mesh``."""
+        return (self.owner, self.frac_a, self.frac_b)
+
+    @property
+    def parents(self):
+        """Frozen description of the bisected sub-intervals, for ``_rebuild_mesh``."""
+        return (self.p_owner, self.p_frac_a, self.p_frac_b)
+
+
+def _frozen_replay(state):
+    """The parts of an accelerated solve that do not vary smoothly with the limits."""
+    return _ReplayRecord(**{name: state[name] for name in _ReplayRecord._fields})
+
+
+def _replay_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
+    """Re-run an accelerated quadrature on the decisions the primal settled on.
+
+    An accelerated solve may return an extrapolated value rather than the sum over the
+    subdivision, so differentiating it means differentiating the extrapolation as well
+    as the mesh. Everything the acceleration decided -- which sub-interval to bisect,
+    when to feed the table, which extrapolation to keep -- was settled on error
+    estimates and is integer or boolean, so freezing it leaves a fixed, ordinary
+    function of the limits and the integrand: rebuild the subdivision, rebuild the
+    sequence of running totals, and run the epsilon algorithm over it again.
+
+    Rebuilding the running totals is the part that is not simply a mesh sum. The total
+    at the point where ``t`` sub-intervals exist is the sum over those alive then, and a
+    coarse sub-interval's value is not the sum of the values of the two halves it was
+    cut into, so it is not a prefix sum of the final subdivision. Recording
+    when each sub-interval entered the total and when it left turns it into one instead:
+    add each value at its birth, subtract it again at its death, and the running totals
+    are the cumulative sum. Every sub-interval that ever existed is either in the final
+    subdivision or was bisected, so evaluating the final subdivision and the parents
+    covers all of them, and costs the same number of rule evaluations as the primal.
+    """
+    mesh = _rebuild_mesh(interval, frozen.mesh)
+    parents = _rebuild_mesh(interval, frozen.parents)
+    values = _values_on_mesh(
+        rule,
+        vfunc,
+        jnp.concatenate([mesh[0], parents[0]]),
+        jnp.concatenate([mesh[1], parents[1]]),
+        kwargs,
+        checkpoint=checkpoint,
+    )
+    nslot = mesh[0].shape[0]
+    v_mesh, v_parent = values[:nslot], values[nslot:]
+    shape, ytype = values.shape[1:], values.dtype
+
+    # Births and deaths, as a signed contribution at each point on the timeline. A
+    # sub-interval of the final subdivision never dies. A parent dies at the step that
+    # bisected it, which is the step that created slot `n`, so at `n + 1`. Unused slots
+    # carry a zero value and cannot disturb either sum.
+    n_init = interval.shape[0] - 1
+    timeline = jnp.zeros((nslot + 2, *shape), ytype)
+    timeline = timeline.at[frozen.birth].add(v_mesh)
+    timeline = timeline.at[frozen.p_birth].add(v_parent)
+    timeline = timeline.at[jnp.arange(nslot) + 1].add(-v_parent)
+    running = jnp.cumsum(timeline, axis=0)
+
+    # The subsequence that was actually fed to the table, gathered into fixed positions.
+    # The initial total seeds it, as in the primal, and the appends follow in order;
+    # everything else is parked in a slot that is never read.
+    unused = nslot + 1
+    position = jnp.cumsum(frozen.append_mask)
+    sequence = jnp.zeros((nslot + 2, *shape), ytype).at[0].set(running[n_init])
+    sequence = sequence.at[jnp.where(frozen.append_mask, position, unused)].set(
+        running[jnp.arange(nslot) + 1]
+    )
+
+    table = _acceleration.append(_acceleration.init_table(shape, ytype), sequence[0])
+
+    def call(j, table):
+        fed = _acceleration.step(table, sequence[j], rule.norm)
+        # Stop at the extrapolation the primal kept, which is the last one that improved
+        # on the one before it. Later calls happened, but their results were discarded.
+        return tree_where(j <= frozen.accel_ncall, fed, table)
+
+    table = jax.lax.fori_loop(1, nslot + 1, call, table)
+    return jnp.where(frozen.used_accel, table.result, running[nslot])
 
 
 def _zero_tangent(tree):
@@ -303,6 +582,16 @@ def _direct_jvp(primals, tangents, *, ops):
     def fixed_mesh(dyn_):
         rule_, interval_, args_, consts_, _, _, kwargs_ = eqx.combine(dyn_, static)
         vfunc, interval_t = ops.build(interval_, args_, consts_)
+        if not ops.mesh_is_primal:
+            # Convergence acceleration may have returned an extrapolated value instead
+            # of the mesh sum, so the mesh alone is not what was differentiated. The
+            # frozen evaluation replays the extrapolation as well, and rebuilds the
+            # subdivision from the limits whether or not they are being perturbed --
+            # unlike the mesh sum it needs the sub-intervals that no longer exist, which
+            # were never stored as endpoints.
+            return ops.frozen_solve(
+                rule_, vfunc, interval_t, ops.frozen(state), kwargs_
+            )
         if interval_perturbed:
             a_arr, b_arr = ops.rebuild(interval_t, ops.frozen(state))
         else:
@@ -390,6 +679,48 @@ def _endpoint_term(vfunc, interval_t, *, ops, static):
     return term
 
 
+def _integrand_at(dyn_, *, t, ops, static):
+    """The mapped integrand evaluated at ``t``, as a function of the primals.
+
+    ``ops.build`` folds the limits, the arguments and the closed-over constants into the
+    integrand, so all of them reach the value at a point through here. Both directions
+    differentiate this: forward mode pushes a tangent through it, reverse mode pulls a
+    cotangent back.
+    """
+    _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
+    vf, _ = ops.build(interval, args, consts)
+    return vf(t)
+
+
+def _tangent_integrand(dyn, dyn_t, *, ops, static):
+    """The integrand's tangent along ``dyn_t``, as a function of the abscissa."""
+
+    def dvfunc(t):
+        at_t = partial(_integrand_at, t=t, ops=ops, static=static)
+        return jax.jvp(at_t, (dyn,), (dyn_t,))[1]
+
+    return dvfunc
+
+
+def _without_interval(tree):
+    """Zero out the limits' component of a tangent or cotangent, keeping the rest.
+
+    The limits sit at position 1 of the primal tuple. Zeroing rather than dropping keeps
+    the pytree structure the solve and ``ravel_pytree`` expect.
+    """
+    return (tree[0], jax.tree.map(jnp.zeros_like, tree[1]), *tree[2:])
+
+
+def _mesh_quad(ops, rule, args, consts, frozen, kwargs):
+    """Quadrature on the frozen discretization, as a function of the limits alone."""
+
+    def quad(interval):
+        vfunc, interval_t = ops.build(interval, args, consts)
+        return ops.frozen_solve(rule, vfunc, interval_t, frozen, kwargs)
+
+    return quad
+
+
 def _leibniz_impl(
     *flat,
     ops,
@@ -411,14 +742,6 @@ def _leibniz_impl(
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
 
-    def dvfunc(t):
-        def at_t(dyn_):
-            _, interval_, args_, consts_, _, _ = eqx.combine(dyn_, static)
-            vf, _ = ops.build(interval_, args_, consts_)
-            return vf(t)
-
-        return jax.jvp(at_t, (dyn,), (dyn_t,))[1]
-
     del out_sds
     # The split below rebuilds the subdivision, which only exists (and is only reverse
     # differentiable) for the adaptive routines. Romberg has neither a subdivision nor
@@ -427,7 +750,7 @@ def _leibniz_impl(
         y_dot = _run_solve(
             ops,
             rule,
-            dvfunc,
+            _tangent_integrand(dyn, dyn_t, ops=ops, static=static),
             interval_t,
             epsabs,
             epsrel,
@@ -448,39 +771,12 @@ def _leibniz_impl(
     # jump moves relative to a fixed mesh, and quadrature of df/dx misses the delta.
     # Rebuilding the mesh from the limits tracks the breakpoint and recovers it, exactly
     # as DirectAdjoint does. Everything else keeps the error-controlled solve.
-    dyn_t_rest = (dyn_t[0], jax.tree.map(jnp.zeros_like, dyn_t[1]), *dyn_t[2:])
-
-    def dvfunc_rest(t):
-        def at_t(dyn_):
-            _, interval_, args_, consts_, _, _ = eqx.combine(dyn_, static)
-            vf, _ = ops.build(interval_, args_, consts_)
-            return vf(t)
-
-        return jax.jvp(at_t, (dyn,), (dyn_t_rest,))[1]
-
-    y_dot = ops.solve(rule, dvfunc_rest, interval_t, epsabs, epsrel, kwargs)[0]
-    return (
-        y_dot
-        + jax.jvp(
-            partial(
-                _mesh_quad,
-                ops=ops,
-                rule=rule,
-                args=args,
-                consts=consts,
-                frozen=frozen,
-                kwargs=kwargs,
-            ),
-            (interval,),
-            (dyn_t[1],),
-        )[1]
+    dvfunc_rest = _tangent_integrand(
+        dyn, _without_interval(dyn_t), ops=ops, static=static
     )
-
-
-def _mesh_quad(interval, *, ops, rule, args, consts, frozen, kwargs):
-    """Quadrature on the rebuilt subdivision, as a function of the limits alone."""
-    vfunc, interval_t = ops.build(interval, args, consts)
-    return ops.frozen_solve(rule, vfunc, interval_t, frozen, kwargs)
+    y_dot = ops.solve(rule, dvfunc_rest, interval_t, epsabs, epsrel, kwargs)[0]
+    mesh_quad = _mesh_quad(ops, rule, args, consts, frozen, kwargs)
+    return y_dot + jax.jvp(mesh_quad, (interval,), (dyn_t[1],))[1]
 
 
 def _leibniz_transpose(
@@ -506,13 +802,23 @@ def _leibniz_transpose(
     _, unravel = ravel_pytree(dyn)
 
     def adjoint_integrand(t):
-        def at_t(dyn_):
-            _, interval_, args_, consts_, _, _ = eqx.combine(dyn_, static)
-            vf, _ = ops.build(interval_, args_, consts_)
-            return vf(t)
-
+        at_t = partial(_integrand_at, t=t, ops=ops, static=static)
         _, vjp = jax.vjp(at_t, dyn)
-        return ravel_pytree(vjp(ct)[0])[0]
+        ct_dyn = vjp(ct)[0]
+        if not interval_from_solve:
+            # Drop the limits' components before they reach the solve. Their cotangent
+            # is either supplied by the rebuilt subdivision below or not wanted at all,
+            # so integrating them buys nothing, and it costs, because they are the
+            # components that misbehave: differentiating an integral whose integrand is
+            # unbounded at a limit gives an unbounded adjoint integrand, and the error
+            # control is driven by `rule.norm` over the whole raveled vector, so one
+            # divergent component sets the mesh for every component. Convergence
+            # acceleration couples them harder still, since the epsilon table's
+            # structural decisions are made on the norm as well. Forward mode zeroes the
+            # tangent's limits the same way, see `_leibniz_impl`; without this the two
+            # modes are not solving the same problem.
+            ct_dyn = _without_interval(ct_dyn)
+        return ravel_pytree(ct_dyn)[0]
 
     flat_ct = _run_solve(
         ops,
@@ -528,18 +834,8 @@ def _leibniz_transpose(
     if split:
         # the limits' cotangent comes from the rebuilt subdivision instead, so that a
         # breakpoint on a discontinuity picks up its jump term (see _leibniz_impl)
-        ct_iv = jax.vjp(
-            partial(
-                _mesh_quad,
-                ops=ops,
-                rule=rule,
-                args=args,
-                consts=consts,
-                frozen=frozen,
-                kwargs=kwargs,
-            ),
-            interval,
-        )[1](ct)[0]
+        mesh_quad = _mesh_quad(ops, rule, args, consts, frozen, kwargs)
+        ct_iv = jax.vjp(mesh_quad, interval)[1](ct)[0]
         ct_tree = (ct_tree[0], ct_iv, *ct_tree[2:])
     elif interval_from_solve:
         # The adjoint integrand carries the limits' cotangent only through the

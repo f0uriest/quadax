@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import warnings
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -111,6 +112,82 @@ example_problems = [
         "interval": [0, 1],
         "val": 0.25j,
     },
+    # Problems 17-25 are algebraic singularities, the family bisection alone cannot
+    # resolve: for `t**-alpha` the mass below a panel of width h is exactly
+    # `h**(1-alpha)` of the total, so an integrator that never samples closer than h to
+    # the singular point carries that much relative error whatever its local rule does.
+    # They span the axes that turn out to matter: how strong the singularity is, which
+    # end it sits at, whether there is one or several, and whether the caller marked it.
+    #
+    # problem 17 - mild endpoint algebraic singularity
+    {"fun": lambda t: t**-0.5, "interval": [0, 1], "val": 2.0},
+    # problem 18 - strong endpoint algebraic singularity
+    {"fun": lambda t: t**-0.9, "interval": [0, 1], "val": 10.0},
+    # problem 19 - extreme endpoint singularity, near the divergence at alpha=1
+    {"fun": lambda t: t**-0.99, "interval": [0, 1], "val": 100.0},
+    # problem 20 - the same strength at the *right* endpoint, which the mapping onto the
+    # reference interval treats differently from the left
+    {"fun": lambda t: (1 - t) ** -0.9, "interval": [0, 1], "val": 10.0},
+    # problem 21 - both endpoints singular, to different strengths. Two decaying modes
+    # arriving at different rates, which is the case a single running total cannot
+    # separate. Beta(3/4, 1/4) = gamma(3/4)gamma(1/4) = pi/sin(pi/4).
+    {
+        "fun": lambda t: t**-0.25 * (1 - t) ** -0.75,
+        "interval": [0, 1],
+        "val": jnp.pi * jnp.sqrt(2),
+    },
+    # problem 22 - logarithmic times algebraic
+    {"fun": lambda t: jnp.log(t) / jnp.sqrt(t), "interval": [0, 1], "val": -4.0},
+    # problem 23 - interior singularity, not marked
+    {
+        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5,
+        "interval": [0, 1],
+        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)),
+    },
+    # problem 24 - the same one, marked as a breakpoint so it lands on a panel end
+    {
+        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5,
+        "interval": [0, 0.3, 1],
+        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)),
+    },
+    # problem 25 - two interior singularities of different strengths
+    {
+        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5 + jnp.abs(t - 0.7) ** -0.25,
+        "interval": [0, 1],
+        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)) + (0.7**0.75 + 0.3**0.75) / 0.75,
+    },
+    # Problems 26-32 decay algebraically over an infinite range, which the mapping onto
+    # the reference interval turns into an endpoint singularity, so they exercise the
+    # same machinery as 17-25 but with the difficulty manufactured by the transform
+    # rather than present in the integrand.
+    #
+    # For [a, inf) the map is `x = a - 1 + 2/(1-t)` with weight `2/(1-t)**2`, so an
+    # integrand falling off as `x**-p` becomes `(1-t)**(p-2)`: the induced singularity
+    # has strength `alpha = 2 - p`. The doubly infinite `tan` map gives the same law.
+    # That makes these an exact counterpart of the finite cases: p = 1.1 induces the
+    # same alpha = 0.9 as problem 18, and the pair measures how much of the difficulty
+    # is the singularity itself and how much is the coordinate it is expressed in.
+    #
+    # problem 26 - semi-infinite, induced alpha = 0.5
+    {"fun": lambda t: t**-1.5, "interval": [1, jnp.inf], "val": 2.0},
+    # problem 27 - semi-infinite, induced alpha = 0.9
+    {"fun": lambda t: t**-1.1, "interval": [1, jnp.inf], "val": 10.0},
+    # problem 28 - semi-infinite, induced alpha = 0.99, the slowest decay that converges
+    {"fun": lambda t: t**-1.01, "interval": [1, jnp.inf], "val": 100.0},
+    # problem 29 - the same decay from a finite left end, so the map is exercised
+    # without the integrand also being singular at the start of the range
+    {"fun": lambda t: (1 + t) ** -1.5, "interval": [0, jnp.inf], "val": 2.0},
+    # problem 30 - the mirror image, which uses the other one sided map
+    {"fun": lambda t: (1 - t) ** -1.5, "interval": [-jnp.inf, 0], "val": 2.0},
+    # problem 31 - logarithmic factor on top of the algebraic decay
+    {"fun": lambda t: jnp.log(t) / t**2, "interval": [1, jnp.inf], "val": 1.0},
+    # problem 32 - doubly infinite with algebraic decay, so the transform induces a
+    # singularity at *both* ends at once
+    {
+        "fun": lambda t: (1 + t**2) ** -0.75,
+        "interval": [-jnp.inf, jnp.inf],
+        "val": jnp.sqrt(jnp.pi) * scipy.special.gamma(0.25) / scipy.special.gamma(0.75),
+    },
 ]
 
 # Where extrapolation is off and on are meant to produce the same quantity, they are
@@ -119,17 +196,38 @@ ULP_RTOL = 1e-13
 ULP_ATOL = 1e-15
 
 
-class TestQuadGK:
+class _BothExtrapolationModes:
+    """Run every case in the class twice, with extrapolation off and on.
+
+    The two modes are held to the same contract: the same status, and the same accuracy.
+    Where a case genuinely behaves differently with acceleration, it says so with an
+    ``extrap_status`` or ``extrap_fudge`` override rather than by being excluded.
+    """
+
+    @pytest.fixture(params=[False, True], ids=["plain", "extrap"], autouse=True)
+    def _extrapolation_mode(self, request):
+        self.extrapolate = request.param
+
+
+class TestQuadGK(_BothExtrapolationModes):
     """Tests for Gauss-Kronrod quadrature."""
 
     def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
+        # Overrides for cases whose behaviour genuinely differs once the extrapolation
+        # is switched on, applied only in that mode.
+        extrap_status = kwargs.pop("extrap_status", None)
+        extrap_fudge = kwargs.pop("extrap_fudge", None)
+        if self.extrapolate:
+            status = status if extrap_status is None else extrap_status
+            fudge = fudge if extrap_fudge is None else extrap_fudge
         y, info = quadgk(
             prob["fun"],
             prob["interval"],
             epsabs=tol,
             epsrel=tol,
+            extrapolate=self.extrapolate,
             **kwargs,
         )
         assert info.status == status
@@ -184,8 +282,8 @@ class TestQuadGK:
         self._base(6, 1e-4, order=15)
         # endpoint singularity: order 15 tops out around 1e-8 however much budget it is
         # given, so it exhausts the subdivision limit rather than reaching the tolerance
-        self._base(6, 1e-8, 100, order=15, status=2)
-        self._base(6, 1e-12, 1e5, order=15, max_ninter=100, status=8)
+        self._base(6, 1e-8, 100, order=15, status=2, extrap_status=0)
+        self._base(6, 1e-12, 1e5, order=15, max_ninter=100, status=8, extrap_status=0)
 
     def test_prob7(self):
         """Test for example problem #7."""
@@ -203,8 +301,8 @@ class TestQuadGK:
         """Test for example problem #9."""
         self._base(9, 1e-4, order=15)
         # as for problem 6, order 15 cannot certify 1e-8 on this endpoint singularity
-        self._base(9, 1e-8, 100, order=15, status=2)
-        self._base(9, 1e-12, 1e4, order=15, max_ninter=100, status=8)
+        self._base(9, 1e-8, 100, order=15, status=2, extrap_status=0)
+        self._base(9, 1e-12, 1e4, order=15, max_ninter=100, status=8, extrap_status=0)
 
     def test_prob10(self):
         """Test for example problem #10."""
@@ -217,8 +315,8 @@ class TestQuadGK:
         self._base(11, 1e-4, order=21)
         # bisection concentrates on the singularity at t=0 until the sub-intervals stop
         # being resolvable, at a true error just above 1e-8
-        self._base(11, 1e-8, 100, order=21, status=8)
-        self._base(11, 1e-12, 1e4, order=21, status=8, max_ninter=100)
+        self._base(11, 1e-8, 100, order=21, status=8, extrap_status=0)
+        self._base(11, 1e-12, 1e4, order=21, status=8, max_ninter=100, extrap_status=0)
 
     def test_prob12(self):
         """Test for example problem #12."""
@@ -251,17 +349,25 @@ class TestQuadGK:
         self._base(16, 1e-12)
 
 
-class TestQuadCC:
+class TestQuadCC(_BothExtrapolationModes):
     """Tests for Clenshaw-Curtis quadrature."""
 
     def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
+        # Overrides for cases whose behaviour genuinely differs once the extrapolation
+        # is switched on, applied only in that mode.
+        extrap_status = kwargs.pop("extrap_status", None)
+        extrap_fudge = kwargs.pop("extrap_fudge", None)
+        if self.extrapolate:
+            status = status if extrap_status is None else extrap_status
+            fudge = fudge if extrap_fudge is None else extrap_fudge
         y, info = quadcc(
             prob["fun"],
             prob["interval"],
             epsabs=tol,
             epsrel=tol,
+            extrapolate=self.extrapolate,
             **kwargs,
         )
         assert info.status == status
@@ -315,8 +421,8 @@ class TestQuadCC:
         """Test for example problem #6."""
         self._base(6, 1e-4)
         # endpoint singularity, see TestQuadGK.test_prob6
-        self._base(6, 1e-8, 100, status=2)
-        self._base(6, 1e-12, 1e5, max_ninter=100, status=8)
+        self._base(6, 1e-8, 100, status=2, extrap_status=0)
+        self._base(6, 1e-12, 1e5, max_ninter=100, status=8, extrap_status=0)
 
     def test_prob7(self):
         """Test for example problem #7."""
@@ -332,9 +438,20 @@ class TestQuadCC:
 
     def test_prob9(self):
         """Test for example problem #9."""
-        self._base(9, 1e-4)
-        self._base(9, 1e-8, max_ninter=100, status=8)
-        self._base(9, 1e-12, 1e4, max_ninter=100, status=8)
+        # `sqrt(tan(t))` is unbounded at the right endpoint, so the sum over the mesh
+        # runs away -- about 50 against a true value of 2.22 -- while its error estimate
+        # outgrows it in turn. The extrapolation recovers the value (to ~5e-12 at the
+        # tightest tolerance here), but the divergence test at the end compares the two,
+        # and an error estimate larger than the mesh sum itself is one of the things it
+        # rejects on, so the right answer arrives carrying a divergence flag. That is
+        # the test working as intended on a mesh that really has diverged: scipy is
+        # spared only because the Gauss-Kronrod mesh converges on this integrand where
+        # the Clenshaw-Curtis one does not, which is a property of the local rule. The
+        # value is still checked against the tolerance on every line below.
+        divergent = 2**quadax.adaptive.DIVERGENT
+        self._base(9, 1e-4, extrap_status=divergent)
+        self._base(9, 1e-8, max_ninter=100, status=8, extrap_status=divergent)
+        self._base(9, 1e-12, 1e4, max_ninter=100, status=8, extrap_status=0)
 
     def test_prob10(self):
         """Test for example problem #10."""
@@ -346,8 +463,8 @@ class TestQuadCC:
         """Test for example problem #11."""
         self._base(11, 1e-4)
         # singularity at t=0, see TestQuadGK.test_prob11
-        self._base(11, 1e-8, 100, status=8)
-        self._base(11, 1e-12, 1e4, status=8)
+        self._base(11, 1e-8, 100, status=8, extrap_status=0)
+        self._base(11, 1e-12, 1e4, status=8, extrap_status=0)
 
     def test_prob12(self):
         """Test for example problem #12."""
@@ -380,17 +497,25 @@ class TestQuadCC:
         self._base(16, 1e-12)
 
 
-class TestQuadTS:
+class TestQuadTS(_BothExtrapolationModes):
     """Tests for adaptive tanh-sinh quadrature."""
 
     def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         status = kwargs.pop("status", 0)
+        # Overrides for cases whose behaviour genuinely differs once the extrapolation
+        # is switched on, applied only in that mode.
+        extrap_status = kwargs.pop("extrap_status", None)
+        extrap_fudge = kwargs.pop("extrap_fudge", None)
+        if self.extrapolate:
+            status = status if extrap_status is None else extrap_status
+            fudge = fudge if extrap_fudge is None else extrap_fudge
         y, info = quadts(
             prob["fun"],
             prob["interval"],
             epsabs=tol,
             epsrel=tol,
+            extrapolate=self.extrapolate,
             **kwargs,
         )
         assert info.status == status
@@ -471,12 +596,14 @@ class TestQuadTS:
         """Test for example problem #9.
 
         The 1e-12 request is out of reach on an endpoint singularity, and which of
-        ROUNDOFF / BAD_INTEGRAND the loop gives up with depends on exactly where the
-        mesh stops, the value is what this really guards.
+        ROUNDOFF / BAD_INTEGRAND / NO_CONVERGE the loop gives up with depends on exactly
+        where the mesh stops, the value is what this really guards. With acceleration it
+        is the table that runs out first: the sequence it is fed stops improving while
+        the tanh-sinh abscissae are still short of the tolerance.
         """
         self._base(9, 1e-4)
         self._base(9, 1e-8, 10)
-        self._base(9, 1e-12, 1e4, status=8)
+        self._base(9, 1e-12, 1e4, status=8, extrap_status=16)
 
     def test_prob10(self):
         """Test for example problem #10."""
@@ -526,13 +653,24 @@ class TestQuadTS:
         self._base(16, 1e-12)
 
 
-class TestRombergTS:
-    """Tests for tanh-sinh quadrature with adaptive refinement."""
+class TestRombergTS(_BothExtrapolationModes):
+    """Tests for tanh-sinh quadrature with adaptive refinement.
+
+    Run in both settings of ``extrapolate``, with no per-case overrides: the tanh-sinh
+    rule converges doubly exponentially, so Richardson has no error expansion in powers
+    of the step to work on and neither adds nor removes accuracy here. ``TestRomberg``
+    cannot do the same, because there the trapezoidal rule really does depend on it.
+    """
 
     def _base(self, i, tol, fudge=1.0, **kwargs):
         prob = example_problems[i]
         y, info = rombergts(
-            prob["fun"], prob["interval"], epsabs=tol, epsrel=tol, **kwargs
+            prob["fun"],
+            prob["interval"],
+            epsabs=tol,
+            epsrel=tol,
+            extrapolate=self.extrapolate,
+            **kwargs,
         )
         if info.status == 0:
             assert info.err < max(tol, tol * np.max(np.abs(y)))
@@ -757,6 +895,247 @@ class TestRomberg:
         self._base(16, 1e-12)
 
 
+class TestExtrapolation:
+    """Tests for the convergence acceleration in the adaptive solvers."""
+
+    # The singular families from problems 17-25, plus the algebraically decaying ones on
+    # infinite ranges whose transform induces a singularity of the same kind. Bisection
+    # alone gets a handful of digits on any of these. Problem 31 is left out: its decay
+    # is fast enough that the induced exponent is zero and the mapped integrand is
+    # already smooth, so there is nothing for the table to do, it is covered by
+    # ``test_converged_mesh_is_not_displaced`` instead.
+    SINGULAR = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32]
+
+    @pytest.mark.parametrize("i", SINGULAR)
+    @pytest.mark.parametrize("quad", [quadgk, quadcc])
+    def test_singularities_are_resolved(self, quad, i):
+        """Acceleration should reach near machine precision where the mesh cannot."""
+        prob = example_problems[i]
+        kwargs = dict(epsabs=1e-12, epsrel=1e-12, max_ninter=200, full_output=True)
+        y_off, info_off = quad(prob["fun"], prob["interval"], **kwargs)
+        y_on, info_on = quad(prob["fun"], prob["interval"], extrapolate=True, **kwargs)
+        exact = np.asarray(prob["val"])
+        err_off = np.max(np.abs(np.asarray(y_off) - exact)) / np.max(np.abs(exact))
+        err_on = np.max(np.abs(np.asarray(y_on) - exact)) / np.max(np.abs(exact))
+        # Two orders of magnitude is well inside the margin: measured gains run from
+        # 1e3 on the mildest of these to 1e11 on the strongest.
+        assert err_on < err_off / 100, f"problem {i}: {err_off:.2e} -> {err_on:.2e}"
+        assert err_on < 1e-10
+        # and it should get there on a far coarser subdivision
+        assert info_on.info["ninter"] < info_off.info["ninter"]
+
+    @pytest.mark.parametrize("alpha, finite_part", [(1.5, -2.0), (2.0, -1.0)])
+    def test_divergent_integral_is_flagged(self, alpha, finite_part):
+        """A divergent integrand must not come back looking converged.
+
+        The table returns the analytic continuation of the convergent case, the
+        epsilon algorithm sums a divergent series the way Pade approximants do, and is
+        indifferent to whether the limit it infers exists. scipy returns the same value.
+        What keeps that from being silently wrong is the flag, not the value.
+        """
+        y, info = quadgk(
+            lambda t: t**-alpha,
+            jnp.array([0.0, 1.0]),
+            epsabs=1e-10,
+            epsrel=1e-10,
+            max_ninter=200,
+            extrapolate=True,
+        )
+        np.testing.assert_allclose(float(y), finite_part, rtol=1e-6)
+        assert int(info.status) & 2**quadax.adaptive.DIVERGENT
+        # the docstrings tell users to look the code up in STATUS, so it has to be there
+        assert quadax.STATUS[int(info.status)].strip()
+
+    def test_no_asymptotic_structure_falls_back(self):
+        """``sin(1/x)`` has no trend to extrapolate, so the table must not win.
+
+        The reference is built by splitting at the oscillation's turning points rather
+        than taken from ``scipy.quad``, which cannot reach this tolerance on the whole
+        interval in one go and says so with a warning.
+        """
+        a = 1e-3
+        # 1/t runs from 1 to 1000, so put a breakpoint at every multiple of pi in that
+        # range and the integrand is smooth on each piece.
+        turns = 1 / (np.pi * np.arange(1, int(1 / (np.pi * a)) + 1))[::-1]
+        edges = np.concatenate([[a], turns[turns > a], [1.0]])
+        ref = sum(
+            scipy.integrate.quad(
+                lambda t: np.sin(1 / t), lo, hi, epsabs=1e-13, epsrel=1e-13
+            )[0]
+            for lo, hi in zip(edges[:-1], edges[1:])
+        )
+        y, info = quadgk(
+            lambda t: jnp.sin(1 / t),
+            jnp.array([a, 1.0]),
+            epsabs=1e-12,
+            epsrel=1e-12,
+            max_ninter=100,
+            extrapolate=True,
+        )
+        # Either it is right, or it says it is not; what it must not do is both be
+        # wrong and report success.
+        if int(info.status) == 0:
+            np.testing.assert_allclose(float(y), ref, rtol=1e-8, atol=1e-10)
+
+    def test_converged_mesh_is_not_displaced(self):
+        """Where the subdivision converges, its result stands.
+
+        The mesh sum is the one carrying an honest error bound, so a table fed early on
+        a coarse mesh must not be able to replace it. Once the subdivision has reached
+        the tolerance on its own the extrapolated value is not considered at all.
+        """
+        for i in (0, 1, 2, 12, 13):
+            prob = example_problems[i]
+            kwargs: dict[str, Any] = dict(epsabs=1e-10, epsrel=1e-10, full_output=True)
+            y_off, _ = quadgk(prob["fun"], prob["interval"], **kwargs)
+            y_on, info = quadgk(
+                prob["fun"], prob["interval"], extrapolate=True, **kwargs
+            )
+            np.testing.assert_allclose(
+                np.asarray(y_off),
+                np.asarray(y_on),
+                rtol=ULP_RTOL,
+                atol=ULP_ATOL,
+                err_msg=f"problem {i}",
+            )
+
+    @pytest.mark.parametrize("i", range(len(example_problems)))
+    def test_acceleration_does_no_harm(self, i):
+        """Switching acceleration on must not make any problem materially worse.
+
+        Deliberately over the whole problem list rather than the singular subset: the
+        risk the flag carries is not that it fails to help, it is that it quietly costs
+        accuracy somewhere nobody was looking. The factor of ten is slack for a mesh
+        that legitimately differs, since the acceleration changes which sub-interval is
+        bisected next and the two runs are not obliged to agree exactly.
+        """
+        prob = example_problems[i]
+        kwargs: dict[str, Any] = dict(epsabs=1e-10, epsrel=1e-10, max_ninter=200)
+        exact = np.asarray(prob["val"])
+        scale = max(np.max(np.abs(exact)), 1.0)
+
+        def err(extrapolate):
+            y, _ = quadgk(
+                prob["fun"], prob["interval"], extrapolate=extrapolate, **kwargs
+            )
+            return np.max(np.abs(np.asarray(y) - exact)) / scale
+
+        off, on = err(False), err(True)
+        assert on <= max(10 * off, 1e-14), f"problem {i}: {off:.2e} -> {on:.2e}"
+
+    # The four that scipy fails on, plus a spread of everything else: smooth cases
+    # where the table should never fire at all, a vector and a complex integrand, a
+    # breakpoint case, endpoint and interior singularities, and two infinite ranges.
+    @pytest.mark.parametrize(
+        "i", [0, 1, 3, 6, 9, 14, 15, 16, 17, 18, 19, 21, 23, 25, 27, 32]
+    )
+    def test_tighter_tolerance_never_hurts(self, i):
+        """Asking for more accuracy must not deliver less.
+
+        ``epsabs = epsrel = 0`` is a common shorthand for "do the best you can inside
+        the budget", but can be dangerous without the right guards. The threshold
+        deciding when to extrapolate rather than subdivide further is compared
+        against the requested tolerance, so a tolerance of zero left it permanently
+        preferring to subdivide, the table was hardly ever fed, and the answer fell back
+        to what the mesh alone manages, about eight digits on the singular ones,
+        where a reachable tolerance gets fifteen. scipy refuses a tolerance this small
+        at input validation instead; quadax accepts it, so it has to behave.
+        """
+        prob = example_problems[i]
+        exact = np.asarray(prob["val"])
+        scale = np.max(np.abs(exact))
+
+        def err(tol):
+            y, _ = quadgk(
+                prob["fun"],
+                prob["interval"],
+                epsabs=tol,
+                epsrel=tol,
+                order=21,
+                max_ninter=200,
+                extrapolate=True,
+            )
+            return float(np.max(np.abs(np.asarray(y) - exact)) / scale)
+
+        errs = {tol: err(tol) for tol in (1e-12, 1e-13, 1e-14, 1e-15, 0.0)}
+        best = min(errs.values())
+        # Not exact monotonicity -- the subdivision genuinely differs between runs
+        # -- but no cliff: the unreachable tolerances must stay in the same league as
+        # the best any tolerance reached, rather than falling back several orders.
+        for tol in (1e-14, 1e-15, 0.0):
+            assert errs[tol] <= max(100 * best, 1e-13), (
+                f"problem {i}: tol={tol:g} gives {errs[tol]:.2e}, "
+                f"best over the sweep is {best:.2e} ({errs})"
+            )
+
+    # Genuinely smooth cases only. Problem 5 looks like one and is not: the semicircle
+    # `sqrt(1-t**2)` has an infinite derivative at the endpoint, which is exactly the
+    # kind of endpoint behaviour the acceleration exists for, and it does fire there.
+    @pytest.mark.parametrize("i", [0, 1, 2, 3, 13, 14, 16])
+    def test_smooth_problems_never_extrapolate(self, i):
+        """Where the subdivision converges, the table must stay out of the way.
+
+        Checked all the way down to a tolerance of zero, because that is the setting
+        that most changes the balance between subdividing and extrapolating, and a
+        smooth integrand is where an accelerated value would be least justified.
+        """
+        prob = example_problems[i]
+        for tol in (1e-8, 1e-12, 0.0):
+            y, info = quadgk(
+                prob["fun"],
+                prob["interval"],
+                epsabs=tol,
+                epsrel=tol,
+                order=21,
+                max_ninter=200,
+                full_output=True,
+                extrapolate=True,
+            )
+            assert not bool(info.info["used_accel"]), (
+                f"problem {i} at tol={tol:g} returned an extrapolated value"
+            )
+            # and the answer is the subdivision's own, unchanged by the flag
+            y_off, _ = quadgk(
+                prob["fun"],
+                prob["interval"],
+                epsabs=tol,
+                epsrel=tol,
+                order=21,
+                max_ninter=200,
+                full_output=True,
+            )
+            np.testing.assert_allclose(
+                np.asarray(y),
+                np.asarray(y_off),
+                rtol=ULP_RTOL,
+                atol=ULP_ATOL,
+                err_msg=f"problem {i}, tol={tol:g}",
+            )
+
+    def test_a_converged_component_does_not_spoil_the_others(self):
+        """A vector integrand accelerates as well as its hardest component alone.
+
+        The table's arithmetic is per component while its structural decisions go
+        through the norm. A component the local rule integrates exactly has differences
+        of exactly zero, which the norm -- driven by the singular component -- reads as
+        safe to divide by. See ``tests/test_acceleration.py`` for the table's own test;
+        this is the path that reaches it, and it is the shape every raveled adjoint
+        integrand has.
+        """
+        scalar = lambda t: jnp.asarray(t**-0.5)  # noqa: E731
+        reference, ref_info = quadgk(
+            scalar, jnp.array([0.0, 1.0]), epsabs=0.0, epsrel=0.0, extrapolate=True
+        )
+        np.testing.assert_allclose(float(reference), 2.0, atol=1e-13)
+        for other in (lambda t: 0.0 * t, lambda t: t, lambda t: t**2):
+            paired = lambda t: jnp.array([t**-0.5, other(t)])  # noqa: E731, B023
+            y, info = quadgk(
+                paired, jnp.array([0.0, 1.0]), epsabs=0.0, epsrel=0.0, extrapolate=True
+            )
+            np.testing.assert_allclose(float(np.asarray(y)[0]), 2.0, atol=1e-13)
+            assert int(info.neval) <= 2 * int(ref_info.neval)
+
+
 class TestRombergExtrapolationFlag:
     """Richardson extrapolation, on and off, over the whole example suite.
 
@@ -963,11 +1342,11 @@ def test_truncated_result_is_still_a_partition(quad):
 def test_converged_iteration_exits_clean(max_ninter):
     """Meeting the tolerance as the budget runs out is not a failure.
 
-    QUADPACK jumps past every ``ier`` assignment once ``errsum <= errbnd``, so an
-    iteration that reaches the tolerance exits with ``ier = 0`` even if it also
-    consumed the last subdivision slot. The flags used to be set unconditionally, with
-    termination left to the loop predicate on the next pass, so an iteration that did
-    both reported a spurious failure.
+    Reaching the tolerance takes precedence over every status flag, so an iteration that
+    reaches it exits cleanly even if it also consumed the last subdivision slot: the
+    answer met the request, and what it cost getting there is not a failure. Setting the
+    flags unconditionally and leaving termination to the loop predicate on the next pass
+    instead makes an iteration that does both report a spurious failure.
     """
     tol = 1e-10
     y, info = quadgk(
@@ -991,14 +1370,14 @@ _PEAK_VAL = 31411.926535951257  # mpmath, split at the peak
 def test_no_spurious_roundoff_on_unresolved_integrand():
     """A peaked but tractable integrand must not be written off as roundoff-limited.
 
-    Two regressions here. The stagnation test compared the bisected halves against
-    ``r_arr[i]`` *after* it had been overwritten with the left half, so it was really
-    asking whether the right half was negligible rather than whether subdivision had
-    stopped moving the parent's value. And neither counter was gated on QUADPACK's
-    ``defab == error`` check, which suppresses them when the local rule did not resolve
-    a half at all, since a stagnant area is then evidence of an unresolved integrand
-    rather than of roundoff. Together they made the loop give up early here, reporting
-    ROUNDOFF with an error five orders of magnitude worse than achievable.
+    Two things have to hold for the roundoff counters to mean what they claim. The
+    stagnation test has to compare the two halves against the *parent's* value, captured
+    before either overwrites it, rather than against a slot already holding one of the
+    halves. And both counters have to be suppressed when the local rule did not resolve
+    a half at all -- recognizable by the error estimate coming back at its saturation
+    value -- since a stagnant area is then evidence of an unresolved integrand rather
+    than of roundoff. Without either, the loop gives up on this integrand early,
+    reporting ROUNDOFF with an error five orders of magnitude worse than achievable.
     """
     y, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-12, epsrel=1e-12)
     assert int(info.status) == 0, quadax.STATUS[int(info.status)]
@@ -1011,10 +1390,9 @@ def test_tolerance_below_roundoff_floor_reports_roundoff():
     The local rule floors each sub-interval's error estimate at ``50*eps*int|f|``, so
     the total cannot fall below that floor summed over the partition however fine the
     mesh gets. Here that floor is ~1.1e-14 relative, so a request of 1e-14 is out of
-    reach.
-    quadax tests for this only before the subdivision loop, as QUADPACK does, which left
+    reach. Testing for that only before the subdivision loop, as QUADPACK does, leaves
     such a request to burn through the whole subdivision budget and report MAX_NINTER --
-    true, but not the reason.
+    true, but not the reason; quadax tests it every iteration instead.
     """
     _, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-14, epsrel=1e-14)
     assert int(info.status) & 2**2, quadax.STATUS[int(info.status)]

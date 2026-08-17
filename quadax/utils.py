@@ -61,6 +61,11 @@ def _real_dtype(dtype) -> Any:
     return jnp.finfo(dtype).dtype
 
 
+def tree_where(cond, new, old):
+    """``jnp.where(cond, new, old)`` leafwise over two pytrees of the same structure."""
+    return jax.tree_util.tree_map(lambda n, o: jnp.where(cond, n, o), new, old)
+
+
 def _coarser_dtype(dtype1, dtype2) -> Any:
     """Whichever of the two has the larger machine epsilon."""
     if float(jnp.finfo(dtype1).eps) >= float(jnp.finfo(dtype2).eps):
@@ -398,7 +403,9 @@ class _TanhSinhTransformedFunction(eqx.Module):
 
 
 messages = {
+    # NORMAL_EXIT
     0: "Algorithm terminated normally, desired tolerances assumed reached",
+    # MAX_NINTER
     1: (
         "Maximum number of subdivisions allowed has been achieved. One can allow more "
         + "subdivisions by increasing the value of max_ninter. However,if this yields "
@@ -410,19 +417,23 @@ messages = {
         + "integrator should be used, which is designed for handling the type of "
         + "difficulty involved."
     ),
+    # ROUNDOFF
     2: (
         "The occurrence of roundoff error is detected, which prevents the requested "
         + "tolerance from being achieved. The error may be under-estimated."
     ),
+    # BAD_INTEGRAND
     3: (
         "Extremely bad integrand behavior occurs at some points of the integration "
         + "interval."
     ),
+    # NO_CONVERGE
     4: (
         "The algorithm does not converge. Roundoff error is detected in the "
         + "extrapolation table. It is assumed that the requested tolerance cannot be "
         + "achieved, and that the returned result is the best which can be obtained."
     ),
+    # DIVERGENT
     5: "The integral is probably divergent, or slowly convergent.",
 }
 
