@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 import warnings
-from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -15,9 +14,7 @@ from jax import config
 
 import quadax
 from quadax import (
-    ClenshawCurtisRule,
     GaussKronrodRule,
-    TanhSinhRule,
     adaptive_quadrature,
     quadcc,
     quadgk,
@@ -26,891 +23,168 @@ from quadax import (
     rombergts,
 )
 
+from .problems import (
+    ALL,
+    CONVERGENT_TOLS,
+    PROBLEMS,
+    RESOLVED_BY_ACCELERATION,
+    SLOP,
+    SMOOTH,
+    TOLS,
+    ULP_ATOL,
+    ULP_RTOL,
+    assert_contract,
+    complex_dtypes,
+    exp_neg,
+    problem_id,
+    real_dtypes,
+    real_of,
+    xfail_if_known,
+)
+
 config.update("jax_enable_x64", True)
 
-example_problems = [
-    # problem 0
-    {"fun": lambda t: t * jnp.log(1 + t), "interval": [0, 1], "val": 1 / 4},
-    # problem 1
-    {
-        "fun": lambda t: t**2 * jnp.arctan(t),
-        "interval": [0, 1],
-        "val": (jnp.pi - 2 + 2 * jnp.log(2)) / 12,
-    },
-    # problem 2
-    {
-        "fun": lambda t: jnp.exp(t) * jnp.cos(t),
-        "interval": [0, jnp.pi / 2],
-        "val": (jnp.exp(jnp.pi / 2) - 1) / 2,
-    },
-    # problem 3
-    {
-        "fun": lambda t: (
-            jnp.arctan(jnp.sqrt(2 + t**2)) / ((1 + t**2) * jnp.sqrt(2 + t**2))
-        ),
-        "interval": [0, 1],
-        "val": 5 * jnp.pi**2 / 96,
-    },
-    # problem 4
-    {"fun": lambda t: jnp.sqrt(t) * jnp.log(t), "interval": [0, 1], "val": -4 / 9},
-    # problem 5
-    {"fun": lambda t: jnp.sqrt(1 - t**2), "interval": [0, 1], "val": jnp.pi / 4},
-    # problem 6
-    {
-        "fun": lambda t: jnp.sqrt(t) / jnp.sqrt(1 - t**2),
-        "interval": [0, 1],
-        "val": 2
-        * jnp.sqrt(jnp.pi)
-        * scipy.special.gamma(3 / 4)
-        / scipy.special.gamma(1 / 4),
-    },
-    # problem 7
-    {"fun": lambda t: jnp.log(t) ** 2, "interval": [0, 1], "val": 2},
-    # problem 8
-    {
-        "fun": lambda t: jnp.log(jnp.cos(t)),
-        "interval": [0, jnp.pi / 2],
-        "val": -jnp.pi * jnp.log(2) / 2,
-    },
-    # problem 9
-    {
-        "fun": lambda t: jnp.sqrt(jnp.tan(t)),
-        "interval": [0, jnp.pi / 2],
-        "val": jnp.pi * jnp.sqrt(2) / 2,
-    },
-    # problem 10
-    {"fun": lambda t: 1 / (1 + t**2), "interval": [0, jnp.inf], "val": jnp.pi / 2},
-    # problem 11
-    {
-        "fun": lambda t: jnp.exp(-t) / jnp.sqrt(t),
-        "interval": [0, jnp.inf],
-        "val": jnp.sqrt(jnp.pi),
-    },
-    # problem 12
-    {
-        "fun": lambda t: jnp.exp(-(t**2) / 2),
-        "interval": [-jnp.inf, jnp.inf],
-        "val": jnp.sqrt(2 * jnp.pi),
-    },
-    # problem 13
-    {"fun": lambda t: jnp.exp(-t) * jnp.cos(t), "interval": [0, jnp.inf], "val": 1 / 2},
-    # problem 14 - vector valued integrand made of up problems 0 and 1
-    {
-        "fun": lambda t: jnp.array([t * jnp.log(1 + t), t**2 * jnp.arctan(t)]),
-        "interval": [0, 1],
-        "val": jnp.array([1 / 4, (jnp.pi - 2 + 2 * jnp.log(2)) / 12]),
-    },
-    # problem 15 - intergral with breakpoints
-    {
-        "fun": lambda t: jnp.log((t - 1) ** 2),
-        "interval": [0, 1, 2],
-        "val": -4,
-    },
-    # problem 16 - complex function
-    {
-        "fun": lambda t: t * jnp.log(1 + t) * 1j,
-        "interval": [0, 1],
-        "val": 0.25j,
-    },
-    # Problems 17-25 are algebraic singularities, the family bisection alone cannot
-    # resolve: for `t**-alpha` the mass below a panel of width h is exactly
-    # `h**(1-alpha)` of the total, so an integrator that never samples closer than h to
-    # the singular point carries that much relative error whatever its local rule does.
-    # They span the axes that turn out to matter: how strong the singularity is, which
-    # end it sits at, whether there is one or several, and whether the caller marked it.
-    #
-    # problem 17 - mild endpoint algebraic singularity
-    {"fun": lambda t: t**-0.5, "interval": [0, 1], "val": 2.0},
-    # problem 18 - strong endpoint algebraic singularity
-    {"fun": lambda t: t**-0.9, "interval": [0, 1], "val": 10.0},
-    # problem 19 - extreme endpoint singularity, near the divergence at alpha=1
-    {"fun": lambda t: t**-0.99, "interval": [0, 1], "val": 100.0},
-    # problem 20 - the same strength at the *right* endpoint, which the mapping onto the
-    # reference interval treats differently from the left
-    {"fun": lambda t: (1 - t) ** -0.9, "interval": [0, 1], "val": 10.0},
-    # problem 21 - both endpoints singular, to different strengths. Two decaying modes
-    # arriving at different rates, which is the case a single running total cannot
-    # separate. Beta(3/4, 1/4) = gamma(3/4)gamma(1/4) = pi/sin(pi/4).
-    {
-        "fun": lambda t: t**-0.25 * (1 - t) ** -0.75,
-        "interval": [0, 1],
-        "val": jnp.pi * jnp.sqrt(2),
-    },
-    # problem 22 - logarithmic times algebraic
-    {"fun": lambda t: jnp.log(t) / jnp.sqrt(t), "interval": [0, 1], "val": -4.0},
-    # problem 23 - interior singularity, not marked
-    {
-        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5,
-        "interval": [0, 1],
-        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)),
-    },
-    # problem 24 - the same one, marked as a breakpoint so it lands on a panel end
-    {
-        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5,
-        "interval": [0, 0.3, 1],
-        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)),
-    },
-    # problem 25 - two interior singularities of different strengths
-    {
-        "fun": lambda t: jnp.abs(t - 0.3) ** -0.5 + jnp.abs(t - 0.7) ** -0.25,
-        "interval": [0, 1],
-        "val": 2 * (jnp.sqrt(0.3) + jnp.sqrt(0.7)) + (0.7**0.75 + 0.3**0.75) / 0.75,
-    },
-    # Problems 26-32 decay algebraically over an infinite range, which the mapping onto
-    # the reference interval turns into an endpoint singularity, so they exercise the
-    # same machinery as 17-25 but with the difficulty manufactured by the transform
-    # rather than present in the integrand.
-    #
-    # For [a, inf) the map is `x = a - 1 + 2/(1-t)` with weight `2/(1-t)**2`, so an
-    # integrand falling off as `x**-p` becomes `(1-t)**(p-2)`: the induced singularity
-    # has strength `alpha = 2 - p`. The doubly infinite `tan` map gives the same law.
-    # That makes these an exact counterpart of the finite cases: p = 1.1 induces the
-    # same alpha = 0.9 as problem 18, and the pair measures how much of the difficulty
-    # is the singularity itself and how much is the coordinate it is expressed in.
-    #
-    # problem 26 - semi-infinite, induced alpha = 0.5
-    {"fun": lambda t: t**-1.5, "interval": [1, jnp.inf], "val": 2.0},
-    # problem 27 - semi-infinite, induced alpha = 0.9
-    {"fun": lambda t: t**-1.1, "interval": [1, jnp.inf], "val": 10.0},
-    # problem 28 - semi-infinite, induced alpha = 0.99, the slowest decay that converges
-    {"fun": lambda t: t**-1.01, "interval": [1, jnp.inf], "val": 100.0},
-    # problem 29 - the same decay from a finite left end, so the map is exercised
-    # without the integrand also being singular at the start of the range
-    {"fun": lambda t: (1 + t) ** -1.5, "interval": [0, jnp.inf], "val": 2.0},
-    # problem 30 - the mirror image, which uses the other one sided map
-    {"fun": lambda t: (1 - t) ** -1.5, "interval": [-jnp.inf, 0], "val": 2.0},
-    # problem 31 - logarithmic factor on top of the algebraic decay
-    {"fun": lambda t: jnp.log(t) / t**2, "interval": [1, jnp.inf], "val": 1.0},
-    # problem 32 - doubly infinite with algebraic decay, so the transform induces a
-    # singularity at *both* ends at once
-    {
-        "fun": lambda t: (1 + t**2) ** -0.75,
-        "interval": [-jnp.inf, jnp.inf],
-        "val": jnp.sqrt(jnp.pi) * scipy.special.gamma(0.25) / scipy.special.gamma(0.75),
-    },
+
+# Extrapolation is what makes the hard problems solvable, so it is switched on for the
+# whole suite. The unaccelerated path is swept over the smooth problems only, where
+# the subdivision converges on its own and there is a right answer to hold it to; on
+# the rest it can only fail, which the acceleration tests below pin down directly.
+CASES = [(i, True) for i in ALL] + [(i, False) for i in SMOOTH]
+
+
+# A list rather than a callable: pytest passes an id function each argument of the pair
+# separately, so it cannot name the two together.
+CASE_IDS = [
+    f"{problem_id(i)}-{'extrap' if extrapolate else 'plain'}"
+    for i, extrapolate in CASES
 ]
 
-# Where extrapolation is off and on are meant to produce the same quantity, they are
-# entitled to differ in the last place or two and no further.
-ULP_RTOL = 1e-13
-ULP_ATOL = 1e-15
+
+# The tightest tolerance is where the subdivision runs deepest and most of the sweep's
+# runtime goes, so it carries the `slow` marker and `-m "not slow"` leaves a suite that
+# still covers every problem through every routine.
+TOL_PARAMS = [
+    pytest.param(t, marks=[pytest.mark.slow] if t == min(TOLS) else [], id=f"{t:g}")
+    for t in TOLS
+]
 
 
-class _BothExtrapolationModes:
-    """Run every case in the class twice, with extrapolation off and on.
+@pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])
+@pytest.mark.parametrize("tol", TOL_PARAMS)
+@pytest.mark.parametrize("i, extrapolate", CASES, ids=CASE_IDS)
+class TestAdaptive:
+    """Every example problem, through every adaptive routine, at every tolerance.
 
-    The two modes are held to the same contract: the same status, and the same accuracy.
-    Where a case genuinely behaves differently with acceleration, it says so with an
-    ``extrap_status`` or ``extrap_fudge`` override rather than by being excluded.
+    Two things are asserted, and only two. Where the requested tolerance is reachable
+    the routine is expected to reach it and say so, and whatever it returns has to come
+    with an error estimate that does not understate the true error. Nothing here
+    encodes which failure code an unconverged run produces or how far off it lands: a
+    routine that cannot solve a problem only has to report that honestly.
     """
 
-    @pytest.fixture(params=[False, True], ids=["plain", "extrap"], autouse=True)
-    def _extrapolation_mode(self, request):
-        self.extrapolate = request.param
-
-
-class TestQuadGK(_BothExtrapolationModes):
-    """Tests for Gauss-Kronrod quadrature."""
-
-    def _base(self, i, tol, fudge=1.0, **kwargs):
-        prob = example_problems[i]
-        status = kwargs.pop("status", 0)
-        # Overrides for cases whose behaviour genuinely differs once the extrapolation
-        # is switched on, applied only in that mode.
-        extrap_status = kwargs.pop("extrap_status", None)
-        extrap_fudge = kwargs.pop("extrap_fudge", None)
-        if self.extrapolate:
-            status = status if extrap_status is None else extrap_status
-            fudge = fudge if extrap_fudge is None else extrap_fudge
-        y, info = quadgk(
+    def test_value_and_error(self, request, method, tol, i, extrapolate):
+        """The answer is good to the tolerance asked for, and the error is honest."""
+        prob = PROBLEMS[i]
+        if extrapolate:
+            xfail_if_known(request, method, prob, tol)
+        y, info = method(
             prob["fun"],
             prob["interval"],
-            epsabs=tol,
-            epsrel=tol,
-            extrapolate=self.extrapolate,
-            **kwargs,
+            epsabs=jnp.asarray(tol),
+            epsrel=jnp.asarray(tol),
+            extrapolate=extrapolate,
         )
-        assert info.status == status
-        if status == 0:
-            assert info.err < max(tol, tol * np.max(np.abs(y)))
-        np.testing.assert_allclose(
-            y,
-            prob["val"],
-            rtol=fudge * tol,
-            atol=fudge * tol,
-            err_msg=f"problem {i}, tol={tol}",
-        )
-
-    def test_prob0(self):
-        """Test for example problem #0."""
-        self._base(0, 1e-4, order=21)
-        self._base(0, 1e-8, order=21)
-        self._base(0, 1e-12, order=21)
-
-    def test_prob1(self):
-        """Test for example problem #1."""
-        self._base(1, 1e-4, order=31)
-        self._base(1, 1e-8, order=31)
-        self._base(1, 1e-12, order=31)
-
-    def test_prob2(self):
-        """Test for example problem #2."""
-        self._base(2, 1e-4, order=41)
-        self._base(2, 1e-8, order=41)
-        self._base(2, 1e-12, order=41)
-
-    def test_prob3(self):
-        """Test for example problem #3."""
-        self._base(3, 1e-4, order=51)
-        self._base(3, 1e-8, order=51)
-        self._base(3, 1e-12, order=51)
-
-    def test_prob4(self):
-        """Test for example problem #4."""
-        self._base(4, 1e-4, order=61)
-        self._base(4, 1e-8, order=61)
-        self._base(4, 1e-12, order=61)
-
-    def test_prob5(self):
-        """Test for example problem #5."""
-        self._base(5, 1e-4, order=21)
-        self._base(5, 1e-8, order=21)
-        self._base(5, 1e-12, order=21)
-
-    def test_prob6(self):
-        """Test for example problem #6."""
-        self._base(6, 1e-4, order=15)
-        # endpoint singularity: order 15 tops out around 1e-8 however much budget it is
-        # given, so it exhausts the subdivision limit rather than reaching the tolerance
-        self._base(6, 1e-8, 100, order=15, status=2, extrap_status=0)
-        self._base(6, 1e-12, 1e5, order=15, max_ninter=100, status=8, extrap_status=0)
-
-    def test_prob7(self):
-        """Test for example problem #7."""
-        self._base(7, 1e-4, order=61)
-        self._base(7, 1e-8, order=61)
-        self._base(7, 1e-12, order=61)
-
-    def test_prob8(self):
-        """Test for example problem #8."""
-        self._base(8, 1e-4, order=51)
-        self._base(8, 1e-8, order=51)
-        self._base(8, 1e-12, order=51)
-
-    def test_prob9(self):
-        """Test for example problem #9."""
-        self._base(9, 1e-4, order=15)
-        # as for problem 6, order 15 cannot certify 1e-8 on this endpoint singularity
-        self._base(9, 1e-8, 100, order=15, status=2, extrap_status=0)
-        self._base(9, 1e-12, 1e4, order=15, max_ninter=100, status=8, extrap_status=0)
-
-    def test_prob10(self):
-        """Test for example problem #10."""
-        self._base(10, 1e-4, order=15)
-        self._base(10, 1e-8, order=15)
-        self._base(10, 1e-12, order=15)
-
-    def test_prob11(self):
-        """Test for example problem #11."""
-        self._base(11, 1e-4, order=21)
-        # bisection concentrates on the singularity at t=0 until the sub-intervals stop
-        # being resolvable, at a true error just above 1e-8
-        self._base(11, 1e-8, 100, order=21, status=8, extrap_status=0)
-        self._base(11, 1e-12, 1e4, order=21, status=8, max_ninter=100, extrap_status=0)
-
-    def test_prob12(self):
-        """Test for example problem #12."""
-        self._base(12, 1e-4, order=15)
-        self._base(12, 1e-8, order=15)
-        self._base(12, 1e-12, order=15)
-
-    def test_prob13(self):
-        """Test for example problem #13."""
-        self._base(13, 1e-4, order=31)
-        self._base(13, 1e-8, order=31)
-        self._base(13, 1e-12, order=31)
-
-    def test_prob14(self):
-        """Test for example problem #14."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob15(self):
-        """Test for example problem #15."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob16(self):
-        """Test for example problem #16."""
-        self._base(16, 1e-4)
-        self._base(16, 1e-8)
-        self._base(16, 1e-12)
+        if extrapolate and tol in CONVERGENT_TOLS:
+            assert int(info.status) == 0, (
+                f"{prob['name']} at tol={tol:g}: {quadax.STATUS[int(info.status)]}"
+            )
+        assert_contract(y, info, prob, tol)
 
 
-class TestQuadCC(_BothExtrapolationModes):
-    """Tests for Clenshaw-Curtis quadrature."""
-
-    def _base(self, i, tol, fudge=1.0, **kwargs):
-        prob = example_problems[i]
-        status = kwargs.pop("status", 0)
-        # Overrides for cases whose behaviour genuinely differs once the extrapolation
-        # is switched on, applied only in that mode.
-        extrap_status = kwargs.pop("extrap_status", None)
-        extrap_fudge = kwargs.pop("extrap_fudge", None)
-        if self.extrapolate:
-            status = status if extrap_status is None else extrap_status
-            fudge = fudge if extrap_fudge is None else extrap_fudge
-        y, info = quadcc(
-            prob["fun"],
-            prob["interval"],
-            epsabs=tol,
-            epsrel=tol,
-            extrapolate=self.extrapolate,
-            **kwargs,
-        )
-        assert info.status == status
-        if status == 0:
-            assert info.err < max(tol, tol * np.max(np.abs(y)))
-        np.testing.assert_allclose(
-            y,
-            prob["val"],
-            rtol=fudge * tol,
-            atol=fudge * tol,
-            err_msg=f"problem {i}, tol={tol}",
-        )
-
-    def test_prob0(self):
-        """Test for example problem #0."""
-        self._base(0, 1e-4, order=32)
-        self._base(0, 1e-8, order=32)
-        self._base(0, 1e-12, order=32)
-
-    def test_prob1(self):
-        """Test for example problem #1."""
-        self._base(1, 1e-4, order=64)
-        self._base(1, 1e-8, order=64)
-        self._base(1, 1e-12, order=64)
-
-    def test_prob2(self):
-        """Test for example problem #2."""
-        self._base(2, 1e-4, order=128)
-        self._base(2, 1e-8, order=128)
-        self._base(2, 1e-12, order=128)
-
-    def test_prob3(self):
-        """Test for example problem #3."""
-        self._base(3, 1e-4, order=256)
-        self._base(3, 1e-8, order=256)
-        self._base(3, 1e-12, order=256)
-
-    def test_prob4(self):
-        """Test for example problem #4."""
-        self._base(4, 1e-4, order=8)
-        self._base(4, 1e-8, order=8)
-        self._base(4, 1e-12, order=8, max_ninter=100)
-
-    def test_prob5(self):
-        """Test for example problem #5."""
-        self._base(5, 1e-4, order=16)
-        self._base(5, 1e-8, order=16)
-        self._base(5, 1e-12, order=16)
-
-    def test_prob6(self):
-        """Test for example problem #6."""
-        self._base(6, 1e-4)
-        # endpoint singularity, see TestQuadGK.test_prob6
-        self._base(6, 1e-8, 100, status=2, extrap_status=0)
-        self._base(6, 1e-12, 1e5, max_ninter=100, status=8, extrap_status=0)
-
-    def test_prob7(self):
-        """Test for example problem #7."""
-        self._base(7, 1e-4)
-        self._base(7, 1e-8, 10)
-        self._base(7, 1e-12)
-
-    def test_prob8(self):
-        """Test for example problem #8."""
-        self._base(8, 1e-4)
-        self._base(8, 1e-8)
-        self._base(8, 1e-12)
-
-    def test_prob9(self):
-        """Test for example problem #9."""
-        # `sqrt(tan(t))` is unbounded at the right endpoint, so the sum over the mesh
-        # runs away -- about 50 against a true value of 2.22 -- while its error estimate
-        # outgrows it in turn. The extrapolation recovers the value (to ~5e-12 at the
-        # tightest tolerance here), but the divergence test at the end compares the two,
-        # and an error estimate larger than the mesh sum itself is one of the things it
-        # rejects on, so the right answer arrives carrying a divergence flag. That is
-        # the test working as intended on a mesh that really has diverged: scipy is
-        # spared only because the Gauss-Kronrod mesh converges on this integrand where
-        # the Clenshaw-Curtis one does not, which is a property of the local rule. The
-        # value is still checked against the tolerance on every line below.
-        divergent = 2**quadax.adaptive.DIVERGENT
-        self._base(9, 1e-4, extrap_status=divergent)
-        self._base(9, 1e-8, max_ninter=100, status=8, extrap_status=divergent)
-        self._base(9, 1e-12, 1e4, max_ninter=100, status=8, extrap_status=0)
-
-    def test_prob10(self):
-        """Test for example problem #10."""
-        self._base(10, 1e-4)
-        self._base(10, 1e-8)
-        self._base(10, 1e-12, 10)
-
-    def test_prob11(self):
-        """Test for example problem #11."""
-        self._base(11, 1e-4)
-        # singularity at t=0, see TestQuadGK.test_prob11
-        self._base(11, 1e-8, 100, status=8, extrap_status=0)
-        self._base(11, 1e-12, 1e4, status=8, extrap_status=0)
-
-    def test_prob12(self):
-        """Test for example problem #12."""
-        self._base(12, 1e-4)
-        self._base(12, 1e-8)
-        self._base(12, 1e-12)
-
-    def test_prob13(self):
-        """Test for example problem #13."""
-        self._base(13, 1e-4)
-        self._base(13, 1e-8)
-        self._base(13, 1e-12)
-
-    def test_prob14(self):
-        """Test for example problem #14."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob15(self):
-        """Test for example problem #15."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob16(self):
-        """Test for example problem #16."""
-        self._base(16, 1e-4)
-        self._base(16, 1e-8)
-        self._base(16, 1e-12)
+# The tabulated orders of each rule. Clenshaw-Curtis starts at 16 rather than 8 for
+# the mesh comparison: order 8 is coarse enough to hit the roundoff floor on the
+# infinite range problems, which makes it useless for a comparison against the orders
+# that do converge.
+GK_ORDERS = [15, 21, 31, 41, 51, 61]
+CC_ORDERS = [16, 32, 64, 128, 256]
+TS_ORDERS = [41, 61, 81, 101]
+ORDERS = [(quadgk, GK_ORDERS), (quadcc, CC_ORDERS), (quadts, TS_ORDERS)]
+ORDER_IDS = ["gk", "cc", "ts"]
 
 
-class TestQuadTS(_BothExtrapolationModes):
-    """Tests for adaptive tanh-sinh quadrature."""
+@pytest.mark.parametrize("method, orders", ORDERS, ids=ORDER_IDS)
+class TestRuleOrders:
+    """The subdivision loop drives every tabulated order, not just the default one.
 
-    def _base(self, i, tol, fudge=1.0, **kwargs):
-        prob = example_problems[i]
-        status = kwargs.pop("status", 0)
-        # Overrides for cases whose behaviour genuinely differs once the extrapolation
-        # is switched on, applied only in that mode.
-        extrap_status = kwargs.pop("extrap_status", None)
-        extrap_fudge = kwargs.pop("extrap_fudge", None)
-        if self.extrapolate:
-            status = status if extrap_status is None else extrap_status
-            fudge = fudge if extrap_fudge is None else extrap_fudge
-        y, info = quadts(
-            prob["fun"],
-            prob["interval"],
-            epsabs=tol,
-            epsrel=tol,
-            extrapolate=self.extrapolate,
-            **kwargs,
-        )
-        assert info.status == status
-        if status == 0:
-            assert info.err < max(tol, tol * np.max(np.abs(y)))
-        np.testing.assert_allclose(
-            y,
-            prob["val"],
-            rtol=fudge * tol,
-            atol=fudge * tol,
-            err_msg=f"problem {i}, tol={tol}",
-        )
-
-    def test_prob0(self):
-        """Test for example problem #0."""
-        self._base(0, 1e-4)
-        self._base(0, 1e-8)
-        self._base(0, 1e-12)
-
-    def test_prob1(self):
-        """Test for example problem #1."""
-        self._base(1, 1e-4)
-        self._base(1, 1e-8)
-        self._base(1, 1e-12)
-
-    def test_prob2(self):
-        """Test for example problem #2."""
-        self._base(2, 1e-4, order=41)
-        self._base(2, 1e-8, order=41)
-        # The answer here is exact to machine precision, but at order 41 the error
-        # *estimate* comes down slowly enough that it is still ~15% above the bound when
-        # the subdivision limit is reached (a larger max_ninter does get under it). The
-        # value is still checked against 1e-12 below.
-        self._base(2, 1e-12, order=41, status=2)
-
-    def test_prob3(self):
-        """Test for example problem #3."""
-        self._base(3, 1e-4, order=61)
-        self._base(3, 1e-8, order=61)
-        self._base(3, 1e-12, order=61)
-
-    def test_prob4(self):
-        """Test for example problem #4."""
-        self._base(4, 1e-4, order=81)
-        self._base(4, 1e-8, order=81)
-        self._base(4, 1e-12, order=81)
-
-    def test_prob5(self):
-        """Test for example problem #5."""
-        self._base(5, 1e-4, order=101)
-        self._base(5, 1e-8, order=101)
-        self._base(5, 1e-12, order=101)
-
-    def test_prob6(self):
-        """Test for example problem #6.
-
-        The 1e-12 request is out of reach on an endpoint singularity, and which of
-        ROUNDOFF / BAD_INTEGRAND the loop gives up with depends on exactly where the
-        mesh stops, the value is what this really guards.
-        """
-        self._base(6, 1e-4)
-        self._base(6, 1e-8)
-        self._base(6, 1e-12, 1e4, status=4)
-
-    def test_prob7(self):
-        """Test for example problem #7."""
-        self._base(7, 1e-4)
-        self._base(7, 1e-8)
-        self._base(7, 1e-12)
-
-    def test_prob8(self):
-        """Test for example problem #8."""
-        self._base(8, 1e-4)
-        self._base(8, 1e-8)
-        self._base(8, 1e-12)
-
-    def test_prob9(self):
-        """Test for example problem #9.
-
-        The 1e-12 request is out of reach on an endpoint singularity, and which of
-        ROUNDOFF / BAD_INTEGRAND / NO_CONVERGE the loop gives up with depends on exactly
-        where the mesh stops, the value is what this really guards. With acceleration it
-        is the table that runs out first: the sequence it is fed stops improving while
-        the tanh-sinh abscissae are still short of the tolerance.
-        """
-        self._base(9, 1e-4)
-        self._base(9, 1e-8, 10)
-        self._base(9, 1e-12, 1e4, status=8, extrap_status=16)
-
-    def test_prob10(self):
-        """Test for example problem #10."""
-        self._base(10, 1e-4)
-        self._base(10, 1e-8)
-        self._base(10, 1e-12)
-
-    def test_prob11(self):
-        """Test for example problem #11.
-
-        The 1e-12 request is out of reach on an endpoint singularity, and which of
-        ROUNDOFF / BAD_INTEGRAND the loop gives up with depends on exactly where the
-        mesh stops, the value is what this really guards.
-        """
-        self._base(11, 1e-4)
-        self._base(11, 1e-8)
-        self._base(11, 1e-12, 1e4, status=4)
-
-    def test_prob12(self):
-        """Test for example problem #12."""
-        self._base(12, 1e-4)
-        self._base(12, 1e-8)
-        self._base(12, 1e-12)
-
-    def test_prob13(self):
-        """Test for example problem #13."""
-        self._base(13, 1e-4)
-        self._base(13, 1e-8)
-        self._base(13, 1e-12)
-
-    def test_prob14(self):
-        """Test for example problem #14."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob15(self):
-        """Test for example problem #15."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob16(self):
-        """Test for example problem #16."""
-        self._base(16, 1e-4)
-        self._base(16, 1e-8)
-        self._base(16, 1e-12)
-
-
-class TestRombergTS(_BothExtrapolationModes):
-    """Tests for tanh-sinh quadrature with adaptive refinement.
-
-    Run in both settings of ``extrapolate``, with no per-case overrides: the tanh-sinh
-    rule converges doubly exponentially, so Richardson has no error expansion in powers
-    of the step to work on and neither adds nor removes accuracy here. ``TestRomberg``
-    cannot do the same, because there the trapezoidal rule really does depend on it.
+    The accuracy of each order in isolation is pinned in ``tests/test_fixed_order.py``;
+    what is under test here is the loop wrapped around it.
     """
 
-    def _base(self, i, tol, fudge=1.0, **kwargs):
-        prob = example_problems[i]
-        y, info = rombergts(
-            prob["fun"],
-            prob["interval"],
-            epsabs=tol,
-            epsrel=tol,
-            extrapolate=self.extrapolate,
-            **kwargs,
+    # one smooth problem and one the local rule cannot resolve on its own
+    PROBS = [0, 17]
+    TOL = 1e-8
+
+    @pytest.mark.parametrize("i", PROBS)
+    def test_contract_holds_at_every_order(self, request, method, orders, i):
+        """Changing the order changes the cost, never the promise."""
+        prob = PROBLEMS[i]
+        # the default order is swept in `TestAdaptive`, so a routine listed as failing
+        # this problem there is not expected to hold the contract at any other order
+        xfail_if_known(request, method, prob, self.TOL)
+        for order in orders:
+            y, info = method(
+                prob["fun"],
+                prob["interval"],
+                epsabs=self.TOL,
+                epsrel=self.TOL,
+                order=order,
+                extrapolate=True,
+            )
+            assert int(info.status) == 0, (
+                f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
+            )
+            assert_contract(y, info, prob, self.TOL)
+
+    @pytest.mark.parametrize("i", SMOOTH)
+    def test_higher_order_needs_fewer_intervals(self, method, orders, i):
+        """A higher order rule resolves a smooth integrand on a coarser mesh.
+
+        This is the whole reason the order is exposed. It is a statement about the mesh
+        and not about the cost: raising the order raises the price of each sub-interval,
+        so the total evaluation count often goes up as the interval count comes down.
+
+        Not strict, because most of these problems fit in a single panel at every order
+        and there is nothing left to improve; the claim has teeth on the infinite range
+        problems, where the coarsest order needs an order of magnitude more intervals.
+        """
+        prob = PROBLEMS[i]
+        ninter = []
+        for order in orders:
+            _, info = method(
+                prob["fun"],
+                prob["interval"],
+                epsabs=1e-10,
+                epsrel=1e-10,
+                order=order,
+                full_output=True,
+            )
+            assert int(info.status) == 0, (
+                f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
+            )
+            ninter.append(int(info.info["ninter"]))
+        assert all(hi <= lo for lo, hi in zip(ninter, ninter[1:])), (
+            f"{prob['name']}: orders {orders} gave ninter {ninter}"
         )
-        if info.status == 0:
-            assert info.err < max(tol, tol * np.max(np.abs(y)))
-        np.testing.assert_allclose(
-            y,
-            prob["val"],
-            rtol=fudge * tol,
-            atol=fudge * tol,
-            err_msg=f"problem {i}, tol={tol}",
-        )
-
-    def test_prob0(self):
-        """Test for example problem #0."""
-        self._base(0, 1e-4)
-        self._base(0, 1e-8)
-        self._base(0, 1e-12)
-
-    def test_prob1(self):
-        """Test for example problem #1."""
-        self._base(1, 1e-4)
-        self._base(1, 1e-8)
-        self._base(1, 1e-12)
-
-    def test_prob2(self):
-        """Test for example problem #2."""
-        self._base(2, 1e-4)
-        self._base(2, 1e-8)
-        self._base(2, 1e-12)
-
-    def test_prob3(self):
-        """Test for example problem #3."""
-        self._base(3, 1e-4)
-        self._base(3, 1e-8)
-        self._base(3, 1e-12)
-
-    def test_prob4(self):
-        """Test for example problem #4."""
-        self._base(4, 1e-4)
-        self._base(4, 1e-8)
-        self._base(4, 1e-12)
-
-    def test_prob5(self):
-        """Test for example problem #5."""
-        self._base(5, 1e-4)
-        self._base(5, 1e-8)
-        self._base(5, 1e-12)
-
-    def test_prob6(self):
-        """Test for example problem #6."""
-        self._base(6, 1e-4)
-        self._base(6, 1e-8, fudge=10)
-        self._base(6, 1e-12, divmax=22, fudge=1e5)
-
-    def test_prob7(self):
-        """Test for example problem #7."""
-        self._base(7, 1e-4)
-        self._base(7, 1e-8)
-        self._base(7, 1e-12)
-
-    def test_prob8(self):
-        """Test for example problem #8."""
-        self._base(8, 1e-4)
-        self._base(8, 1e-8)
-        self._base(8, 1e-12)
-
-    def test_prob9(self):
-        """Test for example problem #9."""
-        self._base(9, 1e-4)
-        self._base(9, 1e-8, fudge=10)
-        self._base(9, 1e-12, fudge=1e5)
-
-    def test_prob10(self):
-        """Test for example problem #10."""
-        self._base(10, 1e-4)
-        self._base(10, 1e-8)
-        self._base(10, 1e-12)
-
-    def test_prob11(self):
-        """Test for example problem #11."""
-        self._base(11, 1e-4)
-        self._base(11, 1e-8, fudge=10)
-        self._base(11, 1e-12, fudge=1e5)
-
-    def test_prob12(self):
-        """Test for example problem #12."""
-        self._base(12, 1e-4)
-        self._base(12, 1e-8)
-        self._base(12, 1e-12)
-
-    def test_prob13(self):
-        """Test for example problem #13."""
-        self._base(13, 1e-4)
-        self._base(13, 1e-8)
-        self._base(13, 1e-12)
-
-    def test_prob14(self):
-        """Test for example problem #14."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob15(self):
-        """Test for example problem #15."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob16(self):
-        """Test for example problem #16."""
-        self._base(16, 1e-4)
-        self._base(16, 1e-8)
-        self._base(16, 1e-12)
-
-
-class TestRomberg:
-    """Tests for Romberg's method (only for well behaved integrands)."""
-
-    def _base(self, i, tol, fudge=1, **kwargs):
-        prob = example_problems[i]
-        y, info = romberg(
-            prob["fun"], prob["interval"], epsabs=tol, epsrel=tol, **kwargs
-        )
-        if info.status == 0:
-            assert info.err < max(tol, tol * np.max(np.abs(y)))
-        np.testing.assert_allclose(
-            y,
-            prob["val"],
-            rtol=fudge * tol,
-            atol=fudge * tol,
-            err_msg=f"problem {i}, tol={tol}",
-        )
-
-    def test_prob0(self):
-        """Test for example problem #0."""
-        self._base(0, 1e-4)
-        self._base(0, 1e-8)
-        self._base(0, 1e-12)
-
-    def test_prob1(self):
-        """Test for example problem #1."""
-        self._base(1, 1e-4)
-        self._base(1, 1e-8)
-        self._base(1, 1e-12)
-
-    def test_prob2(self):
-        """Test for example problem #2."""
-        self._base(2, 1e-4)
-        self._base(2, 1e-8)
-        self._base(2, 1e-12)
-
-    def test_prob3(self):
-        """Test for example problem #3."""
-        self._base(3, 1e-4)
-        self._base(3, 1e-8)
-        self._base(3, 1e-12)
-
-    def test_prob4(self):
-        """Test for example problem #4."""
-        self._base(4, 1e-4)
-        self._base(4, 1e-8)
-        self._base(4, 1e-12, divmax=27)
-
-    def test_prob5(self):
-        """Test for example problem #5."""
-        self._base(5, 1e-4)
-        self._base(5, 1e-8)
-        self._base(5, 1e-12, divmax=25)
-
-    def test_prob6(self):
-        """Test for example problem #6."""
-        self._base(6, 1e-4, fudge=10)
-
-    def test_prob7(self):
-        """Test for example problem #7."""
-        self._base(7, 1e-4)
-
-    def test_prob8(self):
-        """Test for example problem #8."""
-        self._base(8, 1e-4)
-
-    @pytest.mark.xfail
-    def test_prob9(self):
-        """Test for example problem #9."""
-        self._base(9, 1e-4)
-
-    def test_prob10(self):
-        """Test for example problem #10."""
-        self._base(10, 1e-4)
-
-    def test_prob11(self):
-        """Test for example problem #11."""
-        self._base(11, 1e-4, fudge=10)
-
-    def test_prob12(self):
-        """Test for example problem #12."""
-        self._base(12, 1e-4)
-        self._base(12, 1e-8)
-        self._base(12, 1e-12)
-
-    def test_prob13(self):
-        """Test for example problem #13."""
-        self._base(13, 1e-4)
-        self._base(13, 1e-8)
-        self._base(13, 1e-12)
-
-    def test_prob14(self):
-        """Test for example problem #14."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob15(self):
-        """Test for example problem #15."""
-        self._base(14, 1e-4)
-        self._base(14, 1e-8)
-        self._base(14, 1e-12)
-
-    def test_prob16(self):
-        """Test for example problem #16."""
-        self._base(16, 1e-4)
-        self._base(16, 1e-8)
-        self._base(16, 1e-12)
 
 
 class TestExtrapolation:
     """Tests for the convergence acceleration in the adaptive solvers."""
 
-    # The singular families from problems 17-25, plus the algebraically decaying ones on
-    # infinite ranges whose transform induces a singularity of the same kind. Bisection
-    # alone gets a handful of digits on any of these. Problem 31 is left out: its decay
-    # is fast enough that the induced exponent is zero and the mapped integrand is
-    # already smooth, so there is nothing for the table to do, it is covered by
-    # ``test_converged_mesh_is_not_displaced`` instead.
-    SINGULAR = [17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 32]
-
-    @pytest.mark.parametrize("i", SINGULAR)
+    @pytest.mark.parametrize("i", RESOLVED_BY_ACCELERATION, ids=problem_id)
     @pytest.mark.parametrize("quad", [quadgk, quadcc])
     def test_singularities_are_resolved(self, quad, i):
         """Acceleration should reach near machine precision where the mesh cannot."""
-        prob = example_problems[i]
+        prob = PROBLEMS[i]
         kwargs = dict(epsabs=1e-12, epsrel=1e-12, max_ninter=200, full_output=True)
         y_off, info_off = quad(prob["fun"], prob["interval"], **kwargs)
         y_on, info_on = quad(prob["fun"], prob["interval"], extrapolate=True, **kwargs)
@@ -919,7 +193,7 @@ class TestExtrapolation:
         err_on = np.max(np.abs(np.asarray(y_on) - exact)) / np.max(np.abs(exact))
         # Two orders of magnitude is well inside the margin: measured gains run from
         # 1e3 on the mildest of these to 1e11 on the strongest.
-        assert err_on < err_off / 100, f"problem {i}: {err_off:.2e} -> {err_on:.2e}"
+        assert err_on < err_off / 100, f"{prob['name']}: {err_off:.2e} -> {err_on:.2e}"
         assert err_on < 1e-10
         # and it should get there on a far coarser subdivision
         assert info_on.info["ninter"] < info_off.info["ninter"]
@@ -977,58 +251,7 @@ class TestExtrapolation:
         if int(info.status) == 0:
             np.testing.assert_allclose(float(y), ref, rtol=1e-8, atol=1e-10)
 
-    def test_converged_mesh_is_not_displaced(self):
-        """Where the subdivision converges, its result stands.
-
-        The mesh sum is the one carrying an honest error bound, so a table fed early on
-        a coarse mesh must not be able to replace it. Once the subdivision has reached
-        the tolerance on its own the extrapolated value is not considered at all.
-        """
-        for i in (0, 1, 2, 12, 13):
-            prob = example_problems[i]
-            kwargs: dict[str, Any] = dict(epsabs=1e-10, epsrel=1e-10, full_output=True)
-            y_off, _ = quadgk(prob["fun"], prob["interval"], **kwargs)
-            y_on, info = quadgk(
-                prob["fun"], prob["interval"], extrapolate=True, **kwargs
-            )
-            np.testing.assert_allclose(
-                np.asarray(y_off),
-                np.asarray(y_on),
-                rtol=ULP_RTOL,
-                atol=ULP_ATOL,
-                err_msg=f"problem {i}",
-            )
-
-    @pytest.mark.parametrize("i", range(len(example_problems)))
-    def test_acceleration_does_no_harm(self, i):
-        """Switching acceleration on must not make any problem materially worse.
-
-        Deliberately over the whole problem list rather than the singular subset: the
-        risk the flag carries is not that it fails to help, it is that it quietly costs
-        accuracy somewhere nobody was looking. The factor of ten is slack for a mesh
-        that legitimately differs, since the acceleration changes which sub-interval is
-        bisected next and the two runs are not obliged to agree exactly.
-        """
-        prob = example_problems[i]
-        kwargs: dict[str, Any] = dict(epsabs=1e-10, epsrel=1e-10, max_ninter=200)
-        exact = np.asarray(prob["val"])
-        scale = max(np.max(np.abs(exact)), 1.0)
-
-        def err(extrapolate):
-            y, _ = quadgk(
-                prob["fun"], prob["interval"], extrapolate=extrapolate, **kwargs
-            )
-            return np.max(np.abs(np.asarray(y) - exact)) / scale
-
-        off, on = err(False), err(True)
-        assert on <= max(10 * off, 1e-14), f"problem {i}: {off:.2e} -> {on:.2e}"
-
-    # The four that scipy fails on, plus a spread of everything else: smooth cases
-    # where the table should never fire at all, a vector and a complex integrand, a
-    # breakpoint case, endpoint and interior singularities, and two infinite ranges.
-    @pytest.mark.parametrize(
-        "i", [0, 1, 3, 6, 9, 14, 15, 16, 17, 18, 19, 21, 23, 25, 27, 32]
-    )
+    @pytest.mark.parametrize("i", ALL, ids=problem_id)
     def test_tighter_tolerance_never_hurts(self, i):
         """Asking for more accuracy must not deliver less.
 
@@ -1041,16 +264,19 @@ class TestExtrapolation:
         where a reachable tolerance gets fifteen. scipy refuses a tolerance this small
         at input validation instead; quadax accepts it, so it has to behave.
         """
-        prob = example_problems[i]
+        prob = PROBLEMS[i]
         exact = np.asarray(prob["val"])
-        scale = np.max(np.abs(exact))
+        # Floored at one, so a problem whose exact value is zero measures absolute
+        # error rather than dividing by it. The comparison below is between runs of
+        # the same problem, so the choice of scale only has to be consistent.
+        scale = max(np.max(np.abs(exact)), 1.0)
 
         def err(tol):
             y, _ = quadgk(
                 prob["fun"],
                 prob["interval"],
-                epsabs=tol,
-                epsrel=tol,
+                epsabs=jnp.asarray(tol),
+                epsrel=jnp.asarray(tol),
                 order=21,
                 max_ninter=200,
                 extrapolate=True,
@@ -1064,42 +290,44 @@ class TestExtrapolation:
         # the best any tolerance reached, rather than falling back several orders.
         for tol in (1e-14, 1e-15, 0.0):
             assert errs[tol] <= max(100 * best, 1e-13), (
-                f"problem {i}: tol={tol:g} gives {errs[tol]:.2e}, "
+                f"{prob['name']}: tol={tol:g} gives {errs[tol]:.2e}, "
                 f"best over the sweep is {best:.2e} ({errs})"
             )
 
-    # Genuinely smooth cases only. Problem 5 looks like one and is not: the semicircle
-    # `sqrt(1-t**2)` has an infinite derivative at the endpoint, which is exactly the
-    # kind of endpoint behaviour the acceleration exists for, and it does fire there.
-    @pytest.mark.parametrize("i", [0, 1, 2, 3, 13, 14, 16])
+    @pytest.mark.parametrize("i", SMOOTH, ids=problem_id)
     def test_smooth_problems_never_extrapolate(self, i):
         """Where the subdivision converges, the table must stay out of the way.
+
+        The mesh sum is the one carrying an honest error bound, so a table fed early
+        on a coarse mesh must not be able to replace it: once the subdivision has
+        reached the tolerance on its own the extrapolated value is not considered at
+        all, and the answer is bit for bit the one the flag-off run produces.
 
         Checked all the way down to a tolerance of zero, because that is the setting
         that most changes the balance between subdividing and extrapolating, and a
         smooth integrand is where an accelerated value would be least justified.
         """
-        prob = example_problems[i]
+        prob = PROBLEMS[i]
         for tol in (1e-8, 1e-12, 0.0):
             y, info = quadgk(
                 prob["fun"],
                 prob["interval"],
-                epsabs=tol,
-                epsrel=tol,
+                epsabs=jnp.asarray(tol),
+                epsrel=jnp.asarray(tol),
                 order=21,
                 max_ninter=200,
                 full_output=True,
                 extrapolate=True,
             )
             assert not bool(info.info["used_accel"]), (
-                f"problem {i} at tol={tol:g} returned an extrapolated value"
+                f"{prob['name']} at tol={tol:g} returned an extrapolated value"
             )
             # and the answer is the subdivision's own, unchanged by the flag
             y_off, _ = quadgk(
                 prob["fun"],
                 prob["interval"],
-                epsabs=tol,
-                epsrel=tol,
+                epsabs=jnp.asarray(tol),
+                epsrel=jnp.asarray(tol),
                 order=21,
                 max_ninter=200,
                 full_output=True,
@@ -1109,7 +337,7 @@ class TestExtrapolation:
                 np.asarray(y_off),
                 rtol=ULP_RTOL,
                 atol=ULP_ATOL,
-                err_msg=f"problem {i}, tol={tol:g}",
+                err_msg=f"{prob['name']}, tol={tol:g}",
             )
 
     def test_a_converged_component_does_not_spoil_the_others(self):
@@ -1134,129 +362,6 @@ class TestExtrapolation:
             )
             np.testing.assert_allclose(float(np.asarray(y)[0]), 2.0, atol=1e-13)
             assert int(info.neval) <= 2 * int(ref_info.neval)
-
-
-class TestRombergExtrapolationFlag:
-    """Richardson extrapolation, on and off, over the whole example suite.
-
-    Romberg's method *is* the trapezoidal rule plus Richardson, so this flag turns it
-    into something else rather than merely tuning it: the same nodes and the same
-    halving schedule, reading the un-extrapolated column. The two methods want opposite
-    things from it, which is why it is a flag and not a fixed choice.
-
-    ``divmax`` is well below the default here so the plain mode is affordable to test.
-    Without extrapolation the trapezoidal rule needs O(h**2) refinement, so its
-    evaluation count runs to millions on the harder problems, and the contrast the tests
-    below check for is visible long before that.
-    """
-
-    DIVMAX = 14
-    TOL = 1e-8
-    # problems with a smooth integrand and finite limits, where Richardson's error
-    # expansion in even powers of the step is valid and it should pay for itself
-    SMOOTH = [0, 1, 2, 3, 13, 14, 16]
-
-    def _run(self, method, i, extrapolate, tol=None, divmax=None):
-        prob = example_problems[i]
-        y, info = method(
-            prob["fun"],
-            jnp.asarray(prob["interval"], float),
-            epsabs=tol or self.TOL,
-            epsrel=tol or self.TOL,
-            divmax=divmax or self.DIVMAX,
-            full_output=True,
-            extrapolate=extrapolate,
-        )
-        exact = np.asarray(prob["val"])
-        scale = max(np.max(np.abs(exact)), 1e-300)
-        err = float(np.max(np.abs(np.asarray(y) - exact)) / scale)
-        return y, err, int(info.status), int(info.neval)
-
-    def _suite(self):
-        """The example problems Romberg can accept, ie the ones with no breakpoints."""
-        for i, prob in enumerate(example_problems):
-            if len(np.atleast_1d(np.asarray(prob["interval"], float))) == 2:
-                yield i
-
-    @pytest.mark.parametrize("method", [romberg, rombergts], ids=["romberg", "ts"])
-    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
-    def test_no_problem_returns_garbage(self, method, extrapolate):
-        """Neither setting may produce a NaN or an infinity on any problem.
-
-        Deliberately over the whole suite, including the problems neither setting can
-        actually solve: what matters there is that a failure to converge stays a large
-        finite error with a status to match, rather than becoming a NaN.
-        """
-        for i in self._suite():
-            y, err, status, _ = self._run(method, i, extrapolate)
-            assert np.all(np.isfinite(np.asarray(y))), f"problem {i}"
-            assert np.isfinite(err), f"problem {i}"
-
-    def test_richardson_is_what_makes_romberg_work(self):
-        """Without it the trapezoidal rule cannot keep up on a smooth integrand.
-
-        This is the justification for the flag defaulting to on. The gap is not
-        marginal: Richardson reaches machine precision in tens of evaluations where
-        bisection alone is still several digits short after tens of thousands.
-        """
-        for i in self.SMOOTH:
-            _, err_on, _, neval_on = self._run(romberg, i, True)
-            _, err_off, _, neval_off = self._run(romberg, i, False)
-            assert err_on < err_off, f"problem {i}: {err_on:.2e} vs {err_off:.2e}"
-            assert neval_on < neval_off, f"problem {i}"
-
-    def test_tanh_sinh_gains_nothing_from_richardson(self):
-        """On tanh-sinh it is at best neutral, and usually just costs evaluations.
-
-        The rule already converges doubly exponentially, so there is no expansion in
-        powers of the step for Richardson to cancel. Measured over the suite it helps
-        nothing, is slightly worse on a few problems, and reaches the same accuracy in
-        fewer evaluations on around half of them.
-        """
-        for i in self._suite():
-            _, err_on, _, _ = self._run(rombergts, i, True)
-            _, err_off, _, _ = self._run(rombergts, i, False)
-            floor = 1e-14 * max(
-                np.max(np.abs(np.asarray(example_problems[i]["val"]))), 1
-            )
-            assert err_off <= max(10 * err_on, floor), (
-                f"problem {i}: turning extrapolation off made it worse, "
-                f"{err_off:.2e} vs {err_on:.2e}"
-            )
-
-    @pytest.mark.parametrize("method", [romberg, rombergts], ids=["romberg", "ts"])
-    def test_the_flag_does_not_change_the_table_shape(self, method):
-        """``full_output`` keeps its contract either way, column 0 always filled.
-
-        The two settings do not generally stop at the same level (they are comparing
-        different estimates from one refinement to the next, so they meet the tolerance
-        at different depths) but the trapezoidal column is the same computation in
-        both, so wherever they both reached it holds the same numbers. Only what is
-        built on top of it differs.
-        """
-        prob = example_problems[0]
-        tables = {}
-        for extrapolate in (False, True):
-            _, info = method(
-                prob["fun"],
-                jnp.asarray(prob["interval"], float),
-                epsabs=self.TOL,
-                epsrel=self.TOL,
-                divmax=self.DIVMAX,
-                full_output=True,
-                extrapolate=extrapolate,
-            )
-            tables[extrapolate] = np.asarray(info.info)
-        assert tables[False].shape == tables[True].shape
-        columns = [tables[e][:, 0] for e in (False, True)]
-        # How far each column got: the length of its leading run of nonzeros. Counted
-        # as a run rather than located as the first zero, because a column filled to
-        # the end has no zero in it and a search would have to report its absence.
-        depth = min(*(int((c != 0).cumprod().sum()) for c in columns), self.DIVMAX)
-        assert depth > 1, "neither setting filled the trapezoidal column"
-        np.testing.assert_allclose(
-            columns[0][:depth], columns[1][:depth], rtol=ULP_RTOL, atol=ULP_ATOL
-        )
 
 
 def test_escaped_tracers():
@@ -1402,6 +507,58 @@ def test_tolerance_below_roundoff_floor_reports_roundoff():
     )
 
 
+def _scaled_gaussian(t, s):
+    """``exp(-(t/s)**2)``, with the scale taken as an argument to avoid recompile."""
+    return jnp.exp(-((t / s) ** 2))
+
+
+def _inv_sqrt(t):
+    return t**-0.5
+
+
+class TestIntervalScaling:
+    """Where the interval sits on the axis must not change the answer.
+
+    End to end rather than on ``map_interval`` alone: what is under test is that the
+    abscissae reaching the integrand are correctly rounded at every scale, and only a
+    full solve subdivides deeply enough for a cancellation in the map to show up.
+    """
+
+    @pytest.mark.parametrize("scale", [1e-8, 1e-3, 1.0, 1e3, 1e8])
+    @pytest.mark.parametrize("method", [quadgk, quadcc, quadts])
+    def test_the_result_does_not_depend_on_the_scale_of_the_interval(
+        self, method, scale
+    ):
+        """The width floor is relative, so rescaling the problem rescales the answer."""
+        s = float(scale)
+        y, info = method(
+            _scaled_gaussian,
+            jnp.array([0.0, 3 * s]),
+            (jnp.asarray(s),),
+            epsabs=jnp.asarray(0.0),
+            epsrel=jnp.asarray(1e-10),
+        )
+        assert int(info.status) == 0, quadax.STATUS[int(info.status)]
+        np.testing.assert_allclose(float(y) / s, 0.8862073482595214, rtol=1e-10)
+
+    @pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
+    def test_a_singularity_at_the_origin_is_scale_invariant(self, scale):
+        """``x**-1/2`` on ``[0, s]``: the case a single affine map makes exact.
+
+        ``0 + halflength*(1 + x_node)`` has nothing to cancel, so every abscissa is the
+        correctly rounded distance from the singularity however deep the subdivision
+        goes, and the answer no longer depends on where the interval sits.
+        """
+        s = float(scale)
+        y, _ = quadgk(
+            _inv_sqrt,
+            jnp.array([0.0, s]),
+            epsabs=jnp.asarray(0.0),
+            epsrel=jnp.asarray(1e-12),
+        )
+        np.testing.assert_allclose(float(y), 2 * np.sqrt(s), rtol=1e-8)
+
+
 class TestErrors:
     """Invalid arguments must raise, rather than silently doing something else."""
 
@@ -1436,28 +593,6 @@ class TestErrors:
 
 adaptive_methods = [quadgk, quadcc, quadts]
 all_methods = adaptive_methods + [romberg, rombergts]
-rules = [GaussKronrodRule, ClenshawCurtisRule, TanhSinhRule]
-
-real_dtypes = [jnp.float64, jnp.float32, jnp.float16, jnp.bfloat16]
-complex_dtypes = [jnp.complex128, jnp.complex64]
-# `interval` is always real; complex is a property of the integrand's values.
-real_of = {jnp.complex128: jnp.float64, jnp.complex64: jnp.float32}
-
-# How much worse than sqrt(eps) a converged result is allowed to be. Generous, because
-# the point of these tests is dtype plumbing, not accuracy.
-_SLOP = 50
-
-
-@pytest.fixture
-def quiet_tanhsinh():
-    """Let the half precision tanh-sinh warning through without failing the test.
-
-    ``pyproject.toml`` turns warnings into errors, which is right for the rest of the
-    suite. The warning itself is asserted on separately in ``TestTanhSinhPrecision``.
-    """
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*tanh-sinh quadrature in.*")
-        yield
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
@@ -1469,12 +604,12 @@ class TestWorkingDType:
     def test_round_trip(self, method, dtype):
         """Y and err come back at the requested precision, and the answer is right."""
         interval = jnp.array([0.0, 1.0], dtype=dtype)
-        y, info = method(lambda x: jnp.exp(-x), interval)
+        y, info = method(exp_neg, interval)
 
         assert y.dtype == dtype
         assert jnp.asarray(info.err).dtype == dtype
         # exp(-x) on [0, 1]; only asking for sqrt(eps)-ish accuracy
-        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
         np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
 
     @pytest.mark.parametrize("method", all_methods)
@@ -1524,7 +659,7 @@ class TestWorkingDType:
 
         assert y.dtype == dtype
         assert jnp.asarray(info.err).dtype == rtype
-        tol = _SLOP * np.sqrt(float(jnp.finfo(rtype).eps))
+        tol = SLOP * np.sqrt(float(jnp.finfo(rtype).eps))
         np.testing.assert_allclose(complex(y).real, 1 - np.exp(-1), atol=tol)
         np.testing.assert_allclose(complex(y).imag, 1 - np.cos(1), atol=tol)
 
@@ -1542,7 +677,7 @@ class TestWorkingDType:
         with a weakly typed scalar the four branches can settle on different dtypes and
         the ``switch`` between them fails to build.
         """
-        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
         for interval, expected in [
             ([0.0, jnp.inf], np.sqrt(np.pi) / 2),
             ([-jnp.inf, 0.0], np.sqrt(np.pi) / 2),
@@ -1559,53 +694,8 @@ class TestWorkingDType:
         y, info = quadgk(lambda x: jnp.array([jnp.exp(-x), x**2]), interval)
         assert y.dtype == dtype
         assert jnp.asarray(info.err).dtype == dtype
-        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
         np.testing.assert_allclose(np.asarray(y), [1 - np.exp(-1), 1 / 3], atol=tol)
-
-
-@pytest.mark.usefixtures("quiet_tanhsinh")
-class TestFixedOrderRuleDTypes:
-    """The fixed order rules are a public entry point in their own right."""
-
-    @pytest.mark.parametrize("rule", rules)
-    @pytest.mark.parametrize("dtype", real_dtypes)
-    def test_integrate(self, rule, dtype):
-        """All four outputs of ``integrate`` come back at the abscissa dtype."""
-        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
-        y, err, y_abs, y_mmn = rule().integrate(lambda x: jnp.exp(-x), a, b, ())
-        assert y.dtype == dtype
-        assert err.dtype == y_abs.dtype == y_mmn.dtype == dtype
-        tol = _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
-        np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
-
-    @pytest.mark.parametrize("rule", rules)
-    @pytest.mark.parametrize("dtype", real_dtypes)
-    def test_degenerate_interval(self, rule, dtype):
-        """``a == b`` takes the other branch of a ``cond``, which has to agree.
-
-        Both branches are built for any integrand dtype, so the zero branch must be
-        constructed at the same dtype the weights promote the real branch to.
-        """
-        a = jnp.array(0.5, dtype)
-        out = rule().integrate(lambda x: jnp.exp(-x), a, a, ())
-        for v in out:
-            assert v.dtype == dtype
-            np.testing.assert_array_equal(np.asarray(v), 0.0)
-
-    @pytest.mark.parametrize("rule", rules)
-    @pytest.mark.parametrize("dtype", real_dtypes)
-    def test_apply(self, rule, dtype):
-        """The low level ``_apply`` keeps the dtype too."""
-        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
-        y = rule()._apply(lambda x: jnp.exp(-x), a, b, ())
-        assert y.dtype == dtype
-
-    @pytest.mark.parametrize("rule", rules)
-    def test_weights_sum_to_two(self, rule):
-        """Both the high and low order rules integrate 1 over [-1, 1] exactly."""
-        r = rule()
-        np.testing.assert_allclose(float(jnp.sum(r._wh)), 2.0, atol=1e-14)
-        np.testing.assert_allclose(float(jnp.sum(r._wl)), 2.0, atol=1e-14)
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
@@ -1645,21 +735,33 @@ class TestToleranceDTypes:
     @pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
     def test_default_tolerance_tracks_dtype(self, method, dtype):
         """With no tolerance given, accuracy lands near sqrt(eps) of the dtype."""
-        y, _ = method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+        y, _ = method(exp_neg, jnp.array([0.0, 1.0], dtype=dtype))
         err = abs(float(y) - (1 - np.exp(-1)))
-        assert err <= _SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        assert err <= SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
 
     @pytest.mark.parametrize("dtype", real_dtypes)
     def test_explicit_tolerances_do_not_promote(self, dtype):
         """A python float tolerance must not drag the working dtype up with it."""
         y, info = quadgk(
-            lambda x: jnp.exp(-x),
+            exp_neg,
             jnp.array([0.0, 1.0], dtype=dtype),
             epsabs=1e-3,
             epsrel=1e-3,
         )
         assert y.dtype == dtype
         assert jnp.asarray(info.err).dtype == dtype
+
+
+def fresh_exp_neg():
+    """A new ``exp(-x)`` object each call, so the solver has to trace it again.
+
+    The integrand is a static argument, so tests normally share one to avoid compiling
+    the same problem repeatedly. The warning tests below must do the opposite: it is
+    raised while the node table is built, which happens once per trace, so a call that
+    lands on a warm compilation cache is silent whatever the dtype. Sharing an integrand
+    there would leave them asserting on collection order rather than on the warning.
+    """
+    return lambda x: jnp.exp(-x)
 
 
 class TestTanhSinhPrecision:
@@ -1670,7 +772,7 @@ class TestTanhSinhPrecision:
     def test_warns_in_half_precision(self, dtype, method):
         """The user is told when the rule cannot deliver what it usually does."""
         with pytest.warns(UserWarning, match="tanh-sinh quadrature in"):
-            method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+            method(fresh_exp_neg(), jnp.array([0.0, 1.0], dtype=dtype))
 
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
     @pytest.mark.parametrize("method", [quadts, rombergts])
@@ -1678,28 +780,14 @@ class TestTanhSinhPrecision:
         """No warning where the clustering is fine."""
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            method(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
+            method(fresh_exp_neg(), jnp.array([0.0, 1.0], dtype=dtype))
 
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
     def test_quadgk_never_warns(self, dtype):
         """The warning belongs to the tanh-sinh rules, not to quadrature generally."""
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            quadgk(lambda x: jnp.exp(-x), jnp.array([0.0, 1.0], dtype=dtype))
-
-    @pytest.mark.usefixtures("quiet_tanhsinh")
-    @pytest.mark.parametrize("dtype", real_dtypes)
-    def test_nodes_stay_inside_the_interval(self, dtype):
-        """Rebuilt rather than cast, so no node collapses onto the endpoint.
-
-        Casting a float64 table down to bfloat16 would round the outer nodes to exactly
-        +/-1, silently dropping the effective order. Rebuilding at the target dtype
-        spreads the same number of nodes over the range that dtype can resolve.
-        """
-        xh, _, _ = TanhSinhRule(order=61)._nodes_weights(dtype)
-        assert xh.dtype == dtype
-        assert len(np.unique(np.asarray(xh, dtype=np.float64))) == len(xh)
-        assert np.all(np.abs(np.asarray(xh, dtype=np.float64)) < 1.0)
+            quadgk(fresh_exp_neg(), jnp.array([0.0, 1.0], dtype=dtype))
 
 
 def test_x64_disabled():

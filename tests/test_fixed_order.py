@@ -21,6 +21,10 @@ the high modes, and the rule can spuriously appear exact long past where it has 
 business being). All checks run on the reference interval ``[-1, 1]`` and on a
 shifted/scaled interval, so the affine map used internally to reach ``[a, b]`` is tested
 too.
+
+The rules are a public entry point in their own right rather than only the inside of the
+adaptive loop, so the last section here checks that they honour the dtype of the limits
+on their own, without a solver around them.
 """
 
 import jax.numpy as jnp
@@ -30,6 +34,8 @@ import scipy.special
 from jax import config
 
 from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule
+
+from .problems import SLOP, exp_neg, real_dtypes
 
 config.update("jax_enable_x64", True)
 
@@ -227,3 +233,70 @@ class TestTanhSinhConvergence:
 
         # the sweep ends in rounding noise rather than a stalled algebraic tail
         assert errors[-1] < ROUNDOFF_FLOOR
+
+
+# The dtype of the limits is the statement of what precision the caller wants, and the
+# rules are a public entry point in their own right rather than only the inside of the
+# adaptive loop, so they have to honour it on their own.
+
+RULES = [GaussKronrodRule, ClenshawCurtisRule, TanhSinhRule]
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+class TestFixedOrderRuleDTypes:
+    """The fixed order rules are a public entry point in their own right."""
+
+    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_integrate(self, rule, dtype):
+        """All four outputs of ``integrate`` come back at the abscissa dtype."""
+        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
+        y, err, y_abs, y_mmn = rule().integrate(exp_neg, a, b, ())
+        assert y.dtype == dtype
+        assert err.dtype == y_abs.dtype == y_mmn.dtype == dtype
+        tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
+
+    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_degenerate_interval(self, rule, dtype):
+        """``a == b`` takes the other branch of a ``cond``, which has to agree.
+
+        Both branches are built for any integrand dtype, so the zero branch must be
+        constructed at the same dtype the weights promote the real branch to.
+        """
+        a = jnp.array(0.5, dtype)
+        out = rule().integrate(exp_neg, a, a, ())
+        for v in out:
+            assert v.dtype == dtype
+            np.testing.assert_array_equal(np.asarray(v), 0.0)
+
+    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_apply(self, rule, dtype):
+        """The low level ``_apply`` keeps the dtype too."""
+        a, b = jnp.array(0.0, dtype), jnp.array(1.0, dtype)
+        y = rule()._apply(exp_neg, a, b, ())
+        assert y.dtype == dtype
+
+    @pytest.mark.parametrize("rule", RULES)
+    def test_weights_sum_to_two(self, rule):
+        """Both the high and low order rules integrate 1 over [-1, 1] exactly."""
+        r = rule()
+        np.testing.assert_allclose(float(jnp.sum(r._wh)), 2.0, atol=1e-14)
+        np.testing.assert_allclose(float(jnp.sum(r._wl)), 2.0, atol=1e-14)
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+@pytest.mark.parametrize("dtype", real_dtypes)
+def test_tanhsinh_nodes_stay_inside_the_interval(dtype):
+    """Rebuilt rather than cast, so no node collapses onto the endpoint.
+
+    Casting a float64 table down to bfloat16 would round the outer nodes to exactly
+    +/-1, silently dropping the effective order. Rebuilding at the target dtype
+    spreads the same number of nodes over the range that dtype can resolve.
+    """
+    xh, _, _ = TanhSinhRule(order=61)._nodes_weights(dtype)
+    assert xh.dtype == dtype
+    assert len(np.unique(np.asarray(xh, dtype=np.float64))) == len(xh)
+    assert np.all(np.abs(np.asarray(xh, dtype=np.float64)) < 1.0)

@@ -31,6 +31,8 @@ from quadax.adjoint import (
     closure_convert,
 )
 
+from .problems import ULP_ATOL, ULP_RTOL
+
 config.update("jax_enable_x64", True)
 
 
@@ -78,13 +80,6 @@ example_problems = [
 # the two problems with finite limits and no breakpoints, used where a finite difference
 # reference is wanted and the quadrature must be well converged
 SMOOTH_PROBLEMS = [0, 2]
-
-# Tolerance for two routes to the same computation - a different adjoint, jit against
-# eager, forward mode against reverse - which should agree to ~1 ULP. Tight enough that
-# any real difference in what is being computed shows up, loose enough not to depend on
-# the operation order XLA happens to choose.
-ULP_RTOL = 1e-13
-ULP_ATOL = 1e-15
 
 
 def finite_difference(f, x, eps=1e-8):

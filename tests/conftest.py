@@ -53,3 +53,18 @@ def smart_warn(message, category=None, stacklevel=1, source=None):
 # Need to do this here before any other imports in order to catch import time
 # deprecation warnings
 warnings.warn = smart_warn
+
+
+import pytest  # noqa:E402
+
+
+@pytest.fixture
+def quiet_tanhsinh():
+    """Let the half precision tanh-sinh warning through without failing the test.
+
+    ``pyproject.toml`` turns warnings into errors, which is right for the rest of the
+    suite. The warning itself is asserted on separately in ``TestTanhSinhPrecision``.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*tanh-sinh quadrature in.*")
+        yield
