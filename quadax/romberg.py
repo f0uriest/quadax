@@ -21,6 +21,7 @@ from .utils import (
     _pnorm,
     _real_dtype,
     bounded_while_loop,
+    check_size,
     errorif,
     map_interval,
     resolve_dtypes,
@@ -41,6 +42,7 @@ def romberg(
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
+    batch_size: int | None = None,
 ):
     """Romberg integration of a callable function or method.
 
@@ -95,6 +97,15 @@ def romberg(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is one at a time. Each refinement level doubles the number of new points, so
+        raising this is usually worth a lot on GPU/TPU, at the cost of peak memory
+        scaling with it. Levels with fewer new points than one batch are padded up to a
+        full batch, so the early levels of a run cost ``batch_size`` evaluations each
+        however few points they place; that padding is what keeps a single batch shape
+        traced for every level rather than one per level. Clipped to the largest level
+        ``divmax`` allows.
 
     Returns
     -------
@@ -117,9 +128,10 @@ def romberg(
 
     Notes
     -----
-    Due to limitations on dynamically sized arrays in JAX, this algorithm is fully
-    sequential and does not vectorize integrand evaluations, so may not be the most
-    efficient on GPU/TPU.
+    The number of new points a refinement level places is only known at run time, so
+    there is no single shape to vectorize over. Integrand evaluations are made in
+    fixed size batches of ``batch_size``, defaulting to one at a time; raise it to get
+    parallelism on GPU/TPU.
 
     """
     interval = jnp.atleast_1d(jnp.asarray(interval))
@@ -139,6 +151,10 @@ def romberg(
         epsrel = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
     epsabs = jnp.asarray(epsabs, dtypes.etype)
     epsrel = jnp.asarray(epsrel, dtypes.etype)
+    check_size(batch_size)
+    # No level ever places more than `2**(divmax - 1)` new points, so a larger batch
+    # would only ever be padding.
+    batch_size = min(batch_size or 1, 2 ** max(divmax - 1, 0))
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -157,6 +173,7 @@ def romberg(
         build_integrand,
         dtypes.xtype,
         extrapolate,
+        batch_size,
     )
 
 
@@ -173,6 +190,7 @@ def _romberg(
     build,
     xtype,
     extrapolate,
+    batch_size,
 ):
     """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
     # Closure conversion has to happen on the user's function, before any wrapping:
@@ -184,7 +202,11 @@ def _romberg(
     ops = QuadratureOps(
         build=partial(build, f_conv=f_conv),
         solve=partial(
-            _romberg_solve, divmax=divmax, _norm=_norm, extrapolate=extrapolate
+            _romberg_solve,
+            divmax=divmax,
+            _norm=_norm,
+            extrapolate=extrapolate,
+            batch_size=batch_size,
         ),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
@@ -193,7 +215,12 @@ def _romberg(
         # differentiated directly, because evaluating it still involves a fori_loop with
         # dynamic bounds that JAX cannot reverse differentiate.
         frozen=lambda state: state["n"],
-        frozen_solve=partial(_romberg_levels, divmax=divmax, extrapolate=extrapolate),
+        frozen_solve=partial(
+            _romberg_levels,
+            divmax=divmax,
+            extrapolate=extrapolate,
+            batch_size=batch_size,
+        ),
     )
     y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
     info = state["table"] if full_output else None
@@ -209,8 +236,50 @@ def _build_tanhsinh(interval, args, consts, *, f_conv):
     return wrap_func(fun_m, (), interval_m.dtype), interval_m
 
 
+def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype):
+    """Sum the integrand over the new nodes of one refinement level.
+
+    Level ``k`` adds the ``npts = 2**(k - 1)`` points sitting at odd multiples of ``h``
+    above ``a``, interleaving the nodes the previous levels already placed. ``npts`` is
+    only known at run time, so the points are evaluated in fixed size batches and the
+    last batch is padded up to a full one. Padding rather than shaping each level to its
+    own point count is what keeps one batch traced for all of them; the cost is that a
+    level with fewer points than a batch still pays for a whole one.
+
+    The padded lanes repeat the first point of their batch, which is always one this
+    level genuinely evaluates, not an arbitrary placeholder. An integrand that is
+    singular somewhere in the domain would return a non-finite value at a made up point,
+    and masking that out of the sum afterwards still leaves a NaN in its derivative.
+
+    ``vfunc`` takes a whole batch of abscissae; the callers wrap it to guarantee that.
+    """
+    nbatch = (npts + batch_size - 1) // batch_size
+    offs = jnp.arange(1, batch_size + 1)
+
+    def bodyfun(j, s):
+        i = j * batch_size + offs
+        used = i <= npts
+        x = a + h * (2 * i - 1)
+        x = jnp.where(used, x, x[0])
+        f: jax.Array = vfunc(x)
+        mask = used.reshape((-1,) + (1,) * (f.ndim - 1))
+        return s + jnp.sum(jnp.where(mask, f, 0), axis=0)
+
+    return jax.lax.fori_loop(0, nbatch, bodyfun, jnp.zeros(shape, dtype)), nbatch
+
+
 def _romberg_solve(
-    rule, vfunc, interval, epsabs, epsrel, kwargs, *, divmax, _norm, extrapolate=True
+    rule,
+    vfunc,
+    interval,
+    epsabs,
+    epsrel,
+    kwargs,
+    *,
+    divmax,
+    _norm,
+    extrapolate=True,
+    batch_size=1,
 ):
     """Run the refinement loop, with Richardson extrapolation if it is switched on.
 
@@ -220,6 +289,12 @@ def _romberg_solve(
     """
     del rule, kwargs
     a, b = interval
+    # Vectorize whatever we were handed The primal integrand arrives vectorized already,
+    # but the adjoints solve against one they build per point (the tangent or the
+    # cotangent of the mapped integrand) which takes a scalar only. Wrapping here rather
+    # than mapping at each use keeps one contract for the loop below: ``vfunc`` accepts
+    # a batch of abscissae.
+    vfunc = wrap_func(vfunc, (), interval.dtype)
     f = jax.eval_shape(vfunc, (a + b) / 2)
 
     # Which entry of row `k` is the estimate. Richardson's is the diagonal, having
@@ -247,18 +322,11 @@ def _romberg_solve(
         # loop over outer number of subdivisions
         result, n, neval, err = state
         h = (b - a) / 2**n
-        s = jnp.zeros(f.shape, f.dtype)
-
-        def sloop(i, s):
-            # loop to evaluate fun. Can't be vectorized due to different number
-            # of evals per nloop step
-            s += vfunc(a + h * (2 * i - 1))
-            return s
-
-        result = result.at[n, 0].set(
-            0.5 * result[n - 1, 0] + h * jax.lax.fori_loop(1, (2**n) // 2 + 1, sloop, s)
-        )
-        neval += (2**n) // 2
+        s, nbatch = _level_sum(vfunc, a, h, (2**n) // 2, batch_size, f.shape, f.dtype)
+        result = result.at[n, 0].set(0.5 * result[n - 1, 0] + h * s)
+        # The padded lanes of the last batch are evaluations of the integrand like any
+        # other, so they are counted here even though they do not reach the sum.
+        neval += nbatch * batch_size
 
         def mloop(m, result):
             # richardson extrapolation
@@ -285,7 +353,9 @@ def _romberg_solve(
     return y, state
 
 
-def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=True):
+def _romberg_levels(
+    rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=True, batch_size=1
+):
     """Evaluate the table at a fixed number of levels.
 
     With ``n`` fixed this is a fixed linear combination of the integrand at fixed nodes,
@@ -295,6 +365,7 @@ def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=Tru
     """
     del rule, kwargs
     a, b = interval[0], interval[-1]
+    vfunc = wrap_func(vfunc, (), interval.dtype)  # see ``_romberg_solve``
     f = jax.eval_shape(vfunc, (a + b) / 2)
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
     # The trapezoid rule at one interval.
@@ -302,11 +373,7 @@ def _romberg_levels(rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=Tru
 
     def nloop(k, result):
         h = (b - a) / 2**k
-
-        def sloop(i, s):
-            return s + vfunc(a + h * (2 * i - 1))
-
-        s = jax.lax.fori_loop(1, (2**k) // 2 + 1, sloop, jnp.zeros(f.shape, f.dtype))
+        s, _ = _level_sum(vfunc, a, h, (2**k) // 2, batch_size, f.shape, f.dtype)
         result = result.at[k, 0].set(0.5 * result[k - 1, 0] + h * s)
 
         def mloop(m, result):
@@ -333,6 +400,7 @@ def rombergts(
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
+    batch_size: int | None = None,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -387,6 +455,15 @@ def rombergts(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is one at a time. Each refinement level doubles the number of new points, so
+        raising this is usually worth a lot on GPU/TPU, at the cost of peak memory
+        scaling with it. Levels with fewer new points than one batch are padded up to a
+        full batch, so the early levels of a run cost ``batch_size`` evaluations each
+        however few points they place; that padding is what keeps a single batch shape
+        traced for every level rather than one per level. Clipped to the largest level
+        ``divmax`` allows.
 
 
     Returns
@@ -410,9 +487,10 @@ def rombergts(
 
     Notes
     -----
-    Due to limitations on dynamically sized arrays in JAX, this algorithm is fully
-    sequential and does not vectorize integrand evaluations, so may not be the most
-    efficient on GPU/TPU.
+    The number of new points a refinement level places is only known at run time, so
+    there is no single shape to vectorize over. Integrand evaluations are made in
+    fixed size batches of ``batch_size``, defaulting to one at a time; raise it to get
+    parallelism on GPU/TPU.
 
     """
     interval = jnp.atleast_1d(jnp.asarray(interval))
@@ -432,6 +510,10 @@ def rombergts(
         epsrel = jnp.sqrt(jnp.finfo(dtypes.toltype).eps)
     epsabs = jnp.asarray(epsabs, dtypes.etype)
     epsrel = jnp.asarray(epsrel, dtypes.etype)
+    check_size(batch_size)
+    # No level ever places more than `2**(divmax - 1)` new points, so a larger batch
+    # would only ever be padding.
+    batch_size = min(batch_size or 1, 2 ** max(divmax - 1, 0))
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -450,4 +532,5 @@ def rombergts(
         _build_tanhsinh,
         dtypes.xtype,
         extrapolate,
+        batch_size,
     )

@@ -828,3 +828,99 @@ print("ok")
     )
     assert out.returncode == 0, out.stderr
     assert "ok" in out.stdout
+
+
+# Straddling the node count of the default rule for each routine: one point at a time, a
+# size that leaves a partial last batch, and one above the node count so the clip fires.
+BATCH_SIZES = [1, 4, 7, 10**4]
+
+
+@pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])
+@pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
+class TestBatchSize:
+    """Splitting the local rule's node evaluation into batches.
+
+    The rule's node count is fixed when it is built, so the batches are cut to fit and
+    the subdivision loop sees the same values it would have seen unbatched, in the same
+    order, with no term reordered. That is a stronger claim than Romberg's, where the
+    level sizes are dynamic and batching does reassociate a sum, and it is checked as
+    such: the tolerance below is ULP-scale rather than the one the quadrature was asked
+    for.
+
+    It is deliberately not asserted bitwise. Evaluating the integrand under a different
+    batch shape lets XLA fuse the arithmetic differently, which can move a result by
+    around eps with no reordering involved, so a bitwise assertion would be testing the
+    compiler rather than this option. ``batch_size`` is a statement about memory and
+    scheduling, and the tests below are what pins it to that.
+    """
+
+    TOL = 1e-10
+
+    @pytest.mark.parametrize("i", [0, 17])
+    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    def test_run_is_unchanged(self, method, batch_size, i, extrapolate):
+        """Value, error estimate, status and subdivision all come out identical."""
+        prob = PROBLEMS[i]
+        run = lambda bs: method(  # noqa: E731
+            prob["fun"],
+            prob["interval"],
+            epsabs=self.TOL,
+            epsrel=self.TOL,
+            full_output=True,
+            extrapolate=extrapolate,
+            batch_size=bs,
+        )
+        y, info = run(None)
+        y_b, info_b = run(batch_size)
+        np.testing.assert_allclose(
+            np.asarray(y_b), np.asarray(y), rtol=ULP_RTOL, atol=ULP_ATOL
+        )
+        np.testing.assert_allclose(
+            np.asarray(info_b.err), np.asarray(info.err), rtol=ULP_RTOL, atol=ULP_ATOL
+        )
+        assert int(info_b.status) == int(info.status)
+        assert int(info_b.info["ninter"]) == int(info.info["ninter"])
+
+    @pytest.mark.usefixtures("quiet_tanhsinh")
+    @pytest.mark.parametrize("dtype", real_dtypes)
+    def test_dtypes(self, method, batch_size, dtype):
+        """Padding must not disturb the working precision.
+
+        The fill is taken from the abscissae themselves, so it carries their dtype and
+        cannot promote the batch; a literal would.
+        """
+        y, info = method(
+            exp_neg,
+            jnp.array([0.0, 1.0], dtype),
+            epsabs=jnp.array(1e-3, dtype),
+            epsrel=jnp.array(1e-3, dtype),
+            batch_size=batch_size,
+        )
+        assert y.dtype == dtype
+        tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
+        np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
+
+    def test_neval_does_not_move(self, method, batch_size):
+        """Batching costs no extra evaluations, so the reported count is unchanged.
+
+        The node count is fixed when the rule is built, so a batch size that does not
+        divide it leaves a smaller final batch rather than a padded one. This is the
+        test that would fail if the remainder were ever padded instead.
+        """
+        prob = PROBLEMS[0]
+        run = lambda bs: method(  # noqa: E731
+            prob["fun"],
+            prob["interval"],
+            epsabs=self.TOL,
+            epsrel=self.TOL,
+            batch_size=bs,
+        )[1]
+        assert int(run(batch_size).neval) == int(run(None).neval)
+
+
+@pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])
+@pytest.mark.parametrize("batch_size", [0, -1, 2.5], ids=["zero", "negative", "float"])
+def test_bad_batch_size_rejected(method, batch_size):
+    """A batch size that is not a positive integer is a mistake, not a default."""
+    with pytest.raises(ValueError, match="batch_size"):
+        method(exp_neg, jnp.array([0.0, 1.0]), batch_size=batch_size)

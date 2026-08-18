@@ -68,6 +68,7 @@ def quadgk(
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = True,
+    batch_size: int | None = None,
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -125,6 +126,13 @@ def quadgk(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the local rule's nodes at once, which is fastest but makes peak memory
+        scale with the order. Lower it to reduce memory on an expensive integrand.
+        Values larger than the number of nodes are clipped to it. In a gradient the
+        adjoint evaluates several sub-intervals together, so the width there is
+        ``batch_size`` times the adjoint's own ``chunk_size``.
 
     Returns
     -------
@@ -157,12 +165,13 @@ def quadgk(
     Notes
     -----
     Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
-    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
-    ``order`` points, so using higher order methods will generally be more efficient on
-    GPU/TPU.
+    is generally not achievable. The local quadrature rule evaluates the integrand at
+    all of its nodes at once, so using higher order methods will generally be more
+    efficient on GPU/TPU. ``batch_size`` splits that evaluation up where the memory it
+    needs is the binding constraint instead.
 
     """
-    rule = GaussKronrodRule(order, norm)
+    rule = GaussKronrodRule(order, norm, batch_size)
     y, info = adaptive_quadrature(
         rule,
         fun,
@@ -175,7 +184,9 @@ def quadgk(
         adjoint=adjoint,
         extrapolate=extrapolate,
     )
-    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    info = QuadratureInfo(
+        info.err, info.neval * rule.nodes_per_call, info.status, info.info
+    )
     return y, info
 
 
@@ -192,6 +203,7 @@ def quadcc(
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = True,
+    batch_size: int | None = None,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -248,6 +260,13 @@ def quadcc(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the local rule's nodes at once, which is fastest but makes peak memory
+        scale with the order. Lower it to reduce memory on an expensive integrand.
+        Values larger than the number of nodes are clipped to it. In a gradient the
+        adjoint evaluates several sub-intervals together, so the width there is
+        ``batch_size`` times the adjoint's own ``chunk_size``.
 
     Returns
     -------
@@ -280,12 +299,13 @@ def quadcc(
     Notes
     -----
     Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
-    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
-    ``order`` points, so using higher order methods will generally be more efficient on
-    GPU/TPU.
+    is generally not achievable. The local quadrature rule evaluates the integrand at
+    all of its nodes at once, so using higher order methods will generally be more
+    efficient on GPU/TPU. ``batch_size`` splits that evaluation up where the memory it
+    needs is the binding constraint instead.
 
     """
-    rule = ClenshawCurtisRule(order, norm)
+    rule = ClenshawCurtisRule(order, norm, batch_size)
     y, info = adaptive_quadrature(
         rule,
         fun,
@@ -298,7 +318,9 @@ def quadcc(
         adjoint=adjoint,
         extrapolate=extrapolate,
     )
-    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    info = QuadratureInfo(
+        info.err, info.neval * rule.nodes_per_call, info.status, info.info
+    )
     return y, info
 
 
@@ -315,6 +337,7 @@ def quadts(
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = False,
+    batch_size: int | None = None,
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -372,6 +395,13 @@ def quadts(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the local rule's nodes at once, which is fastest but makes peak memory
+        scale with the order. Lower it to reduce memory on an expensive integrand.
+        Values larger than the number of nodes are clipped to it. In a gradient the
+        adjoint evaluates several sub-intervals together, so the width there is
+        ``batch_size`` times the adjoint's own ``chunk_size``.
 
     Returns
     -------
@@ -404,12 +434,13 @@ def quadts(
     Notes
     -----
     Adaptive algorithms are inherently somewhat sequential, so perfect parallelism
-    is generally not achievable. The local quadrature rule vmaps integrand evaluation at
-    ``order`` points, so using higher order methods will generally be more efficient on
-    GPU/TPU.
+    is generally not achievable. The local quadrature rule evaluates the integrand at
+    all of its nodes at once, so using higher order methods will generally be more
+    efficient on GPU/TPU. ``batch_size`` splits that evaluation up where the memory it
+    needs is the binding constraint instead.
 
     """
-    rule = TanhSinhRule(order, norm)
+    rule = TanhSinhRule(order, norm, batch_size)
     y, info = adaptive_quadrature(
         rule,
         fun,
@@ -422,7 +453,9 @@ def quadts(
         adjoint=adjoint,
         extrapolate=extrapolate,
     )
-    info = QuadratureInfo(info.err, info.neval * order, info.status, info.info)
+    info = QuadratureInfo(
+        info.err, info.neval * rule.nodes_per_call, info.status, info.info
+    )
     return y, info
 
 

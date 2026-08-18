@@ -89,6 +89,13 @@ is relative to the quadrature around it, how hard its derivative is to integrate
 compared to the integrand, and how many parameters are involved. Time both on your own
 problem before caring much about the difference.
 
+Both take two options controlling the memory a derivative needs. ``checkpoint`` (on by
+default) recomputes each block of sub-intervals during the backward pass instead of
+storing it, and is where nearly all of the saving is. ``chunk_size`` sets how many
+sub-intervals of the frozen subdivision are evaluated at once, and multiplies with the
+``batch_size`` of the routine itself: a gradient evaluates the integrand at up to
+``chunk_size * batch_size`` points at a time.
+
 
 Integrating function from sampled values
 ----------------------------------------

@@ -35,7 +35,7 @@ from jax import config
 
 from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule
 
-from .problems import SLOP, exp_neg, real_dtypes
+from .problems import SLOP, ULP_ATOL, ULP_RTOL, exp_neg, real_dtypes
 
 config.update("jax_enable_x64", True)
 
@@ -300,3 +300,83 @@ def test_tanhsinh_nodes_stay_inside_the_interval(dtype):
     assert xh.dtype == dtype
     assert len(np.unique(np.asarray(xh, dtype=np.float64))) == len(xh)
     assert np.all(np.abs(np.asarray(xh, dtype=np.float64)) < 1.0)
+
+
+# The batch sizes worth covering, relative to a rule's node count ``n``: one point at a
+# time, a divisor of nothing in particular so the last batch is partial, an exact
+# divisor of nothing again but larger, and a value above ``n`` so the clip fires. Given
+# as a callable of ``n`` because the three rules have different node counts, and the
+# interesting values are the ones that straddle it.
+BATCH_SIZES = [
+    lambda n: 1,
+    lambda n: 4,
+    lambda n: 5,
+    lambda n: n - 1,
+    lambda n: n,
+    lambda n: n + 7,
+]
+BATCH_IDS = ["1", "4", "5", "n-1", "n", "n+7"]
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+@pytest.mark.parametrize("rule", RULES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=BATCH_IDS)
+class TestBatchSize:
+    """Splitting the node evaluation into batches must not change the answer.
+
+    The node count is fixed when the rule is built, so the batches are cut to fit: the
+    weighted sums see the same values an unbatched rule computes, in the same order,
+    with no term reassociated, and the agreement is to the last few ulp rather than to
+    the tolerance the quadrature was asked for. It is not bitwise, and
+    must not be asserted as such, evaluating the integrand under a different batch
+    shape lets XLA fuse the arithmetic differently, which moves results by around eps
+    without any reordering having happened.
+    """
+
+    def test_integrate_is_unchanged(self, rule, batch_size):
+        """All four outputs match the unbatched rule to within roundoff."""
+        n = len(rule()._xh)
+        want = rule().integrate(exp_neg, 0.0, 1.0, ())
+        got = rule(batch_size=batch_size(n)).integrate(exp_neg, 0.0, 1.0, ())
+        for w, g in zip(want, got):
+            np.testing.assert_allclose(
+                np.asarray(g), np.asarray(w), rtol=ULP_RTOL, atol=ULP_ATOL
+            )
+
+    def test_apply_is_unchanged(self, rule, batch_size):
+        """And so does the value-only path the adjoints use."""
+        n = len(rule()._xh)
+        want = rule()._apply(exp_neg, 0.0, 1.0, ())
+        got = rule(batch_size=batch_size(n))._apply(exp_neg, 0.0, 1.0, ())
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=ULP_RTOL, atol=ULP_ATOL
+        )
+
+    def test_vector_valued(self, rule, batch_size):
+        """Batching slices the leading axis, so it must survive extra trailing ones."""
+        fun = lambda x: jnp.array([jnp.sin(x), jnp.cos(x), x**2])  # noqa: E731
+        n = len(rule()._xh)
+        want = rule().integrate(fun, 0.0, 1.0, ())
+        got = rule(batch_size=batch_size(n)).integrate(fun, 0.0, 1.0, ())
+        for w, g in zip(want, got):
+            np.testing.assert_allclose(
+                np.asarray(g), np.asarray(w), rtol=ULP_RTOL, atol=ULP_ATOL
+            )
+
+    def test_nodes_per_call(self, rule, batch_size):
+        """Batching regroups the nodes, it does not add any.
+
+        The remainder is evaluated in one smaller batch rather than padded up, so no
+        batch size costs an evaluation the unbatched rule would not have made.
+        """
+        n = len(rule()._xh)
+        assert rule(batch_size=batch_size(n)).nodes_per_call == n
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+@pytest.mark.parametrize("rule", RULES)
+@pytest.mark.parametrize("batch_size", [0, -1, 2.5], ids=["zero", "negative", "float"])
+def test_bad_batch_size_rejected(rule, batch_size):
+    """A batch size that is not a positive integer is a mistake, not a default."""
+    with pytest.raises(ValueError, match="batch_size"):
+        rule(batch_size=batch_size)
