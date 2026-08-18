@@ -186,7 +186,9 @@ class TestExtrapolation:
         """Acceleration should reach near machine precision where the mesh cannot."""
         prob = PROBLEMS[i]
         kwargs = dict(epsabs=1e-12, epsrel=1e-12, max_ninter=200, full_output=True)
-        y_off, info_off = quad(prob["fun"], prob["interval"], **kwargs)
+        y_off, info_off = quad(
+            prob["fun"], prob["interval"], extrapolate=False, **kwargs
+        )
         y_on, info_on = quad(prob["fun"], prob["interval"], extrapolate=True, **kwargs)
         exact = np.asarray(prob["val"])
         err_off = np.max(np.abs(np.asarray(y_off) - exact)) / np.max(np.abs(exact))
@@ -331,6 +333,7 @@ class TestExtrapolation:
                 order=21,
                 max_ninter=200,
                 full_output=True,
+                extrapolate=False,
             )
             np.testing.assert_allclose(
                 np.asarray(y),

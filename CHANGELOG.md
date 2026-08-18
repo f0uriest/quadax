@@ -4,16 +4,19 @@ Changelog
 
 v0.3.0
 ------
-- Added optional convergence acceleration to the adaptive integrators. ``quadgk``,
-  ``quadcc``, ``quadts`` and ``adaptive_quadrature`` take a new ``extrapolate``
-  argument, defaulting to ``False``. With ``extrapolate=True`` the sequence of running
+- Added convergence acceleration to the adaptive integrators. The sequence of running
   totals is accelerated using Wynn's epsilon algorithm, which can greatly reduce the
   work needed for integrands with algebraic singularities or on infinite intervals.
-  Smooth integrands on finite domains don't need it, and the additional cost when it
-  doesn't help is small and constant. ``quadgk(..., extrapolate=True)`` is then the
-  same algorithm as ``scipy.integrate.quad``.
+  ``quadgk`` is then the same algorithm as ``scipy.integrate.quad``.
+  - ``quadgk``, ``quadcc``, ``quadts`` and ``adaptive_quadrature`` take a new
+    ``extrapolate`` argument controlling it, on by default everywhere except
+    ``quadts``. The tanh-sinh rule converges doubly exponentially, so its running
+    totals have no geometric tail for the epsilon algorithm to sum and the acceleration
+    rarely helps there.
   - The extrapolated value is only returned when its error estimate beats the one from
     the subdivision, so the accuracy is never worse than with ``extrapolate=False``.
+  - Smooth integrands on finite domains don't need it, but the additional cost when it
+    doesn't help is small and constant.
   - Derivatives are supported as usual, with either adjoint.
   - Results with ``extrapolate=False`` are unchanged.
 - Added pluggable adjoints, controlling how derivatives of a quadrature are computed.

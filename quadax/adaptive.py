@@ -67,7 +67,7 @@ def quadgk(
     order: int = 21,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
-    extrapolate: bool = False,
+    extrapolate: bool = True,
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -75,10 +75,9 @@ def quadgk(
     error estimate. Breakpoints can be specified in `interval` where integration
     difficulty may occur.
 
-    Basically the same as ``scipy.integrate.quad``, and with ``extrapolate=True`` the
-    same algorithm including the convergence acceleration. A good general purpose
-    integrator for most reasonably well behaved functions over finite or infinite
-    intervals.
+    Basically the same algorithm as ``scipy.integrate.quad``, including the convergence
+    acceleration. A good general purpose integrator for most reasonably well behaved
+    functions over finite or infinite intervals.
 
     Parameters
     ----------
@@ -114,9 +113,10 @@ def quadgk(
         should be callable.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals. Not needed for smooth integrands on finite domains,
-        but can help significantly if there are algebraic singularities or infinite
-        intervals. Additional cost is small and constant.
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the
@@ -191,7 +191,7 @@ def quadcc(
     order: int = 32,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
-    extrapolate: bool = False,
+    extrapolate: bool = True,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -236,9 +236,10 @@ def quadcc(
         should be callable.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals. Not needed for smooth integrands on finite domains,
-        but can help significantly if there are algebraic singularities or infinite
-        intervals. Additional cost is small and constant.
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the
@@ -357,9 +358,12 @@ def quadts(
         should be callable.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals. Not needed for smooth integrands on finite domains,
-        but can help significantly if there are algebraic singularities or infinite
-        intervals. Additional cost is small and constant.
+        sequence of running totals, off by default. Unlike the other adaptive routines
+        this rarely helps here: the tanh-sinh rule converges doubly exponentially, so
+        the running totals have no geometric tail for the epsilon algorithm to sum.
+        Where a tanh-sinh integration is inaccurate the limit is generally the
+        resolution of the abscissas near the endpoints, which acceleration cannot
+        recover.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the
@@ -433,7 +437,7 @@ def adaptive_quadrature(
     epsrel: ArrayLike | None = None,
     max_ninter: int = 50,
     adjoint: AbstractAdjoint = DirectAdjoint(),
-    extrapolate: bool = False,
+    extrapolate: bool = True,
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -472,9 +476,10 @@ def adaptive_quadrature(
         algorithm.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals. Not needed for smooth integrands on finite domains,
-        but can help significantly if there are algebraic singularities or infinite
-        intervals. Additional cost is small and constant.
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which is gives the exact derivative of the discretized problem, and is the

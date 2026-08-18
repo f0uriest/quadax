@@ -1,11 +1,11 @@
 """Tests for Romberg's method and its tanh-sinh variant.
 
 These live apart from the adaptive solvers because ``extrapolate`` means something
-different here. On ``romberg`` it selects Richardson extrapolation, defaults to
-``True``, and turning it off leaves plain trapezoidal quadrature rather than a tuned
-version of the same method; on the adaptive routines it is Wynn's epsilon algorithm
-over the running totals and defaults to ``False``. Romberg also takes ``divmax`` where
-they take ``max_ninter``, and rejects breakpoints outright.
+different here. On ``romberg`` it selects Richardson extrapolation, and turning it off
+leaves plain trapezoidal quadrature rather than a tuned version of the same method; on
+the adaptive routines it is Wynn's epsilon algorithm over the running totals, layered
+on a rule that converges without it. Romberg also takes ``divmax`` where they take
+``max_ninter``, and rejects breakpoints outright.
 """
 
 import jax.numpy as jnp
