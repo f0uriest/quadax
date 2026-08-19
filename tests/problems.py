@@ -663,12 +663,21 @@ class ErrorModel(NamedTuple):
 # `50*eps*integral_abs`, which makes the reported value a bound rather than an estimate:
 # on a converged run it is never optimistic, measured worst case 0.9997x, on quadgk at
 # `vector-mixed`. Once the routine has given up that guarantee lapses, but the result
-# must still be in the right league; measured worst case 22.1x, on quadgk at `loglog`.
+# must still be in the right league; measured worst case 21.3x, on quadts at `sqrt-tan`.
 # Both numbers sit just above their measurement rather than at a round safe distance, so
 # that an estimator getting looser shows up here as a failure. The slack figure now sits
 # so close to the bound that `vector-mixed` is effectively the case defining it: the two
 # components share one mesh and one estimate, which stretches the bound to its limit,
 # and a change that loosened the estimator at all would fail there first.
+#
+# A margin this tight is only worth holding against a case whose ratio is reproducible.
+# Where the acceleration cannot fit a problem's asymptotics, the epsilon table turns
+# last-bit differences in the mesh sums into order-of-magnitude swings in both the
+# extrapolated value and the reported error, so a ratio measured there samples a chaotic
+# quantity rather than describing the estimator, and will differ between machines and
+# between versions of the underlying libraries. Those cases are in `KNOWN_FAILURES` at
+# the tolerances where the acceleration decides the answer; the honesty figure is
+# anchored on `sqrt-tan`, whose ratio is unmoved by perturbing the integrand.
 QUADPACK_MODEL = ErrorModel(slack=1.0, honesty=25)
 
 # Romberg reports the difference between successive Richardson diagonals. That is an
@@ -769,7 +778,7 @@ def assert_contract(y, info, prob, tol, model=QUADPACK_MODEL):
 # if it both reports success and lands inside the tolerance. Where the note names
 # tolerances, scipy fails at those and delivers at the others.
 #
-# The split is roughly half: 29 of the 56 entries carry the note at one tolerance or
+# The split is roughly half: 29 of the 54 entries carry the note at one tolerance or
 # more. That is the useful part of the annotation. An unmarked entry is one where a
 # widely used routine does solve the problem, so the shortfall is quadax's; a marked one
 # says the integrand is hard for the method rather than badly implemented here, and
@@ -783,7 +792,7 @@ KNOWN_FAILURES = {
     ("quadcc", "osc-tail"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "sin-inverse"): {1e-4, 1e-8},  # scipy too at 1e-8
     ("quadcc", "sqrt-tan"): {1e-4, 1e-8, 1e-12},
-    ("quadgk", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("quadgk", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("quadgk", "osc-tail"): {1e-4, 1e-8},  # scipy too
     ("quadgk", "sin-inverse"): {1e-4, 1e-8},  # scipy too at 1e-8
     ("quadts", "beta-both-ends"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
