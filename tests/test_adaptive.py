@@ -835,8 +835,39 @@ print("ok")
 BATCH_SIZES = [1, 4, 7, 10**4]
 
 
-@pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])
-@pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
+# A size that leaves a partial last batch, so the two-trace path is the one taken
+# wherever a single size has to stand for the list above.
+PARTIAL_BATCH = 7
+BATCH_TOL = 1e-10
+
+
+def _run_batched(method, batch_size, i=0, extrapolate=True):
+    prob = PROBLEMS[i]
+    return method(
+        prob["fun"],
+        prob["interval"],
+        epsabs=BATCH_TOL,
+        epsrel=BATCH_TOL,
+        full_output=True,
+        extrapolate=extrapolate,
+        batch_size=batch_size,
+    )
+
+
+def _assert_same_run(got, want):
+    """Value, error estimate, status and subdivision all agree to roundoff."""
+    (y_b, info_b), (y, info) = got, want
+    np.testing.assert_allclose(
+        np.asarray(y_b), np.asarray(y), rtol=ULP_RTOL, atol=ULP_ATOL
+    )
+    np.testing.assert_allclose(
+        np.asarray(info_b.err), np.asarray(info.err), rtol=ULP_RTOL, atol=ULP_ATOL
+    )
+    assert int(info_b.status) == int(info.status)
+    assert int(info_b.info["ninter"]) == int(info.info["ninter"])
+
+
+@pytest.mark.parametrize("method", [quadgk], ids=["gk"])
 class TestBatchSize:
     """Splitting the local rule's node evaluation into batches.
 
@@ -854,68 +885,57 @@ class TestBatchSize:
     scheduling, and the tests below are what pins it to that.
     """
 
-    TOL = 1e-10
-
-    @pytest.mark.parametrize("i", [0, 17])
-    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
-    def test_run_is_unchanged(self, method, batch_size, i, extrapolate):
+    @pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
+    def test_run_is_unchanged(self, method, batch_size):
         """Value, error estimate, status and subdivision all come out identical."""
-        prob = PROBLEMS[i]
-        run = lambda bs: method(  # noqa: E731
-            prob["fun"],
-            prob["interval"],
-            epsabs=self.TOL,
-            epsrel=self.TOL,
-            full_output=True,
-            extrapolate=extrapolate,
-            batch_size=bs,
-        )
-        y, info = run(None)
-        y_b, info_b = run(batch_size)
-        np.testing.assert_allclose(
-            np.asarray(y_b), np.asarray(y), rtol=ULP_RTOL, atol=ULP_ATOL
-        )
-        np.testing.assert_allclose(
-            np.asarray(info_b.err), np.asarray(info.err), rtol=ULP_RTOL, atol=ULP_ATOL
-        )
-        assert int(info_b.status) == int(info.status)
-        assert int(info_b.info["ninter"]) == int(info.info["ninter"])
+        _assert_same_run(_run_batched(method, batch_size), _run_batched(method, None))
 
     @pytest.mark.usefixtures("quiet_tanhsinh")
     @pytest.mark.parametrize("dtype", real_dtypes)
-    def test_dtypes(self, method, batch_size, dtype):
-        """Padding must not disturb the working precision.
+    def test_dtypes(self, method, dtype):
+        """Batching must not disturb the working precision.
 
-        The fill is taken from the abscissae themselves, so it carries their dtype and
-        cannot promote the batch; a literal would.
+        Slicing and rejoining the abscissae carries their dtype through, so the batched
+        run is asked for its answer in the same precision the unbatched one is.
         """
         y, info = method(
             exp_neg,
             jnp.array([0.0, 1.0], dtype),
             epsabs=jnp.array(1e-3, dtype),
             epsrel=jnp.array(1e-3, dtype),
-            batch_size=batch_size,
+            batch_size=PARTIAL_BATCH,
         )
         assert y.dtype == dtype
         tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
         np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
 
+    @pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
     def test_neval_does_not_move(self, method, batch_size):
         """Batching costs no extra evaluations, so the reported count is unchanged.
 
         The node count is fixed when the rule is built, so a batch size that does not
         divide it leaves a smaller final batch rather than a padded one. This is the
-        test that would fail if the remainder were ever padded instead.
+        test that would fail if the remainder were ever padded instead, and it is the
+        one that would catch ``neval`` being scaled by the order where the rule's node
+        count is something else.
         """
-        prob = PROBLEMS[0]
-        run = lambda bs: method(  # noqa: E731
-            prob["fun"],
-            prob["interval"],
-            epsabs=self.TOL,
-            epsrel=self.TOL,
-            batch_size=bs,
-        )[1]
+        run = lambda bs: _run_batched(method, bs)[1]  # noqa: E731
         assert int(run(batch_size).neval) == int(run(None).neval)
+
+
+@pytest.mark.parametrize("i", [0, 17], ids=str)
+@pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+def test_batch_size_is_independent_of_extrapolation(i, extrapolate):
+    """The acceleration reads the sequence of results, not how each was evaluated.
+
+    So it has nothing to interact with, on an easy problem or on one whose tail the
+    extrapolation is what resolves. Run through one routine, since the subdivision loop
+    and the acceleration around it are shared by all three.
+    """
+    _assert_same_run(
+        _run_batched(quadgk, PARTIAL_BATCH, i, extrapolate),
+        _run_batched(quadgk, None, i, extrapolate),
+    )
 
 
 @pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])

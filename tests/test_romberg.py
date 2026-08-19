@@ -195,6 +195,9 @@ class TestBatchSize:
 
     DIVMAX = 8
     BATCH_SIZES = [1, 3, 8, 16, 64]
+    # A size that pads every level below the deepest, so the padded path is the one
+    # taken wherever a single size has to stand for the list.
+    PADS = 3
 
     def _run(self, method, i, batch_size, divmax=None):
         """Run to a fixed depth, so every batch size does the same amount of work.
@@ -231,9 +234,7 @@ class TestBatchSize:
             total += -(-(2**level) // b) * b
         raise AssertionError(f"neval={int(info.neval)} matches no depth at b={b}")
 
-    @pytest.mark.parametrize("i", SMOOTH_FINITE, ids=problem_id)
-    @pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
-    def test_matches_the_serial_run(self, method, i, batch_size):
+    def _assert_matches_serial(self, method, i, batch_size):
         """At the same depth, batching changes only the rounding of the sums.
 
         The trapezoidal column is compared as well as the value, since it is what the
@@ -259,8 +260,25 @@ class TestBatchSize:
             columns[0][:depth], columns[1][:depth], rtol=1e-11, atol=1e-13
         )
 
+    @pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=str)
+    def test_matches_the_serial_run(self, method, batch_size):
+        """Across the batch sizes, from one point at a time to more than a level.
+
+        The largest is above the deepest level's point count, so the clip fires.
+        """
+        self._assert_matches_serial(method, SMOOTH_FINITE[0], batch_size)
+
     @pytest.mark.parametrize("i", SMOOTH_FINITE, ids=problem_id)
-    def test_serial_is_the_default(self, method, i):
+    def test_matches_the_serial_run_over_integrands(self, method, i):
+        """And across integrands, since what batching reassociates is their sum.
+
+        One batch size stands for the list here: which points land in which batch is a
+        property of the level sizes, which the integrand has no say in, so the integrand
+        varies against the size that pads rather than against all of them.
+        """
+        self._assert_matches_serial(method, i, self.PADS)
+
+    def test_serial_is_the_default(self, method):
         """``batch_size=None`` and ``batch_size=1`` are the same computation.
 
         One point per batch leaves the mask always true and the sum over a single row,
@@ -268,8 +286,8 @@ class TestBatchSize:
         quadrature accuracy. Not bitwise: the batched form still evaluates the integrand
         under a ``vmap`` of width one, and XLA is free to fuse that differently.
         """
-        want, _ = self._run(method, i, None)
-        got, _ = self._run(method, i, 1)
+        want, _ = self._run(method, SMOOTH_FINITE[0], None)
+        got, _ = self._run(method, SMOOTH_FINITE[0], 1)
         np.testing.assert_allclose(
             np.asarray(got), np.asarray(want), rtol=ULP_RTOL, atol=ULP_ATOL
         )
