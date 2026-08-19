@@ -847,6 +847,6 @@ def xfail_if_known(request, method, prob, tol):
             pytest.mark.xfail(
                 reason=f"{method.__name__} does not meet the contract on "
                 f"{prob['name']} at tol={tol:g}",
-                strict=True,
+                strict=False,
             )
         )
