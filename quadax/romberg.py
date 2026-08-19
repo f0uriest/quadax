@@ -228,12 +228,15 @@ def _romberg(
     return y, out
 
 
-def _build_tanhsinh(interval, args, consts, *, f_conv):
-    """Build the integrand for ``rombergts``: tanh-sinh, then map to the reference."""
+def _build_tanhsinh(interval, args, consts, *, f_conv, safe=False):
+    """Build the integrand for ``rombergts``: tanh-sinh, then map to the reference.
+
+    See ``build_integrand`` for what ``safe`` buys and what it costs.
+    """
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_t, interval_t = tanhsinh_transform(fun, interval)
     fun_m, interval_m = map_interval(fun_t, interval_t)
-    return wrap_func(fun_m, (), interval_m.dtype), interval_m
+    return wrap_func(fun_m, (), interval_m.dtype, safe=safe), interval_m
 
 
 def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype):
