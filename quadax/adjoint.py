@@ -235,13 +235,14 @@ def _checkpointed(bodyfun, checkpoint):
     """Recompute a scan body during the backward pass rather than storing it.
 
     Without this reverse mode keeps the integrand's value at every node of every
-    sub-interval, which dominates its memory; recomputing them is nearly free here.
+    sub-interval, which dominates its memory; recomputing them trades a second pass over
+    the integrand for that storage.
     """
     return jax.checkpoint(bodyfun) if checkpoint else bodyfun
 
 
 def _quad_on_mesh(
-    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Apply the local rule on a fixed subdivision and sum the contributions."""
     del kwargs
@@ -257,7 +258,7 @@ def _quad_on_mesh(
 
 
 def _values_on_mesh(
-    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Apply the local rule on a fixed subdivision, keeping the contributions separate.
 
@@ -280,7 +281,7 @@ def _frozen_mesh(state):
 
 
 def _mesh_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Quadrature on the subdivision implied by `frozen`, as a function of interval."""
     a_arr, b_arr = _rebuild_mesh(interval, frozen)
@@ -333,7 +334,7 @@ def _frozen_replay(state):
 
 
 def _replay_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Re-run an accelerated quadrature on the decisions the primal settled on.
 
@@ -539,13 +540,11 @@ class DirectAdjoint(AbstractAdjoint):
     ----------
     checkpoint : bool
         Whether to recompute the quadrature on each block of sub-intervals during the
-        backward pass rather than storing it. Without it reverse mode keeps the
-        integrand's value at every node of every sub-interval, which dominates its
-        memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by around 3x at the default budget and by 30x or more
-        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
-        default. Turning it off has not been found to pay for itself even on integrands
-        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
+        backward pass rather than storing it, off by default. Without it reverse mode
+        keeps the integrand's value at every node of every sub-interval, which dominates
+        its memory and grows with ``max_ninter`` however few sub-intervals are really
+        used. Turning checkpoint on can reduce memory by 3x to 30x depending on how
+        large ``max_ninter`` is at the expense of additional integrand evaluations. No
         effect in forward mode.
     chunk_size : int
         How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
@@ -558,7 +557,7 @@ class DirectAdjoint(AbstractAdjoint):
 
     """
 
-    checkpoint: bool = True
+    checkpoint: bool = False
     chunk_size: int = _CHUNK
 
     def __post_init__(self):
@@ -914,14 +913,14 @@ class LeibnizAdjoint(AbstractAdjoint):
     ----------
     checkpoint : bool
         Whether to recompute the quadrature on each block of sub-intervals during the
-        backward pass rather than storing it. Without it reverse mode keeps the
-        integrand's value at every node of every sub-interval, which dominates its
-        memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by around 3x at the default budget and by 30x or more
-        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
-        default. Turning it off has not been found to pay for itself even on integrands
-        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
-        effect in forward mode.
+        backward pass rather than storing it, off by default. The backward pass here is
+        an error-controlled solve of the adjoint integrand rather than a replay of the
+        primal, so nothing is kept from the primal solve to checkpoint away. The option
+        reaches only the fixed-mesh pass that supplies the derivative with respect to
+        the interval: it is exactly a no-op unless the limits of integration are being
+        differentiated, and even then it saves that one pass' worth of integrand values
+        rather than the whole backward pass, so it matters much less than it does for
+        :class:`DirectAdjoint`. No effect in forward mode.
     chunk_size : int
         How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
         within a chunk, ``scan`` across chunks. Trades peak memory against speed, and is
@@ -931,12 +930,12 @@ class LeibnizAdjoint(AbstractAdjoint):
         time. Lower it when a derivative runs out of memory and ``checkpoint`` was not
         enough; raise it when the subdivision is small and the scan is pure overhead.
 
-        Only derivatives with respect to the interval of integration is taken on a
+        Only derivatives with respect to the interval of integration are taken on a
         frozen subdivision here, so this has less effect than it does for
         :class:`DirectAdjoint`.
     """
 
-    checkpoint: bool = True
+    checkpoint: bool = False
     chunk_size: int = _CHUNK
 
     def __post_init__(self):
