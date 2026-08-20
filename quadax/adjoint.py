@@ -1,7 +1,7 @@
 """Adjoint methods controlling how derivatives of quadrature are computed."""
 
 import abc
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import NamedTuple
 
@@ -17,7 +17,13 @@ from jax.interpreters import ad, batching, mlir
 
 from . import _acceleration
 from .fixed_order import AbstractQuadratureRule
-from .utils import _real_dtype, check_size, map_interval, tree_where, wrap_func
+from .utils import (
+    _real_dtype,
+    check_size,
+    map_interval,
+    tree_where,
+    wrap_func,
+)
 
 
 class _ConvertedFunction(eqx.Module):
@@ -49,11 +55,17 @@ def closure_convert(fun, args, xtype):
     return f_conv, tuple(consts)
 
 
-def build_integrand(interval, args, consts, *, f_conv):
-    """Map the integrand to the reference domain and wrap it for vectorization."""
+def build_integrand(interval, args, consts, *, f_conv, safe=False):
+    """Map the integrand to the reference domain and wrap it for vectorization.
+
+    ``safe`` asks for an integrand whose inf/nan mask survives being transposed. It
+    costs a second evaluation, so it is requested only for the evaluations that are
+    actually differentiated, not for the primal solve which, for every adjoint that
+    carries a custom rule, is not differentiated at all.
+    """
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_mapped, interval_t = map_interval(fun, interval)
-    return wrap_func(fun_mapped, (), interval_t.dtype), interval_t
+    return wrap_func(fun_mapped, (), interval_t.dtype, safe=safe), interval_t
 
 
 class QuadratureOps(NamedTuple):
@@ -66,8 +78,10 @@ class QuadratureOps(NamedTuple):
     Parameters
     ----------
     build : callable
-        ``build(interval, args, consts) -> (vfunc, interval_t)``. Maps the integrand to
-        the reference domain and wraps it for vectorized evaluation.
+        ``build(interval, args, consts, safe=False) -> (vfunc, interval_t)``. Maps the
+        integrand to the reference domain and wraps it for vectorized evaluation.
+        ``safe`` asks for an inf/nan mask that survives reverse mode, which the
+        adjoints request for the evaluations they differentiate.
     solve : callable
         ``solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs) -> (y, state)``. Runs
         the full (adaptive) quadrature.
@@ -235,13 +249,14 @@ def _checkpointed(bodyfun, checkpoint):
     """Recompute a scan body during the backward pass rather than storing it.
 
     Without this reverse mode keeps the integrand's value at every node of every
-    sub-interval, which dominates its memory; recomputing them is nearly free here.
+    sub-interval, which dominates its memory; recomputing them trades a second pass over
+    the integrand for that storage.
     """
     return jax.checkpoint(bodyfun) if checkpoint else bodyfun
 
 
 def _quad_on_mesh(
-    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Apply the local rule on a fixed subdivision and sum the contributions."""
     del kwargs
@@ -257,7 +272,7 @@ def _quad_on_mesh(
 
 
 def _values_on_mesh(
-    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Apply the local rule on a fixed subdivision, keeping the contributions separate.
 
@@ -280,7 +295,7 @@ def _frozen_mesh(state):
 
 
 def _mesh_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Quadrature on the subdivision implied by `frozen`, as a function of interval."""
     a_arr, b_arr = _rebuild_mesh(interval, frozen)
@@ -333,7 +348,7 @@ def _frozen_replay(state):
 
 
 def _replay_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
 ):
     """Re-run an accelerated quadrature on the decisions the primal settled on.
 
@@ -496,7 +511,7 @@ class AbstractAdjoint(eqx.Module):
 class _UnrolledDirectAdjoint(AbstractAdjoint):
     """Differentiate by unrolling the quadrature loop, with no custom rule.
 
-    This is the original quadax behaviour. It is kept, private and unexported, as the
+    This is the original quadax behavior. It is kept, private and unexported, as the
     reference implementation that :class:`DirectAdjoint` is tested against. It is
     correct but expensive: reverse mode must store residuals for every iteration of the
     loop, including iterations that did no work.
@@ -504,7 +519,7 @@ class _UnrolledDirectAdjoint(AbstractAdjoint):
 
     def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
         """Evaluate the quadrature, differentiating straight through the loop."""
-        vfunc, interval_t = ops.build(interval, args, consts)
+        vfunc, interval_t = ops.build(interval, args, consts, safe=True)
         return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
 
 
@@ -539,13 +554,11 @@ class DirectAdjoint(AbstractAdjoint):
     ----------
     checkpoint : bool
         Whether to recompute the quadrature on each block of sub-intervals during the
-        backward pass rather than storing it. Without it reverse mode keeps the
-        integrand's value at every node of every sub-interval, which dominates its
-        memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by around 3x at the default budget and by 30x or more
-        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
-        default. Turning it off has not been found to pay for itself even on integrands
-        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
+        backward pass rather than storing it, off by default. Without it reverse mode
+        keeps the integrand's value at every node of every sub-interval, which dominates
+        its memory and grows with ``max_ninter`` however few sub-intervals are really
+        used. Turning checkpoint on can reduce memory by 3x to 30x depending on how
+        large ``max_ninter`` is at the expense of additional integrand evaluations. No
         effect in forward mode.
     chunk_size : int
         How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
@@ -556,9 +569,56 @@ class DirectAdjoint(AbstractAdjoint):
         time. Lower it when a derivative runs out of memory and ``checkpoint`` was not
         enough; raise it when the subdivision is small and the scan is pure overhead.
 
+
+    Notes
+    -----
+    When differentiating a moving jump or singularity, mark the jump or singularity
+    with a breakpoint, and build that breakpoint from the same parameter that positions
+    the feature. Marking a feature that is genuinely there is never worse than leaving
+    it unmarked, and for derivatives it is frequently the difference between a correct
+    answer and a silently wrong one. The one way marking can hurt is marking something
+    that is not there, which is the third case below.
+
+    Differentiating a jump gives a delta, which no quadrature of the integrand's tangent
+    can represent, so it is recovered from the motion of the breakpoint instead, and
+    that works only when the breakpoint moves with the discontinuity::
+
+        step = lambda t, z: jnp.where(t > z[0], 1.0, 0.0)   # jumps at t = z[0]
+
+        # correct: one parameter `s` positions both the jump and the breakpoint
+        f = lambda s: quadgk(step, jnp.array([-1.0, s, 1.0]), (jnp.array([s]),))[0]
+        jax.grad(f)(0.3)            # -1.0
+
+    Two versions that look equivalent are not. Both return the same primal *value*,
+    0.7, and both give zero where the derivative is ``-1``::
+
+        # WRONG: the jump is unmarked, so nothing tracks it
+        f = lambda s: quadgk(step, jnp.array([-1.0, 1.0]), (jnp.array([s]),))[0]
+
+        # WRONG: marked, but with a constant, which carries no derivative. Tempting,
+        # because it does help the primal value: it cuts the subdivision from 13
+        # sub-intervals to 2.
+        f = lambda s: quadgk(step, jnp.array([-1.0, 0.3, 1.0]), (jnp.array([s]),))[0]
+
+    Splitting the feature across two parameters is what the requirement rules out. The
+    derivative with respect to a breakpoint on its own is not a well posed question:
+    the integral is the same whatever the mesh is cut at, so the breakpoint only means
+    anything in combination with the integrand it is marking. Ask for it anyway, by
+    differentiating with respect to ``[breakpoint, jump location]`` at ``[0.3, 0.3]``,
+    and the answer is ``[-1, 0]``. The total over the two is right, and how it is
+    divided between them is an artifact of having written one feature as two
+    parameters, not a property of the quadrature.
+
+    A moving *singularity* needs the same treatment, for the same reason: unmarked, it
+    slides across a subdivision that does not move with it.
+
+    Only a feature that is steep but *continuous* needs none of this: a sharp ``tanh``
+    differentiates correctly unmarked under either adjoint. Marking one anyway is
+    harmless, the breakpoint then only helps the subdivision, and contributes nothing
+    to the derivative since the integrand has the same limit from both sides of it.
     """
 
-    checkpoint: bool = True
+    checkpoint: bool = False
     chunk_size: int = _CHUNK
 
     def __post_init__(self):
@@ -582,7 +642,7 @@ class DirectAdjoint(AbstractAdjoint):
                     ops=ops,
                     freeze=True,
                 )
-            vfunc, interval_t = ops.build(interval, args, consts)
+            vfunc, interval_t = ops.build(interval, args, consts, safe=True)
             return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
         return _direct(rule, interval, args, consts, epsabs, epsrel, kwargs, ops=ops)
 
@@ -611,7 +671,7 @@ def _direct_jvp(primals, tangents, *, ops):
 
     def fixed_mesh(dyn_):
         rule_, interval_, args_, consts_, _, _, kwargs_ = eqx.combine(dyn_, static)
-        vfunc, interval_t = ops.build(interval_, args_, consts_)
+        vfunc, interval_t = ops.build(interval_, args_, consts_, safe=True)
         if not ops.mesh_is_primal:
             # Convergence acceleration may have returned an extrapolated value instead
             # of the mesh sum, so the mesh alone is not what was differentiated. The
@@ -679,6 +739,116 @@ def _run_solve(ops, rule, integrand, interval_t, epsabs, epsrel, kwargs, frozen)
     return ops.frozen_solve(rule, integrand, interval_t, frozen, kwargs)
 
 
+# The ratio between successive probe offsets used to read a breakpoint's one-sided
+# limits, and how closely two estimates of one have to agree to be believed.
+#
+# The ratio only has to be wide enough that an unbounded integrand changes visibly
+# across it: inverse-square-root decay over a factor of 16 quarters the value, which no
+# tolerance below would accept. The tolerance is an agreement test between two estimates
+# that are equal in exact arithmetic whenever the limit exists, so it only has to clear
+# rounding noise, and the estimates cancel the integrand's slope rather than tolerating
+# it, so it does not have to make room for steepness. That last point is what keeps the
+# constants from implying a largest believable slope: tolerating the slope instead would
+# reject a genuine jump sitting on one of about 1e9 in double precision, and on one of
+# 100 in single.
+#
+# What is left is a precision floor rather than a modelling choice. Once the integrand's
+# values are large enough that rounding them swamps the jump, the estimates stop
+# agreeing and the jump is dropped rather than guessed at, which needs a slope beyond
+# about 1e12 in double precision for a jump of order one, and about 1e4 in single.
+_JUMP_RATIO = 16
+_JUMP_RTOL = 1e-3
+
+
+def _side_limit(probes: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
+    """A one-sided limit from three probes, and whether it exists.
+
+    ``probes`` are the integrand at three separations from a breakpoint, each ``r``
+    times the last. Close to the breakpoint the integrand is its limit plus a term
+    linear in the separation, from its slope, so the Richardson combination of two
+    probes cancels the slope and leaves the limit. Two such combinations are formed and
+    they agree whenever that model holds, however steep the slope. Where the integrand
+    is unbounded instead they disagree, which is the test for the limit existing at all.
+    """
+    v1, v2, v3 = probes
+    r = _JUMP_RATIO
+    first = (r * v1 - v2) / (r - 1)
+    second = (r * v2 - v3) / (r - 1)
+    scale = jnp.maximum(jnp.abs(first), jnp.abs(second))
+    converged = (
+        jnp.isfinite(first)
+        & jnp.isfinite(second)
+        & (jnp.abs(first - second) <= _JUMP_RTOL * scale)
+    )
+    return first, converged
+
+
+def _breakpoint_jumps(vfunc, interval_t):
+    """The integrand's jump across each interior breakpoint, or zero where it has none.
+
+    Moving a breakpoint moves the boundary between two adjoining sub-integrals, which
+    contributes ``f(c-) - f(c+)`` per unit of motion. That is zero unless the integrand
+    jumps at ``c``, and a jump the integrand defines by a comparison on the abscissa
+    resolves within one ulp of it, so the one-sided values are read a few ulp either
+    side.
+
+    Reading them once is not enough. An integrand *unbounded* at ``c`` makes both values
+    enormous, and their difference is then the asymmetry between the two sides amplified
+    by the singularity rather than a jump: ``2/sqrt|t - c|`` on one side against
+    ``1/sqrt|t - c|`` on the other gives 1e8 where the answer is zero. A steep but
+    perfectly ordinary slope contaminates the reading too, in proportion to how far out
+    it was taken.
+
+    So the jump is estimated twice, by ``_side_limit``, in a way that cancels the
+    slope exactly and leaves a singular contribution behind, and it is believed only
+    when the two estimates agree. Everything continuous comes out at zero, a genuine
+    jump survives however steep the integrand is around it, and a jump superposed on a
+    symmetric singularity survives as well, that singularity contributing equally to
+    both sides and cancelling on its own.
+
+    The precision of the arithmetic is the floor: once the integrand's values are large
+    enough that rounding them swamps the jump, the estimates stop agreeing and the jump
+    is dropped rather than guessed at. In double precision that needs a slope above
+    about 1e12 with a jump of order one.
+
+    Returns ``None`` when there are no interior breakpoints, which is a static property
+    of the interval.
+    """
+    c = interval_t[1:-1]
+    if c.shape[0] == 0:
+        return None
+    # The probe width is one ulp of the breakpoint, computed arithmetically rather than
+    # with `nextafter`. Two reasons: `nextafter` has no differentiation rule in JAX, so
+    # it breaks second derivatives with respect to the limits outright, the primal still
+    # having to be traced through it; and it steps by the true spacing, which is
+    # asymmetric at a binade boundary, where the ulp below is half the ulp above. The
+    # span floors it so that a breakpoint at zero still gets an offset on the scale of
+    # the domain.
+    #
+    # Frozen: the width of a probe that exists to be infinitesimal is a property of the
+    # arithmetic, not of the problem, and carries no meaningful derivative. The probe
+    # points are still built from ``c``, so they move with the breakpoint and the jump
+    # keeps its dependence on where the breakpoint sits.
+    eps = float(jnp.finfo(c.dtype).eps)
+    span = jnp.abs(interval_t[-1] - interval_t[0])
+    h = jax.lax.stop_gradient(eps * jnp.maximum(jnp.abs(c), span))
+    offsets = (1, _JUMP_RATIO, _JUMP_RATIO**2)
+    below = [vfunc(c - m * h) for m in offsets]
+    above = [vfunc(c + m * h) for m in offsets]
+    left, left_ok = _side_limit(below)
+    right, right_ok = _side_limit(above)
+    # A side with no limit contributes nothing, which is what a singularity pinned to an
+    # outer limit does as well: the solve returns the finite part and the boundary term
+    # that was regularized away must not be added back. The other side still counts, so
+    # the two are taken separately rather than as one difference.
+    separate = jnp.where(left_ok, left, 0.0) - jnp.where(right_ok, right, 0.0)
+    # Only when *neither* side has a limit is the difference the sole hope: a jump
+    # sitting on a symmetric singularity has unbounded one-sided values whose singular
+    # parts are equal, so they cancel in the difference and leave the jump behind.
+    joint, joint_ok = _side_limit([lo - hi for lo, hi in zip(below, above)])
+    return jnp.where(left_ok | right_ok, separate, jnp.where(joint_ok, joint, 0.0))
+
+
 def _endpoint_term(vfunc, interval_t, *, ops, static):
     """The boundary half of the Leibniz rule, as a function of the primals.
 
@@ -688,11 +858,24 @@ def _endpoint_term(vfunc, interval_t, *, ops, static):
     (that is, whatever ends up in ``interval_t`` rather than folded into the integrand)
     is missing from it and has to be added back.
 
-    Whether anything survives depends on the mapping. ``tanhsinh_transform`` and the
-    mappings for an infinite interval both hand back a fixed domain, so the term is
-    identically zero and costs only two evaluations of the integrand. A finite interval
-    left alone by ``map_interval`` is the case that needs it: the mapping is the
+    An interior breakpoint is the same statement one level down: it is the upper limit
+    of the sub-integral below it and the lower limit of the one above, so moving it
+    contributes ``(f(c-) - f(c+)) dc``, which is zero unless the integrand jumps there.
+    Summed over the whole interval the sub-integrals telescope and only the two outer
+    limits and the jumps survive. See :func:`_breakpoint_jumps` for the one-sided
+    values.
+
+    Whether the outer terms survive depends on the mapping. ``tanhsinh_transform`` and
+    the mappings for an infinite interval both hand back a fixed domain, so they are
+    identically zero and cost only two evaluations of the integrand. A finite interval
+    left alone by ``map_interval`` is the case that needs them: the mapping is the
     identity, so the limits are exactly where the whole derivative lives.
+
+    A singularity pinned to a limit is why the outer values are read *at* the limit
+    rather than one ulp inside it, unlike the breakpoints. The value comes back
+    non-finite, the inf/nan mask sends it to zero, and zero is right: the divergent
+    boundary term has already been regularized away by the solve, which returns the
+    finite part, so adding a large stand-in for the infinity would double-count it.
 
     The integrand is held at its primal value here, so only the limits are
     differentiated and the term comes out as the ``f(b) db - f(a) da`` above. Whatever
@@ -700,11 +883,15 @@ def _endpoint_term(vfunc, interval_t, *, ops, static):
     including the reordering ``map_interval`` does for reversed ones) is left to AD.
     """
     lo, hi = vfunc(interval_t[0]), vfunc(interval_t[-1])
+    jumps = _breakpoint_jumps(vfunc, interval_t)
 
     def term(dyn_):
         _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
         _, limits = ops.build(interval, args, consts)
-        return hi * limits[-1] - lo * limits[0]
+        out = hi * limits[-1] - lo * limits[0]
+        if jumps is not None:
+            out = out + jnp.tensordot(limits[1:-1], jumps, axes=(0, 0))
+        return out
 
     return term
 
@@ -718,7 +905,7 @@ def _integrand_at(dyn_, *, t, ops, static):
     cotangent back.
     """
     _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
-    vf, _ = ops.build(interval, args, consts)
+    vf, _ = ops.build(interval, args, consts, safe=True)
     return vf(t)
 
 
@@ -741,16 +928,6 @@ def _without_interval(tree):
     return (tree[0], jax.tree.map(jnp.zeros_like, tree[1]), *tree[2:])
 
 
-def _mesh_quad(ops, rule, args, consts, frozen, kwargs):
-    """Quadrature on the frozen discretization, as a function of the limits alone."""
-
-    def quad(interval):
-        vfunc, interval_t = ops.build(interval, args, consts)
-        return ops.frozen_solve(rule, vfunc, interval_t, frozen, kwargs)
-
-    return quad
-
-
 def _leibniz_impl(
     *flat,
     ops,
@@ -760,7 +937,6 @@ def _leibniz_impl(
     kwargs_items,
     frozen_treedef,
     freeze,
-    split,
     interval_from_solve,
     out_sds,
 ):
@@ -773,40 +949,23 @@ def _leibniz_impl(
     vfunc, interval_t = ops.build(interval, args, consts)
 
     del out_sds
-    # The split below rebuilds the subdivision, which only exists (and is only reverse
-    # differentiable) for the adaptive routines. Romberg has neither a subdivision nor
-    # breakpoints, so there is nothing to split and its level loop cannot be transposed.
-    if freeze or not split:
-        y_dot = _run_solve(
-            ops,
-            rule,
-            _tangent_integrand(dyn, dyn_t, ops=ops, static=static),
-            interval_t,
-            epsabs,
-            epsrel,
-            kwargs,
-            frozen if freeze else None,
-        )
-        if interval_from_solve:
-            # Integrating the tangent between fixed limits misses the boundary term
-            # whenever the limits themselves carry a derivative, which is exactly when
-            # the solve is the thing that has to produce it.
-            term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
-            y_dot = y_dot + jax.jvp(term, (dyn,), (dyn_t,))[1]
-        return y_dot
-
-    # Split the tangent. Derivatives with respect to the *limits* have to go through the
-    # subdivision, because a breakpoint sitting on a discontinuity contributes a jump
-    # term that no amount of integrating a derivative can see: in mapped coordinates the
-    # jump moves relative to a fixed mesh, and quadrature of df/dx misses the delta.
-    # Rebuilding the mesh from the limits tracks the breakpoint and recovers it, exactly
-    # as DirectAdjoint does. Everything else keeps the error-controlled solve.
-    dvfunc_rest = _tangent_integrand(
-        dyn, _without_interval(dyn_t), ops=ops, static=static
+    y_dot = _run_solve(
+        ops,
+        rule,
+        _tangent_integrand(dyn, dyn_t, ops=ops, static=static),
+        interval_t,
+        epsabs,
+        epsrel,
+        kwargs,
+        frozen if freeze else None,
     )
-    y_dot = ops.solve(rule, dvfunc_rest, interval_t, epsabs, epsrel, kwargs)[0]
-    mesh_quad = _mesh_quad(ops, rule, args, consts, frozen, kwargs)
-    return y_dot + jax.jvp(mesh_quad, (interval,), (dyn_t[1],))[1]
+    if interval_from_solve:
+        # Integrating the tangent between fixed limits misses the boundary term whenever
+        # the limits themselves carry a derivative, which is exactly when the solve is
+        # the thing that has to produce it.
+        term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
+        y_dot = y_dot + jax.jvp(term, (dyn,), (dyn_t,))[1]
+    return y_dot
 
 
 def _leibniz_transpose(
@@ -819,7 +978,6 @@ def _leibniz_transpose(
     kwargs_items,
     frozen_treedef,
     freeze,
-    split,
     interval_from_solve,
     out_sds,
 ):
@@ -842,9 +1000,8 @@ def _leibniz_transpose(
         _, vjp = jax.vjp(at_t, dyn)
         ct_dyn = vjp(ct)[0]
         if not interval_from_solve:
-            # Drop the limits' components before they reach the solve. Their cotangent
-            # is either supplied by the rebuilt subdivision below or not wanted at all,
-            # so integrating them buys nothing, and it costs, because they are the
+            # Drop the limits' components before they reach the solve. Nobody asked for
+            # them, so integrating them buys nothing, and it costs, because they are the
             # components that misbehave: differentiating an integral whose integrand is
             # unbounded at a limit gives an unbounded adjoint integrand, and the error
             # control is driven by `rule.norm` over the whole raveled vector, so one
@@ -867,13 +1024,7 @@ def _leibniz_transpose(
         frozen if freeze else None,
     )
     ct_tree = unravel(flat_ct)
-    if split:
-        # the limits' cotangent comes from the rebuilt subdivision instead, so that a
-        # breakpoint on a discontinuity picks up its jump term (see _leibniz_impl)
-        mesh_quad = _mesh_quad(ops, rule, args, consts, frozen, kwargs)
-        ct_iv = jax.vjp(mesh_quad, interval)[1](ct)[0]
-        ct_tree = (ct_tree[0], ct_iv, *ct_tree[2:])
-    elif interval_from_solve:
+    if interval_from_solve:
         # The adjoint integrand carries the limits' cotangent only through the
         # integrand, so the boundary term is added here, as in forward mode.
         term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
@@ -909,48 +1060,56 @@ class LeibnizAdjoint(AbstractAdjoint):
     Because each mode picks its own subdivision, forward and reverse results agree to
     quadrature accuracy rather than exactly.
 
-    Derivatives with respect to the integration limits are taken on the subdivision the
-    primal solve settled on, rather than from the error-controlled solve. In mapped
-    coordinates a moving breakpoint slides a discontinuity across a fixed mesh, and
-    integrating ``df/dx`` cannot represent the resulting delta; rebuilding the mesh from
-    the limits tracks the breakpoint and recovers the jump term. Only the derivative
-    with respect to ``args`` gets its own error control.
+    Notes
+    -----
+    When differentiating a moving jump or singularity, mark the jump or singularity
+    with a breakpoint, and build that breakpoint from the same parameter that positions
+    the feature. Marking a feature that is genuinely there is never worse than leaving
+    it unmarked, and for derivatives it is frequently the difference between a correct
+    answer and a silently wrong one. The one way marking can hurt is marking something
+    that is not there, which is the third case below.
 
-    Parameters
-    ----------
-    checkpoint : bool
-        Whether to recompute the quadrature on each block of sub-intervals during the
-        backward pass rather than storing it. Without it reverse mode keeps the
-        integrand's value at every node of every sub-interval, which dominates its
-        memory and grows with ``max_ninter`` however few sub-intervals are really used;
-        recomputing cuts that by around 3x at the default budget and by 30x or more
-        when ``max_ninter`` is generous, at no measured cost in speed, so it is on by
-        default. Turning it off has not been found to pay for itself even on integrands
-        costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
-        effect in forward mode.
-    chunk_size : int
-        How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
-        within a chunk, ``scan`` across chunks. Trades peak memory against speed, and is
-        the reverse-mode counterpart of the quadrature routines' ``batch_size``, which
-        bounds the work *within* one sub-interval. The two multiply, so a gradient
-        evaluates the integrand at up to ``chunk_size`` times ``batch_size`` points at a
-        time. Lower it when a derivative runs out of memory and ``checkpoint`` was not
-        enough; raise it when the subdivision is small and the scan is pure overhead.
+    Differentiating a jump gives a delta, which no quadrature of the integrand's tangent
+    can represent, so it is recovered from the motion of the breakpoint instead, and
+    that works only when the breakpoint moves with the discontinuity::
 
-        Only derivatives with respect to the interval of integration is taken on a
-        frozen subdivision here, so this has less effect than it does for
-        :class:`DirectAdjoint`.
+        step = lambda t, z: jnp.where(t > z[0], 1.0, 0.0)   # jumps at t = z[0]
+
+        # correct: one parameter `s` positions both the jump and the breakpoint
+        f = lambda s: quadgk(step, jnp.array([-1.0, s, 1.0]), (jnp.array([s]),))[0]
+        jax.grad(f)(0.3)            # -1.0
+
+    Two versions that look equivalent are not. Both return the same primal *value*,
+    0.7, and both give zero where the derivative is ``-1``::
+
+        # WRONG: the jump is unmarked, so nothing tracks it
+        f = lambda s: quadgk(step, jnp.array([-1.0, 1.0]), (jnp.array([s]),))[0]
+
+        # WRONG: marked, but with a constant, which carries no derivative. Tempting,
+        # because it does help the primal value: it cuts the subdivision from 13
+        # sub-intervals to 2.
+        f = lambda s: quadgk(step, jnp.array([-1.0, 0.3, 1.0]), (jnp.array([s]),))[0]
+
+    Splitting the feature across two parameters is what the requirement rules out. The
+    derivative with respect to a breakpoint on its own is not a well posed question:
+    the integral is the same whatever the mesh is cut at, so the breakpoint only means
+    anything in combination with the integrand it is marking. Ask for it anyway, by
+    differentiating with respect to ``[breakpoint, jump location]`` at ``[0.3, 0.3]``,
+    and the answer is ``[-1, 0]``. The total over the two is right, and how it is
+    divided between them is an artifact of having written one feature as two
+    parameters, not a property of the quadrature.
+
+    A moving *singularity* needs the same treatment, for the same reason: unmarked, it
+    slides across a subdivision that does not move with it.
+
+    Only a feature that is steep but *continuous* needs none of this: a sharp ``tanh``
+    differentiates correctly unmarked under either adjoint. Marking one anyway is
+    harmless, the breakpoint then only helps the subdivision, and contributes nothing
+    to the derivative since the integrand has the same limit from both sides of it.
     """
-
-    checkpoint: bool = True
-    chunk_size: int = _CHUNK
-
-    def __post_init__(self):
-        check_size(self.chunk_size, "chunk_size")
 
     def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
         """Evaluate the quadrature, differentiating it by the Leibniz rule."""
-        ops = _with_options(ops, self.checkpoint, self.chunk_size)
         return _leibniz(
             rule, interval, args, consts, epsabs, epsrel, kwargs, ops=ops, freeze=False
         )
@@ -976,19 +1135,11 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
 
     lin_leaves, treedef = jax.tree.flatten(dyn_t)
     res_leaves = jax.tree.flatten(dyn)[0]
-    # The limits' contribution has to go through the subdivision so that a breakpoint on
-    # a discontinuity picks up its jump term, but that costs an extra fixed-mesh pass
-    # and carries the mesh around. Only do it when the limits are actually being
-    # differentiated, which filter_custom_jvp tells us at trace time by handing us a
-    # `None` tangent for anything that is not. Romberg has no subdivision to split.
-    interval_perturbed = any(t is not None for t in jax.tree.leaves(tangents[1]))
-    split = not freeze and ops.rebuild is not None and interval_perturbed
-    # Whether the solve is the thing that has to produce the limits' cotangent. It is
-    # not when they are not being differentiated, and not when `split` takes them
-    # through the subdivision instead; that leaves only the methods with no subdivision
-    # to rebuild (Romberg), where the solve is all there is.
-    interval_from_solve = interval_perturbed and not split
-    if freeze or split:
+    # Whether the solve is the thing that has to produce the limits' cotangent, which it
+    # is whenever they are being differentiated at all. `filter_custom_jvp` tells us at
+    # trace time by handing us a `None` tangent for anything that is not.
+    interval_from_solve = any(t is not None for t in jax.tree.leaves(tangents[1]))
+    if freeze:
         frozen_leaves, frozen_treedef = jax.tree.flatten(
             jax.lax.stop_gradient(ops.frozen(state))
         )
@@ -1005,7 +1156,6 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
         kwargs_items=tuple(sorted(kwargs.items())),
         frozen_treedef=frozen_treedef,
         freeze=freeze,
-        split=split,
         interval_from_solve=interval_from_solve,
         out_sds=jax.ShapeDtypeStruct(jnp.shape(y), jnp.result_type(y)),
     )

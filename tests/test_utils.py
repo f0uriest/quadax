@@ -1,11 +1,15 @@
 """Tests for quadax utility functions.
 
 The interval mapping itself. What the map is worth once a solver is wrapped around it is
-checked by ``TestIntervalScaling`` in ``tests/test_adaptive.py``.
+checked by ``TestIntervalScaling`` in ``tests/test_adaptive.py``, and that the limits of
+an unbounded interval can be differentiated end to end by ``test_infinite_limits`` in
+``tests/test_derivatives.py``.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax import config
 
 from quadax.utils import _map_ainf, map_interval
@@ -50,3 +54,22 @@ class TestMapping:
             rtol=np.finfo(np.float64).eps,
             atol=0,
         )
+
+    @pytest.mark.parametrize(
+        "iv",
+        [
+            [0.5, jnp.inf],
+            [-jnp.inf, 1.0],
+            [-jnp.inf, jnp.inf],
+            [-jnp.inf, 0.3, 2.0],
+            [0.0, 1.0],
+        ],
+        ids=["a_inf", "ninf_b", "ninf_inf", "breakpoint", "finite"],
+    )
+    def test_the_map_is_differentiable_in_both_modes(self, iv):
+        """An infinite limit must not leave a nan behind in reverse mode."""
+        iv = jnp.array(iv)
+        limits = lambda v: map_interval(lambda x: x, v)[1]  # noqa: E731
+        rev = np.asarray(jax.jacrev(limits)(iv))
+        assert np.isfinite(rev).all()
+        np.testing.assert_array_equal(rev, np.asarray(jax.jacfwd(limits)(iv)))
