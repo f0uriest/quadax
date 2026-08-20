@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 
 from .quad_weights import get_cc_table, get_tanhsinh_table, gk_weights
-from .utils import _real_dtype, tanhsinh_tmax, wrap_func
+from .utils import _real_dtype, check_size, tanhsinh_tmax, wrap_func
 
 
 def _dot(w, f):
@@ -127,6 +127,17 @@ class NestedRule(AbstractQuadratureRule):
     _wh: jax.Array
     _wl: jax.Array
     _norm: float | int | Callable
+    _batch_size: int | None
+
+    @property
+    def nodes_per_call(self) -> int:
+        """How many evaluations of the integrand one application of the rule costs.
+
+        Simply the number of nodes: ``batch_size`` changes how they are grouped, never
+        how many there are. Note this is the node count and not ``order``, which are not
+        always the same: an order ``n`` Clenshaw-Curtis rule has ``n + 1`` nodes.
+        """
+        return len(self._xh)
 
     def _nodes_weights(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Nodes and weights of the rule for use at abscissa dtype ``xtype``.
@@ -178,7 +189,7 @@ class NestedRule(AbstractQuadratureRule):
         # The dtype of the limits is the statement of what precision was asked for: the
         # abscissae, and so the `x` the user's integrand sees, follow it.
         xtype = jnp.result_type(a, b)
-        vfun = wrap_func(fun, args, xtype)
+        vfun = wrap_func(fun, args, xtype, self._batch_size)
         xh, wh_table, wl_table = self._nodes_weights(xtype)
 
         def falsefun():
@@ -305,7 +316,7 @@ class NestedRule(AbstractQuadratureRule):
         auxiliary sums that ``integrate`` needs for its error estimate.
         """
         xtype = jnp.result_type(a, b)
-        vfun = wrap_func(fun, args, xtype)
+        vfun = wrap_func(fun, args, xtype, self._batch_size)
         xh, wh_table, _ = self._nodes_weights(xtype)
         halflength = (b - a) / 2
         center = (b + a) / 2
@@ -334,9 +345,21 @@ class GaussKronrodRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the rule's nodes at once, which is fastest but makes peak memory scale
+        with the order. Values above the number of nodes are clipped to it. A value that
+        does not divide the number of nodes leaves a remainder, which is evaluated
+        together in one smaller batch, so the integrand is traced twice but never
+        evaluated at more points than the rule has nodes.
     """
 
-    def __init__(self, order: int = 21, norm: Callable | float | int = jnp.inf):
+    def __init__(
+        self,
+        order: int = 21,
+        norm: Callable | float | int = jnp.inf,
+        batch_size: int | None = None,
+    ):
         self._norm = norm
 
         try:
@@ -349,6 +372,10 @@ class GaussKronrodRule(NestedRule):
             raise NotImplementedError(
                 f"order {order} not implemented, should be one of {gk_weights.keys()}"
             ) from e
+        check_size(batch_size)
+        self._batch_size = (
+            None if batch_size is None else min(batch_size, len(self._xh))
+        )
 
 
 class ClenshawCurtisRule(NestedRule):
@@ -365,6 +392,13 @@ class ClenshawCurtisRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the rule's nodes at once, which is fastest but makes peak memory scale
+        with the order. Values above the number of nodes are clipped to it. A value that
+        does not divide the number of nodes leaves a remainder, which is evaluated
+        together in one smaller batch, so the integrand is traced twice but never
+        evaluated at more points than the rule has nodes.
 
     Notes
     -----
@@ -374,11 +408,20 @@ class ClenshawCurtisRule(NestedRule):
     then report success while missing the requested tolerance.
     """
 
-    def __init__(self, order: int = 32, norm: Callable | float | int = jnp.inf):
+    def __init__(
+        self,
+        order: int = 32,
+        norm: Callable | float | int = jnp.inf,
+        batch_size: int | None = None,
+    ):
         self._norm = norm
         order = 2 * (order // 2)  # make sure its even
         xh, wh, wl = get_cc_table(order)
         self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
+        check_size(batch_size)
+        self._batch_size = (
+            None if batch_size is None else min(batch_size, len(self._xh))
+        )
 
 
 class TanhSinhRule(NestedRule):
@@ -395,6 +438,13 @@ class TanhSinhRule(NestedRule):
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel. Default
+        is all of the rule's nodes at once, which is fastest but makes peak memory scale
+        with the order. Values above the number of nodes are clipped to it. A value that
+        does not divide the number of nodes leaves a remainder, which is evaluated
+        together in one smaller batch, so the integrand is traced twice but never
+        evaluated at more points than the rule has nodes.
 
     Notes
     -----
@@ -406,7 +456,12 @@ class TanhSinhRule(NestedRule):
 
     _order: int
 
-    def __init__(self, order: int = 61, norm: Callable | float | int = jnp.inf):
+    def __init__(
+        self,
+        order: int = 61,
+        norm: Callable | float | int = jnp.inf,
+        batch_size: int | None = None,
+    ):
         self._norm = norm
         self._order = 2 * (order // 2) + 1  # make sure its odd
         # The stored table is the one for the default dtype; `_nodes_weights` rebuilds
@@ -415,6 +470,10 @@ class TanhSinhRule(NestedRule):
             self._order, tanhsinh_tmax(jnp.result_type(float), self._order)
         )
         self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
+        check_size(batch_size)
+        self._batch_size = (
+            None if batch_size is None else min(batch_size, len(self._xh))
+        )
 
     def _nodes_weights(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Rebuild the table at ``xtype`` rather than casting the stored one.

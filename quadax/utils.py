@@ -61,6 +61,11 @@ def _real_dtype(dtype) -> Any:
     return jnp.finfo(dtype).dtype
 
 
+def tree_where(cond, new, old):
+    """``jnp.where(cond, new, old)`` leafwise over two pytrees of the same structure."""
+    return jax.tree_util.tree_map(lambda n, o: jnp.where(cond, n, o), new, old)
+
+
 def _coarser_dtype(dtype1, dtype2) -> Any:
     """Whichever of the two has the larger machine epsilon."""
     if float(jnp.finfo(dtype1).eps) >= float(jnp.finfo(dtype2).eps):
@@ -241,8 +246,12 @@ def map_interval(
     fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b, reference)
     # map original breakpoints to new domain
     inv = MAPFUNS_REF_INV if reference else MAPFUNS_INV
-    interval_t: jax.Array = jax.lax.switch(bitmask, inv, interval, a, b)
-    # +/-inf gets mapped to +/-1 but numerically evaluates to nan so we replace that.
+    # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
+    # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
+    # where type trick to avoid nan in reverse mode.
+    finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
+    interval_finite = jnp.where(jnp.isinf(interval), finite, interval)
+    interval_t: jax.Array = jax.lax.switch(bitmask, inv, interval_finite, a, b)
     interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
     interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
     return fun_mapped, interval_t
@@ -398,7 +407,9 @@ class _TanhSinhTransformedFunction(eqx.Module):
 
 
 messages = {
+    # NORMAL_EXIT
     0: "Algorithm terminated normally, desired tolerances assumed reached",
+    # MAX_NINTER
     1: (
         "Maximum number of subdivisions allowed has been achieved. One can allow more "
         + "subdivisions by increasing the value of max_ninter. However,if this yields "
@@ -410,19 +421,23 @@ messages = {
         + "integrator should be used, which is designed for handling the type of "
         + "difficulty involved."
     ),
+    # ROUNDOFF
     2: (
         "The occurrence of roundoff error is detected, which prevents the requested "
         + "tolerance from being achieved. The error may be under-estimated."
     ),
+    # BAD_INTEGRAND
     3: (
         "Extremely bad integrand behavior occurs at some points of the integration "
         + "interval."
     ),
+    # NO_CONVERGE
     4: (
         "The algorithm does not converge. Roundoff error is detected in the "
         + "extrapolation table. It is assumed that the requested tolerance cannot be "
         + "achieved, and that the returned result is the best which can be obtained."
     ),
+    # DIVERGENT
     5: "The integral is probably divergent, or slowly convergent.",
 }
 
@@ -431,7 +446,7 @@ def _decode_status(status):
     if status == 0:
         msg = messages[0]
     else:
-        status = f"{status:05b}"[::-1]
+        status = f"{status:06b}"[::-1]
         msg = ""
         for s, m in zip(status, messages.values()):
             if int(s):
@@ -439,37 +454,162 @@ def _decode_status(status):
     return msg
 
 
-STATUS = {i: _decode_status(i) for i in range(int(2**5))}
+STATUS = {i: _decode_status(i) for i in range(int(2**6))}
 
 
-def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...], xtype):
+def wrap_func(
+    fun: Callable[..., jax.Array],
+    args: tuple[Any, ...],
+    xtype,
+    batch_size: int | None = None,
+    safe: bool = False,
+):
     """Vectorize, jit, and mask out inf/nan.
 
     ``xtype`` is the dtype the integrand will be called at, and the integrand is probed
     at that dtype rather than at a weakly typed default. See the note on ``MAPFUNS``.
+
+    ``batch_size`` bounds how many points the returned function evaluates at once. The
+    default evaluates however many it is given.
+
+    ``safe`` asks for a mask that can be differentiated in reverse, at the cost of a
+    second evaluation of the integrand; see :class:`_WrappedFunction`. Only the
+    evaluations that are actually differentiated need it, so it is off by default and
+    the adjoints turn it on for the ones that are.
     """
+    # Wrapping an already wrapped integrand again is not merely redundant, it defeats
+    # the masking: the outer ``vectorize`` hands the inner wrapper one abscissa at a
+    # time, leaving it unable to tell an abscissa the integrand blew up at from the rest
+    # of the rule's, which is exactly what the AD-safe substitution needs. The local
+    # rules re-wrap whatever integrand they are handed, so this is the common path and
+    # not a corner case. The outer call's options win, since they are the ones the
+    # caller asked for; ``safe`` is the exception, being a property of the integrand's
+    # differentiability rather than a request about how to evaluate it.
+    if isinstance(fun, _WrappedFunction) and not args:
+        return _WrappedFunction(
+            fun.fun, fun.args, fun.outsig, batch_size, safe or fun.safe
+        )
+
     f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
     # need to make sure we get the correct shape for array valued integrands
     outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
-    return _WrappedFunction(fun, args, outsig)
+    return _WrappedFunction(fun, args, outsig, batch_size, safe)
+
+
+def _bad_abscissae(bad, x):
+    """Which abscissae the integrand cannot be linearized at.
+
+    ``bad`` flags individual non-finite *values*, and carries the integrand's own axes
+    after ``x``'s. Those are collapsed here because where to linearize is a choice per
+    abscissa, not per component: every component of a vector valued integrand is
+    evaluated at the same point and differentiated with respect to the same parameters,
+    so one component blowing up is enough to poison the derivatives of the others
+    through the parameters they share.
+    """
+    return jnp.any(jnp.reshape(bad, jnp.shape(x) + (-1,)), axis=-1)
 
 
 class _WrappedFunction(eqx.Module):
-    """Wraps a function in jit/vectorize and masks out inf/nans."""
+    """Wraps a function in jit/vectorize and masks out inf/nans.
+
+    Evaluates at most ``batch_size`` points at once, scanning over the batches. The
+    number of points is fixed at trace time here, so the batches are cut to fit rather
+    than the points being padded up to a whole number of batches: the leftovers are
+    evaluated together in one smaller batch. That costs one extra tracing of the
+    integrand and never an extra evaluation of it, which is the right way round when an
+    evaluation is the expensive part, which is the case ``batch_size`` exists for.
+
+    Callers whose point count is only known at run time cannot do this, and pad instead;
+    see ``_level_sum`` in the Romberg solver.
+
+    With ``safe`` set the mask is also correct in reverse mode, which costs a second
+    evaluation of the integrand. See ``__call__``.
+    """
 
     fun: Callable[..., jax.Array]
     args: tuple[Any, ...]
     outsig: str
+    batch_size: int | None = None
+    safe: bool = eqx.field(static=True, default=False)
 
-    @eqx.filter_jit
-    def __call__(self, x: jax.Array) -> jax.Array:
-        f: jax.Array = jnp.vectorize(
+    def _vectorize(self, x: jax.Array) -> jax.Array:
+        return jnp.vectorize(
             self.fun,
             excluded=tuple(range(1, len(self.args) + 1)),
             signature="()->" + self.outsig,
         )(x, *self.args)
-        return jnp.where(jnp.isfinite(f), f, 0.0)
+
+    def _evaluate(self, x: jax.Array) -> jax.Array:
+        """The integrand at every point of ``x``, in batches, without any masking."""
+        b = self.batch_size
+        # A scalar abscissa has nothing to batch: Romberg calls the integrand one point
+        # at a time, and every caller probes it with a scalar under eval_shape.
+        if b is None or x.ndim == 0 or x.shape[0] <= b:
+            return self._vectorize(x)
+        n = x.shape[0]
+        nfull = n // b
+        full = jax.lax.map(self._vectorize, x[: nfull * b].reshape(nfull, b))
+        parts = [full.reshape(-1, *full.shape[2:])]
+        if n % b:
+            parts.append(self._vectorize(x[nfull * b :]))
+        return jnp.concatenate(parts)
+
+    @eqx.filter_jit
+    def __call__(self, x: jax.Array) -> jax.Array:
+        if not self.safe:
+            f: jax.Array = self._evaluate(x)
+            return jnp.where(jnp.isfinite(f), f, 0.0)
+        # Need to use a double-where type trick to avoid NaNs in reverse mode.
+        # which means knowing where the integrand is finite before differentiating
+        # anything, hence the probe, under `stop_gradient` so that this pass is never
+        # itself linearized.
+        probe: jax.Array = jax.lax.stop_gradient(self._evaluate(x))
+        bad = ~jnp.isfinite(probe)
+        bad_x = _bad_abscissae(bad, x)
+        # Linearize at an abscissa the integrand was just seen to be finite at. Taking
+        # one from the same set rather than some fixed point is what keeps this from
+        # walking into the singularity: any fixed choice (the midpoint of the domain,
+        # say) is itself the singularity for some integrand. Only finiteness matters,
+        # since whatever it evaluates to there is masked back out.
+        good = ~jnp.reshape(bad_x, (-1,))
+        substitute = jnp.reshape(x, (-1,))[jnp.argmax(good)]
+        # With no finite abscissa there is nothing to borrow, and every value is masked
+        # to zero regardless, so the second evaluation is skipped rather than made at a
+        # substitute that is itself singular. Skipping it is the point: the derivative
+        # of an evaluation that stays in the graph would be the NaN this whole path
+        # exists to avoid. `unvmap_any` keeps the predicate a scalar under `vmap`, so a
+        # batch is evaluated as soon as one of its elements has a finite abscissa.
+        # `_evaluate` goes through a lambda because `lax.cond` hashes its branches, and
+        # a bound method of this module is not hashable once its fields carry tracers.
+        f = jax.lax.cond(
+            unvmap_any(jnp.any(good)),
+            lambda x_: self._evaluate(x_),
+            lambda _: jnp.zeros(probe.shape, probe.dtype),
+            jnp.where(bad_x, substitute, x),
+        )
+        # Where the integrand was finite this is the ordinary evaluation, unchanged. At
+        # a bad abscissa the value comes from the probe, so a vector valued integrand
+        # keeps the components that were finite there and only the non-finite ones are
+        # zeroed, exactly as masking the output alone would have done. Their derivative
+        # is what is given up: the probe is a constant, so those components contribute
+        # nothing to the tangent. That trades one abscissa's contribution to the
+        # derivative for a derivative that exists at all.
+        mask = jnp.reshape(bad_x, jnp.shape(bad_x) + (1,) * (jnp.ndim(f) - jnp.ndim(x)))
+        return jnp.where(bad, 0.0, jnp.where(mask, probe, f))
+
+
+def check_size(size: int | None, name: str = "batch_size") -> None:
+    """Raise if ``size`` is neither ``None`` nor a positive integer.
+
+    Shared by the options that set how many evaluations are grouped together:
+    ``batch_size`` on the quadrature routines and ``chunk_size`` on the adjoints.
+    """
+    errorif(
+        size is not None and (not isinstance(size, (int, np.integer)) or size < 1),
+        ValueError,
+        f"{name} must be None or a positive integer, got {size}",
+    )
 
 
 class QuadratureInfo(NamedTuple):
