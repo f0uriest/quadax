@@ -983,6 +983,12 @@ def _leibniz_transpose(
 ):
     """Reverse direction: integrate the cotangent of the mapped integrand."""
     del out_sds
+    if type(ct) is ad.Zero:
+        # A symbolic zero cotangent makes every operand's cotangent zero, so there is
+        # nothing to integrate. Whether the zero arrives symbolically or materialized is
+        # up to JAX and varies by version, so handle it here rather than assume: `ct` is
+        # fed to `jax.vjp` below, which requires an array and rejects the symbolic form.
+        return (None,) * len(flat)
     _, dyn, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)

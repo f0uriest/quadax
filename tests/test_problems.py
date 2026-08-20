@@ -13,6 +13,7 @@ from quadax import quadcc, quadgk, quadts, romberg, rombergts
 from .problems import (
     ALL,
     DIFFICULTY_TAGS,
+    KNOWN_DISHONEST,
     KNOWN_FAILURES,
     PROBLEMS,
     TAGS,
@@ -48,16 +49,24 @@ def test_problem_names_are_unique():
     assert len(set(names)) == len(names)
 
 
-def test_known_failures_point_at_real_cases():
+@pytest.mark.parametrize(
+    "table, label",
+    [(KNOWN_FAILURES, "KNOWN_FAILURES"), (KNOWN_DISHONEST, "KNOWN_DISHONEST")],
+)
+def test_expected_failure_tables_point_at_real_cases(table, label):
     """A stale entry silently stops applying rather than failing.
 
-    `xfail_if_known` looks its key up and does nothing when it misses, so renaming a
+    The xfail helpers look their key up and do nothing when it misses, so renaming a
     problem turns its entries into dead weight that no longer marks anything. The
     tolerances are checked too, since only those in `TOLS` are ever swept.
     """
     names = {p["name"] for p in PROBLEMS}
-    for (method, problem), tols in KNOWN_FAILURES.items():
-        assert method in METHODS, f"{method} is not a routine under test"
-        assert problem in names, f"{method}/{problem} names no problem in the table"
+    for (method, problem), tols in table.items():
+        assert method in METHODS, f"{label}: {method} is not a routine under test"
+        assert problem in names, (
+            f"{label}: {method}/{problem} names no problem in the table"
+        )
         extra = tols - set(TOLS)
-        assert not extra, f"{method}/{problem} lists untested tolerances {extra}"
+        assert not extra, (
+            f"{label}: {method}/{problem} lists untested tolerances {extra}"
+        )

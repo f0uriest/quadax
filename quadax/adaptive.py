@@ -856,13 +856,36 @@ def _accelerate_full(
     n_stalled = jnp.where(ran, state["n_stalled"] + 1, state["n_stalled"])
     # The table has been asked six times running for something better than it already
     # has and has not produced it, while claiming an error far under what the mesh
-    # reports. Nothing further is going to come of it. Both thresholds are QUADPACK's.
-    stalled = ran & (n_stalled > 5) & (state["accel_err"] < 1e-3 * state["err_sum"])
+    # reports. Nothing further is going to come of it. Both thresholds are QUADPACK's,
+    # and the comparison is against the uncorrected estimate so that it keeps asking
+    # QUADPACK's question: this is a test of whether the table is still making progress,
+    # which is what the spread measures, not of how far the answer might be off.
+    stalled = ran & (n_stalled > 5) & (state["accel_sharp"] < 1e-3 * state["err_sum"])
 
-    improved = ran & (fed.abserr < state["accel_err"])
+    # QUADPACK ranks candidate extrapolations by the same error estimate it reports.
+    # That is only safe while the two are the same number. Here the reported one carries
+    # a tail term that is largest exactly where the table is struggling, so ranking on
+    # it would let that term decide which value is kept and make the *answer* worse
+    # rather than only its error bar. Which one settled tightest and how far it might
+    # still be from the limit are different questions, and only the first should choose.
+    improved = ran & (fed.abserr_sharp < state["accel_sharp"])
     n_stalled = jnp.where(improved, 0, n_stalled)
     accel_result = jnp.where(improved, fed.result, state["accel_result"])
+    accel_sharp = jnp.where(improved, fed.abserr_sharp, state["accel_sharp"])
     accel_err = jnp.where(improved, fed.abserr, state["accel_err"])
+    # Not in QUADPACK, which reports the estimate the kept extrapolation came with and
+    # never revisits it. The value kept is the one that settled tightest, which selects
+    # the most optimistic reading of a quantity carrying no bound, and every later
+    # extrapolation is evidence about that choice: if the sequence has since moved
+    # further from the kept value than its estimate allows, one of the two is wrong by
+    # at least the difference and the estimate has to cover it. Without this a single
+    # optimistic reading is reported for the rest of the run however far the table
+    # wanders afterwards, which is most of why the reported error was chaotic on
+    # problems the acceleration cannot fit.
+    disagreement = jnp.asarray(norm(fed.result - accel_result))
+    accel_err = jnp.asarray(
+        jnp.where(ran, jnp.maximum(accel_err, disagreement), accel_err)
+    )
     # If the error from the non-singular region was flat  but large then the error
     # estimate from the table is too optimistic, because it assumed that error would
     # continue to decay geometrically. The error from the non-singular region is still
@@ -871,13 +894,22 @@ def _accelerate_full(
     correc = jnp.where(improved, err_unlocalized, state["correc"])
     # on the next round, we want the unlocalized error to be smaller in order to get
     # another clean reading from the table.
-    err_accel_target = jnp.where(
-        improved,
-        jnp.maximum(epsabs, epsrel * norm(fed.result)),
-        state["err_accel_target"],
+    err_accel_target = jnp.asarray(
+        jnp.where(
+            improved,
+            jnp.maximum(epsabs, epsrel * norm(fed.result)),
+            state["err_accel_target"],
+        )
     )
-    # can we exit with the current estimate?
-    accepted = improved & (accel_err < err_accel_target)
+    # Can we exit with the current estimate? QUADPACK tests this only on a pass that
+    # improved on the estimate it already had, which works there because ranking and
+    # reporting are the same number, so the pass that lowers the estimate is exactly the
+    # pass that could bring it under the tolerance. Here they are separate, and tying
+    # the exit to both events coinciding strands a run that has already arrived: a table
+    # that has converged stops improving, so it would carry on to a stall and report
+    # failure over an answer that met the tolerance several passes earlier. The question
+    # is about the value being kept, not about the pass that produced it.
+    accepted = ran & (accel_err < err_accel_target)
     done = accepted | stalled
 
     # The epsilon table truncates itself when its differences stop being safe to divide
@@ -914,6 +946,7 @@ def _accelerate_full(
         "accel_table": accel_table,
         "accel_result": accel_result,
         "accel_err": accel_err,
+        "accel_sharp": accel_sharp,
         "n_stalled": n_stalled,
         "accel_done": done,
         "no_accel": no_accel,
@@ -994,6 +1027,18 @@ def _accept_extrapolation(state, mesh_y, norm):
     state["status"] += 2**DIVERGENT * divergent
     state["used_accel"] = have_accel & ~use_mesh
     state["err_sum"] = jnp.where(use_mesh, mesh_err, accel_err)
+    # QUADPACK never clears a flag once raised, which costs it nothing because its
+    # stall test and its exit test read the same estimate: a run that stalls there has
+    # by construction not met the tolerance. Splitting the two makes a stall possible on
+    # a run that did meet it, so the flag has to be withdrawn or the routine reports
+    # failure over an answer inside tolerance. A stall says the table stopped making
+    # progress, which is a statement about how the answer was reached rather than about
+    # the answer; if the error attached to what is returned meets the bound asked for
+    # then the request was met, whichever of the two supplied it. Only this flag is
+    # cleared, since the others describe the returned value and stand on their own.
+    reached = state["err_sum"] <= state["err_bnd"]
+    stall_bit = (state["status"] & 2**NO_CONVERGE) != 0
+    state["status"] -= jnp.where(reached & stall_bit, 2**NO_CONVERGE, 0)
     return state, jnp.where(use_mesh, mesh_y, accel_y)
 
 
@@ -1072,6 +1117,8 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     # Its estimated error. Infinite until an extrapolation is accepted, which is how
     # "none was ever taken" is recognized at the end.
     state["accel_err"] = jnp.array(jnp.inf, etype)
+    # How tightly that extrapolation settled, which is what candidates are ranked by.
+    state["accel_sharp"] = jnp.array(jnp.inf, etype)
     state["n_stalled"] = jnp.zeros((), int)  # extrapolations with no improvement
     state["accelerating"] = jnp.zeros((), bool)  # mesh localized, table being fed
     state["no_accel"] = jnp.zeros((), bool)  # acceleration abandoned for good
