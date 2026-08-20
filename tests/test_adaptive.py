@@ -33,12 +33,15 @@ from .problems import (
     TOLS,
     ULP_ATOL,
     ULP_RTOL,
-    assert_contract,
+    assert_converged,
+    assert_honest,
     complex_dtypes,
     exp_neg,
     problem_id,
     real_dtypes,
     real_of,
+    solve_once,
+    xfail_if_dishonest,
     xfail_if_known,
 )
 
@@ -80,25 +83,39 @@ class TestAdaptive:
     with an error estimate that does not understate the true error. Nothing here
     encodes which failure code an unconverged run produces or how far off it lands: a
     routine that cannot solve a problem only has to report that honestly.
+
+    They are asserted by separate tests, over one shared solve, because they fail for
+    unrelated reasons and are worth different amounts. Not converging is a limit on what
+    a method can do, and the problems each method cannot do are tabulated; understating
+    the error is a defect wherever it happens, so those are tabulated separately and
+    that table is meant to empty rather than to be maintained.
     """
 
-    def test_value_and_error(self, request, method, tol, i, extrapolate):
-        """The answer is good to the tolerance asked for, and the error is honest."""
+    def test_error_is_honest(self, request, method, tol, i, extrapolate):
+        """The reported error does not understate the true error.
+
+        Expected to pass everywhere, including on the problems the routine cannot
+        solve, since reporting failure is not an excuse for misreporting by how much.
+        """
+        prob = PROBLEMS[i]
+        if extrapolate:
+            xfail_if_dishonest(request, method, prob, tol)
+        y, info = solve_once(method, i, tol, extrapolate=extrapolate)
+        assert_honest(y, info, prob, tol)
+
+    def test_converges(self, request, method, tol, i, extrapolate):
+        """The routine reaches the tolerance it was asked for and reports success."""
         prob = PROBLEMS[i]
         if extrapolate:
             xfail_if_known(request, method, prob, tol)
-        y, info = method(
-            prob["fun"],
-            prob["interval"],
-            epsabs=jnp.asarray(tol),
-            epsrel=jnp.asarray(tol),
-            extrapolate=extrapolate,
-        )
-        if extrapolate and tol in CONVERGENT_TOLS:
-            assert int(info.status) == 0, (
-                f"{prob['name']} at tol={tol:g}: {quadax.STATUS[int(info.status)]}"
-            )
-        assert_contract(y, info, prob, tol)
+        y, info = solve_once(method, i, tol, extrapolate=extrapolate)
+        # The tightest tolerance sits below the roundoff floor of the near-divergent
+        # problems, where declining to converge is the right answer rather than a
+        # failure, and the un-accelerated path is only swept to show it does not
+        # regress.
+        if not (extrapolate and tol in CONVERGENT_TOLS) and int(info.status) != 0:
+            pytest.skip("convergence is not required of this case")
+        assert_converged(y, info, prob, tol)
 
 
 # The tabulated orders of each rule. Clenshaw-Curtis starts at 16 rather than 8 for
@@ -129,8 +146,11 @@ class TestRuleOrders:
         """Changing the order changes the cost, never the promise."""
         prob = PROBLEMS[i]
         # the default order is swept in `TestAdaptive`, so a routine listed as failing
-        # this problem there is not expected to hold the contract at any other order
+        # this problem there is not expected to hold at any other order either. Both
+        # tables are consulted because both claims are made below, and a routine can be
+        # listed in either one alone.
         xfail_if_known(request, method, prob, self.TOL)
+        xfail_if_dishonest(request, method, prob, self.TOL)
         for order in orders:
             y, info = method(
                 prob["fun"],
@@ -143,7 +163,8 @@ class TestRuleOrders:
             assert int(info.status) == 0, (
                 f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
             )
-            assert_contract(y, info, prob, self.TOL)
+            assert_honest(y, info, prob, self.TOL)
+            assert_converged(y, info, prob, self.TOL)
 
     @pytest.mark.parametrize("i", SMOOTH)
     def test_higher_order_needs_fewer_intervals(self, method, orders, i):
