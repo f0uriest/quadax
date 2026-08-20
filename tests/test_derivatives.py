@@ -47,6 +47,11 @@ all_methods = adaptive_methods + romberg_methods
 # accuracy is part of what is under test.
 machinery_methods = [quadgk]
 
+# The two adjoints that ship. Both are exercised wherever the derivative itself is
+# under test, since they compute it by entirely different routes.
+adjoints = [DirectAdjoint(), LeibnizAdjoint()]
+adjoint_ids = ["direct", "leibniz"]
+
 # One routine from each family that groups its integrand evaluations differently. The
 # adaptive routines share the wrapper that cuts the batches to fit a node count known
 # when the rule is built; the Romberg pair pads instead, because a level's size is only
@@ -210,55 +215,86 @@ class TestDirectAdjointEquivalence:
         )
 
 
+def _tied_jump(t, c):
+    """1 below the jump at ``c[0]`` and 5 above it; ``int_0^3`` of it is ``15 - 4c``."""
+    return jnp.where(t < c[0], 1.0, 5.0).squeeze()
+
+
+def _tied(quad, adjoint, fun=_tied_jump, lo=0.0, hi=3.0):
+    """One ``s`` positioning both the discontinuity and the breakpoint that marks it."""
+    return lambda s: quad(
+        fun,
+        jnp.stack([lo * jnp.ones_like(s), s, hi * jnp.ones_like(s)]),
+        (jnp.atleast_1d(s),),
+        adjoint=adjoint,
+    )[0]
+
+
+# The two ways the parameter can reach the answer. Under `jump-only` the integrand's
+# values do not depend on `s` at all, so the whole derivative is the jump term and
+# dropping it leaves zero. Under `jump-and-args` both halves are non-zero and of
+# opposite sign, +2.7 through `args` against -0.3 through the breakpoint, so neither
+# dropping nor double counting either one can hide in the total.
+TIED_PROBLEMS = {
+    "jump-only": (_tied_jump, (0.0, 3.0), 1.5, lambda s: 15.0 - 4.0 * s),
+    "jump-and-args": (
+        lambda t, z: jnp.where(t > z[0], 2 * z[0], z[0]),
+        (-1.0, 1.0),
+        0.3,
+        lambda s: 3 * s - s**2,
+    ),
+}
+
+
 class TestBreakpointBoundaryTerm:
     """A breakpoint tied to a moving jump picks up the jump term.
-
-    ``int_0^3 f`` with ``f = 1`` below the jump and ``5`` above it is ``15 - 4s``, so
-    the derivative is ``-4``. The integrand's *values* do not depend on ``s`` at all
-    here, only the position of the jump does, so the whole of that ``-4`` is the jump
-    term and the test fails outright if it is dropped. ``test_jump_and_args_together``
-    is the companion where both halves are non-zero and have opposite signs.
 
     Tying the breakpoint to the same parameter as the jump is the supported version,
     see the Notes on the adjoints for what the alternatives give.
     """
 
-    fun = staticmethod(lambda t, c: jnp.where(t < c[0], 1.0, 5.0).squeeze())
+    @pytest.mark.parametrize("quad", adaptive_methods)
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("name", list(TIED_PROBLEMS))
+    def test_tied_breakpoint(self, name, quad, transform, adjoint, request):
+        """The jump moves with the breakpoint, and the total comes out right.
 
-    @staticmethod
-    def tied(quad, adjoint):
-        """One ``s`` positions both the discontinuity and the breakpoint."""
-        return lambda s: quad(
-            TestBreakpointBoundaryTerm.fun,
-            jnp.stack([jnp.zeros_like(s), s, 3.0 * jnp.ones_like(s)]),
-            (jnp.atleast_1d(s),),
-            adjoint=adjoint,
-        )[0]
+        ``quadcc`` under :class:`DirectAdjoint` is off by 4e-4 on ``jump-and-args`` at
+        every tolerance. Clenshaw-Curtis places a node on the breakpoint itself, where
+        the integrand's comparison resolves to one side; ``DirectAdjoint``
+        differentiates that discretization, so the node keeps its weight in the
+        derivative. Gauss-Kronrod and tanh-sinh have no node there and are exact.
+        """
+        if (
+            name == "jump-and-args"
+            and quad is quadcc
+            and isinstance(adjoint, DirectAdjoint)
+        ):
+            request.applymarker(
+                pytest.mark.xfail(
+                    strict=True, reason="closed rule samples the breakpoint itself"
+                )
+            )
+        fun, (lo, hi), s, exact = TIED_PROBLEMS[name]
+        f = _tied(quad, adjoint, fun, lo, hi)
+        x = jnp.asarray(s)
+        np.testing.assert_allclose(float(f(x)), float(exact(x)), atol=1e-12)
+        np.testing.assert_allclose(
+            float(transform(f)(x)), float(jax.grad(exact)(x)), atol=1e-9
+        )
 
     @pytest.mark.parametrize("quad", adaptive_methods)
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
-    )
-    def test_tied_breakpoint(self, quad, transform, adjoint):
-        """The jump moves with the breakpoint, and the total comes out right."""
-        f = self.tied(quad, adjoint)
-        x = jnp.array(1.5)
-        np.testing.assert_allclose(float(f(x)), 15.0 - 4.0 * x, atol=1e-12)
-        np.testing.assert_allclose(float(transform(f)(x)), -4.0, atol=1e-9)
-
-    @pytest.mark.parametrize("quad", adaptive_methods)
-    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
-    )
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
     def test_outer_limits(self, quad, transform, adjoint):
         """The outer limits give ``f(b) db - f(a) da``, with the breakpoint held fixed.
 
-        Differentiated on their own, so this says nothing about the interior entry.
+        Differentiated on their own, so this says nothing about the interior entry
+        beyond that a breakpoint carrying no derivative contributes nothing.
         """
         f = lambda ab: quad(  # noqa: E731
-            self.fun,
+            _tied_jump,
             jnp.stack([ab[0], jnp.array(1.5), ab[1]]),
             (jnp.array([1.5]),),
             adjoint=adjoint,
@@ -266,45 +302,7 @@ class TestBreakpointBoundaryTerm:
         got = np.asarray(transform(f)(jnp.array([0.0, 3.0])))
         np.testing.assert_allclose(got, np.array([-1.0, 5.0]), atol=1e-12)
 
-    @pytest.mark.parametrize("quad", adaptive_methods)
-    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
-    )
-    def test_jump_and_args_together(self, quad, transform, adjoint, request):
-        """Both halves non-zero, and of opposite sign, so neither can hide the other.
-
-        ``f = s`` below the jump and ``2s`` above it, over ``[-1, 1]`` with the jump at
-        ``s``, integrates to ``3s - s**2``. The integrand's own dependence on ``s``
-        contributes ``+2.7`` through ``args`` and the jump contributes ``-0.3`` through
-        the breakpoint; the answer is ``2.4``, so dropping or double-counting either one
-        is visible.
-
-        ``quadcc`` under :class:`DirectAdjoint` is off by 4e-4 at every tolerance.
-        Clenshaw-Curtis places a node on the breakpoint itself, where the integrand's
-        comparison resolves to one side; ``DirectAdjoint`` differentiates that
-        discretization, so the node keeps its weight in the derivative. Gauss-Kronrod
-        and tanh-sinh have no node there and are exact.
-        """
-        if quad is quadcc and isinstance(adjoint, DirectAdjoint):
-            request.applymarker(
-                pytest.mark.xfail(
-                    strict=True, reason="closed rule samples the breakpoint itself"
-                )
-            )
-        f = lambda s: quad(  # noqa: E731
-            lambda t, z: jnp.where(t > z[0], 2 * z[0], z[0]),
-            jnp.stack([-jnp.ones_like(s), s, jnp.ones_like(s)]),
-            (jnp.atleast_1d(s),),
-            adjoint=adjoint,
-        )[0]
-        x = jnp.array(0.3)
-        np.testing.assert_allclose(float(f(x)), 3 * 0.3 - 0.3**2, atol=1e-12)
-        np.testing.assert_allclose(float(transform(f)(x)), 2.4, atol=1e-9)
-
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
-    )
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
     def test_second_derivative_wrt_interval(self, adjoint):
         """Differentiating the limits twice, with an interior breakpoint present.
 
@@ -328,17 +326,13 @@ class TestBreakpointBoundaryTerm:
     def test_matches_unrolled(self, quad):
         """And agrees with differentiating through the loop."""
         np.testing.assert_allclose(
-            float(
-                jax.jacfwd(self.tied(quad, _UnrolledDirectAdjoint()))(jnp.array(1.5))
-            ),
-            float(jax.jacfwd(self.tied(quad, DirectAdjoint()))(jnp.array(1.5))),
+            float(jax.jacfwd(_tied(quad, _UnrolledDirectAdjoint()))(jnp.array(1.5))),
+            float(jax.jacfwd(_tied(quad, DirectAdjoint()))(jnp.array(1.5))),
             rtol=ULP_RTOL,
             atol=ULP_ATOL,
         )
 
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
-    )
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
     def test_split_parameters_sum_to_the_tied_answer(self, adjoint):
         """One feature written as two parameters: the total is what is defined.
 
@@ -350,13 +344,13 @@ class TestBreakpointBoundaryTerm:
         which is the quantity that has a finite difference to compare against.
         """
         split = lambda p: quadgk(  # noqa: E731
-            self.fun,
+            _tied_jump,
             jnp.stack([jnp.zeros_like(p[0]), p[0], 3.0 * jnp.ones_like(p[0])]),
             (jnp.atleast_1d(p[1]),),
             adjoint=adjoint,
         )[0]
         jac = np.asarray(jax.jacrev(split)(jnp.array([1.5, 1.5])))
-        tied = float(jax.grad(self.tied(quadgk, adjoint))(jnp.array(1.5)))
+        tied = float(jax.grad(_tied(quadgk, adjoint))(jnp.array(1.5)))
         np.testing.assert_allclose(jac.sum(), tied, atol=1e-9)
         np.testing.assert_allclose(tied, -4.0, atol=1e-9)
 
@@ -788,10 +782,6 @@ class TestDerivativeDTypes:
         y, y_dot = jax.jvp(f, (jnp.array(1.0, dtype),), (jnp.array(1.0, dtype),))
         assert y.dtype == dtype
         assert y_dot.dtype == dtype
-
-
-adjoints = [DirectAdjoint(), LeibnizAdjoint()]
-adjoint_ids = ["direct", "leibniz"]
 
 
 class TestRombergWithoutRichardson:
@@ -1268,6 +1258,8 @@ class TestChunkSize:
 
     The blocking is done on the subdivision alone and never looks at the local rule, so
     these run through ``machinery_methods`` rather than all three adaptive routines.
+    Only :class:`DirectAdjoint` has a subdivision to chunk; ``LeibnizAdjoint`` takes the
+    limits from the boundary term instead and carries no such option.
     """
 
     # Straddling the number of slots in the subdivision: one sub-interval at a time, a
@@ -1276,12 +1268,11 @@ class TestChunkSize:
     CHUNK_SIZES = [1, 3, 8, 64]
 
     @pytest.mark.parametrize("quad", machinery_methods)
-    @pytest.mark.parametrize("adjoint", [DirectAdjoint], ids=["direct"])
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
     @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=str)
-    def test_derivative_is_unchanged(self, quad, adjoint, transform, chunk_size):
+    def test_derivative_is_unchanged(self, quad, transform, chunk_size):
         """Every chunk size gives the derivative the default one gives."""
-        self._check(quad, adjoint, transform, chunk_size, 0)
+        self._check(quad, transform, chunk_size, 0)
 
     # The subdivisions that differ in what the chunking has to do with them, beyond the
     # plain finite one the test above runs on. Interior breakpoints give the frozen mesh
@@ -1292,19 +1283,16 @@ class TestChunkSize:
     SHAPES = [1, 3, 4]
     SHAPE_IDS = ["breakpoints", "infinite", "vector"]
 
-    @pytest.mark.parametrize(
-        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
-    )
     @pytest.mark.parametrize("i", SHAPES, ids=SHAPE_IDS)
-    def test_over_problem_shapes(self, adjoint, i):
+    def test_over_problem_shapes(self, i):
         """And does so on each shape of subdivision there is to chunk.
 
         A chunk size that does not divide the slot count is the one that pads, so that
         is the size these run at.
         """
-        self._check(quadgk, adjoint, jax.jacrev, 3, i)
+        self._check(quadgk, jax.jacrev, 3, i)
 
-    def _check(self, quad, adjoint, transform, chunk_size, i):
+    def _check(self, quad, transform, chunk_size, i):
         prob = example_problems[i]
         interval = jnp.asarray(prob["interval"])
         make = lambda adj: (
@@ -1312,8 +1300,8 @@ class TestChunkSize:
                 prob["fun"], interval, a, adjoint=adj
             )[0]
         )
-        want = transform(make(adjoint()))(prob["args"])
-        got = transform(make(adjoint(chunk_size=chunk_size)))(prob["args"])
+        want = transform(make(DirectAdjoint()))(prob["args"])
+        got = transform(make(DirectAdjoint(chunk_size=chunk_size)))(prob["args"])
         np.testing.assert_allclose(
             np.asarray(jax.tree.leaves(got)[0]),
             np.asarray(jax.tree.leaves(want)[0]),
@@ -1321,16 +1309,15 @@ class TestChunkSize:
             atol=ULP_ATOL,
         )
 
-    @pytest.mark.parametrize("adjoint", [DirectAdjoint], ids=["direct"])
-    def test_composes_with_batch_size(self, adjoint):
+    def test_composes_with_batch_size(self):
         """The two knobs are independent, and multiply to the real parallel width."""
         prob = example_problems[0]
         interval = jnp.asarray(prob["interval"])
         f = lambda adj, bs: jax.jacrev(  # noqa: E731
             lambda a: quadgk(prob["fun"], interval, a, adjoint=adj, batch_size=bs)[0]
         )(prob["args"])
-        want = f(adjoint(), None)
-        got = f(adjoint(chunk_size=3), 4)
+        want = f(DirectAdjoint(), None)
+        got = f(DirectAdjoint(chunk_size=3), 4)
         np.testing.assert_allclose(
             np.asarray(jax.tree.leaves(got)[0]),
             np.asarray(jax.tree.leaves(want)[0]),
@@ -1338,8 +1325,7 @@ class TestChunkSize:
             atol=ULP_ATOL,
         )
 
-    @pytest.mark.parametrize("adjoint", [DirectAdjoint], ids=["direct"])
-    def test_romberg_is_unaffected(self, adjoint):
+    def test_romberg_is_unaffected(self):
         """Romberg has no subdivision to chunk, so the option is simply inert there."""
         f = lambda adj: float(  # noqa: E731
             jax.grad(
@@ -1352,17 +1338,19 @@ class TestChunkSize:
             )(jnp.asarray(0.7))
         )
         np.testing.assert_allclose(
-            f(adjoint(chunk_size=2)), f(adjoint()), rtol=ULP_RTOL, atol=ULP_ATOL
+            f(DirectAdjoint(chunk_size=2)),
+            f(DirectAdjoint()),
+            rtol=ULP_RTOL,
+            atol=ULP_ATOL,
         )
 
-    @pytest.mark.parametrize("adjoint", [DirectAdjoint], ids=["direct"])
     @pytest.mark.parametrize(
         "chunk_size", [0, -1, 2.5], ids=["zero", "negative", "float"]
     )
-    def test_bad_chunk_size_rejected(self, adjoint, chunk_size):
+    def test_bad_chunk_size_rejected(self, chunk_size):
         """Rejected when the adjoint is built, not on first use."""
         with pytest.raises(ValueError, match="chunk_size"):
-            adjoint(chunk_size=chunk_size)
+            DirectAdjoint(chunk_size=chunk_size)
 
 
 # Integrands quadax cannot evaluate everywhere: `t**(p-1)` with `p < 1` is infinite at
@@ -1387,64 +1375,32 @@ def _midpoint_singular(t, c):
     return c[0] / jnp.sqrt(jnp.abs(t))
 
 
+def _singular_quad(quad, adjoint, fun, interval):
+    """``fun`` integrated tightly enough that the rule reaches the singular points."""
+    return lambda c: quad(
+        fun, interval, (c,), epsabs=1e-10, epsrel=1e-10, adjoint=adjoint
+    )[0]
+
+
 @pytest.mark.parametrize("quad", adaptive_methods)
 @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
 class TestSingularIntegrandDerivatives:
     """Derivatives of integrands the local rule evaluates at a singular point."""
 
-    def test_endpoint_singularity_reverse(self, quad, adjoint):
-        """Reverse mode returns a derivative, not a NaN."""
-        p = jnp.array([0.4])
-        f = lambda c: quad(  # noqa: E731
-            _endpoint_singular,
-            [0.0, 1.0],
-            (c,),
-            epsabs=1e-10,
-            epsrel=1e-10,
-            adjoint=adjoint,
-        )[0]
-        y = f(p)
-        g = jax.jacrev(f)(p)
-        assert np.isfinite(np.asarray(g)).all()
-        # int_0^1 t**(p-1) = 1/p, so the derivative is -1/p**2
-        np.testing.assert_allclose(np.asarray(y), 1 / 0.4, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(g).squeeze(), -1 / 0.4**2, rtol=1e-5)
+    def test_endpoint_singularity(self, quad, adjoint):
+        """Reverse mode returns a derivative, not a NaN, and it is the right one.
 
-    def test_endpoint_singularity_modes_agree(self, quad, adjoint):
-        """Forward mode was never affected, so it pins down what reverse should give."""
-        p = jnp.array([0.4])
-        f = lambda c: quad(  # noqa: E731
-            _endpoint_singular,
-            [0.0, 1.0],
-            (c,),
-            epsabs=1e-10,
-            epsrel=1e-10,
-            adjoint=adjoint,
-        )[0]
-        np.testing.assert_allclose(
-            np.asarray(jax.jacrev(f)(p)), np.asarray(jax.jacfwd(f)(p)), rtol=1e-10
-        )
-
-    def test_singularity_at_an_interior_breakpoint(self, quad, adjoint):
-        """A singularity in the *interior* is not a special case of an endpoint one.
-
-        Guards the choice of where to linearize instead of the singular abscissa: any
-        fixed substitute (the middle of the domain, say) is itself the singularity for
-        an integrand like this one.
+        Forward mode was never affected by the masking, so it pins down what reverse
+        should give independently of the analytic value.
         """
-        p = jnp.array([1.4])
-        f = lambda c: quad(  # noqa: E731
-            _midpoint_singular,
-            [-1.0, 0.0, 1.0],
-            (c,),
-            epsabs=1e-10,
-            epsrel=1e-10,
-            adjoint=adjoint,
-        )[0]
-        assert np.isfinite(np.asarray(f(p))).all()
-        g = np.asarray(jax.jacrev(f)(p)).squeeze()
-        assert np.isfinite(g).all()
-        np.testing.assert_allclose(g, 4.0, rtol=2e-5)
+        p = jnp.array([0.4])
+        f = _singular_quad(quad, adjoint, _endpoint_singular, [0.0, 1.0])
+        rev = np.asarray(jax.jacrev(f)(p))
+        assert np.isfinite(rev).all()
+        # int_0^1 t**(p-1) = 1/p, so the derivative is -1/p**2
+        np.testing.assert_allclose(np.asarray(f(p)), 1 / 0.4, rtol=1e-5)
+        np.testing.assert_allclose(rev.squeeze(), -1 / 0.4**2, rtol=1e-5)
+        np.testing.assert_allclose(rev, np.asarray(jax.jacfwd(f)(p)), rtol=1e-10)
 
     def test_smooth_component_survives_a_singular_one(self, quad, adjoint):
         """One singular component must not cost the others their derivatives.
@@ -1453,16 +1409,19 @@ class TestSingularIntegrandDerivatives:
         respect to the same parameters, so a component that blows up is in a position to
         poison the rest. The smooth component's derivative is known exactly, so it says
         whether anything was lost.
+
+        The singularity sits at an interior breakpoint rather than a limit, which is
+        what guards the choice of where to linearize instead of the singular abscissa:
+        any fixed substitute (the middle of the domain, say) is itself the singularity
+        for an integrand like this one.
         """
         p = jnp.array([1.4, 1.3])
-        f = lambda c: quad(  # noqa: E731
-            lambda t, c_: jnp.array([c_[0] / jnp.sqrt(jnp.abs(t)), jnp.cos(c_[1] * t)]),
+        f = _singular_quad(
+            quad,
+            adjoint,
+            lambda t, c_: jnp.array([_midpoint_singular(t, c_), jnp.cos(c_[1] * t)]),
             [-1.0, 0.0, 1.0],
-            (c,),
-            epsabs=1e-10,
-            epsrel=1e-10,
-            adjoint=adjoint,
-        )[0]
+        )
         jac = np.asarray(jax.jacrev(f)(p))
         assert np.isfinite(jac).all()
         # int cos(c t) over [-1, 1] is 2 sin(c)/c, so d/dc is 2(c cos c - sin c)/c**2
@@ -1502,14 +1461,8 @@ class TestSingularIntegrandDerivatives:
         transposes through the custom rules instead; they reach different machinery.
         """
         p = jnp.array([0.4])
-        f = lambda c: quad(  # noqa: E731
-            _endpoint_singular,
-            [0.0, 1.0],
-            (c,),
-            epsabs=1e-10,
-            epsrel=1e-10,
-            adjoint=adjoint,
-        )[0].squeeze()
+        g = _singular_quad(quad, adjoint, _endpoint_singular, [0.0, 1.0])
+        f = lambda c: g(c).squeeze()  # noqa: E731
         # int_0^1 t**(p-1) = 1/p, so the second derivative is 2/p**3
         want = 2 / 0.4**3
         for name, h in (
