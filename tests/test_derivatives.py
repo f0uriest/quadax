@@ -703,6 +703,35 @@ def test_integer_limits(quad, adjoint):
     )
 
 
+@pytest.mark.parametrize("quad", all_methods)
+@pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
+@pytest.mark.parametrize(
+    "interval", [[0.5, jnp.inf], [-jnp.inf, -0.5], [-jnp.inf, jnp.inf]]
+)
+def test_infinite_limits(quad, adjoint, interval):
+    """A finite limit of an unbounded interval must be differentiable in both modes.
+
+    ``exp(-c|t|)`` integrates to ``exp(-c|a|)/c`` from a finite ``a`` out to the nearer
+    infinity, so the derivative with respect to that limit is known exactly, and it is
+    zero with respect to an infinite one.
+    """
+    c = jnp.array([1.5])
+    fun = lambda t, cc: jnp.exp(-cc[0] * jnp.abs(t))  # noqa: E731
+    interval = jnp.asarray(interval)
+    f = lambda v: quad(fun, v, (c,), adjoint=adjoint)[0]  # noqa: E731
+    rev = np.asarray(jax.jacrev(f)(interval))
+    assert np.isfinite(rev).all()
+    np.testing.assert_allclose(rev, np.asarray(jax.jacfwd(f)(interval)), rtol=1e-10)
+    finite = np.isfinite(np.asarray(interval))
+    # a limit at infinity moves nothing; a finite one carries the whole derivative
+    exact = np.where(
+        finite,
+        -np.sign(np.asarray(interval)) * np.exp(-1.5 * np.abs(np.asarray(interval))),
+        0.0,
+    )
+    np.testing.assert_allclose(rev, np.where(finite, exact, 0.0), rtol=1e-6, atol=1e-9)
+
+
 @pytest.mark.parametrize("quad", romberg_methods)
 def test_romberg_differentiates_the_extrapolation(quad):
     """The derivative must run through the Richardson table, not just the finest level.

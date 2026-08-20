@@ -246,8 +246,12 @@ def map_interval(
     fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b, reference)
     # map original breakpoints to new domain
     inv = MAPFUNS_REF_INV if reference else MAPFUNS_INV
-    interval_t: jax.Array = jax.lax.switch(bitmask, inv, interval, a, b)
-    # +/-inf gets mapped to +/-1 but numerically evaluates to nan so we replace that.
+    # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
+    # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
+    # where type trick to avoid nan in reverse mode.
+    finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
+    interval_finite = jnp.where(jnp.isinf(interval), finite, interval)
+    interval_t: jax.Array = jax.lax.switch(bitmask, inv, interval_finite, a, b)
     interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
     interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
     return fun_mapped, interval_t
