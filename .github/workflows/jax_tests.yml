@@ -151,7 +151,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Download test results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: jax-result-*
           path: results
