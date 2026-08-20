@@ -4,6 +4,21 @@ Changelog
 
 v0.3.0
 ------
+- Added convergence acceleration to the adaptive integrators. The sequence of running
+  totals is accelerated using Wynn's epsilon algorithm, which can greatly reduce the
+  work needed for integrands with algebraic singularities or on infinite intervals.
+  ``quadgk`` is then the same algorithm as ``scipy.integrate.quad``.
+  - ``quadgk``, ``quadcc``, ``quadts`` and ``adaptive_quadrature`` take a new
+    ``extrapolate`` argument controlling it, on by default everywhere except
+    ``quadts``. The tanh-sinh rule converges doubly exponentially, so its running
+    totals have no geometric tail for the epsilon algorithm to sum and the acceleration
+    rarely helps there.
+  - The extrapolated value is only returned when its error estimate beats the one from
+    the subdivision, so the accuracy is never worse than with ``extrapolate=False``.
+  - Smooth integrands on finite domains don't need it, but the additional cost when it
+    doesn't help is small and constant.
+  - Derivatives are supported as usual, with either adjoint.
+  - Results with ``extrapolate=False`` are unchanged.
 - Added pluggable adjoints, controlling how derivatives of a quadrature are computed.
  ``quadgk``, ``quadcc``, ``quadts``, ``romberg``, ``rombergts``, and
  ``adaptive_quadrature`` all take a new ``adjoint`` argument, and ``AbstractAdjoint``, ``DirectAdjoint``, and ``LeibnizAdjoint`` are exported at the top level.
@@ -81,6 +96,13 @@ v0.3.0
 - Tanh-sinh nodes now sit closer to the endpoints of the domain, improving convergence
   for integrands that are singular at an endpoint. Additional care is also taken when
   constructing tanh-sinh nodes in reduced precision to ensure the nodes are distinct.
+- ``romberg`` and ``rombergts`` take a new ``extrapolate`` argument, on by default.
+  ``extrapolate=False`` keeps the same nodes and the same halving schedule but returns
+  the un-extrapolated estimate instead of the Richardson-extrapolated one. Worth having
+  for integrands not smooth enough for the extrapolation's error expansion to hold,
+  where it amplifies the error rather than cancelling it. The convergence check and the
+  reported ``err`` follow whichever estimate is in use, and the ``table`` returned by
+  ``full_output`` then has only its first column filled.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and
