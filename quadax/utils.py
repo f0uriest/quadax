@@ -453,34 +453,82 @@ def _decode_status(status):
 STATUS = {i: _decode_status(i) for i in range(int(2**6))}
 
 
-def wrap_func(fun: Callable[..., jax.Array], args: tuple[Any, ...], xtype):
+def wrap_func(
+    fun: Callable[..., jax.Array],
+    args: tuple[Any, ...],
+    xtype,
+    batch_size: int | None = None,
+):
     """Vectorize, jit, and mask out inf/nan.
 
     ``xtype`` is the dtype the integrand will be called at, and the integrand is probed
     at that dtype rather than at a weakly typed default. See the note on ``MAPFUNS``.
+
+    ``batch_size`` bounds how many points the returned function evaluates at once. The
+    default evaluates however many it is given.
     """
     f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
     # need to make sure we get the correct shape for array valued integrands
     outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
-    return _WrappedFunction(fun, args, outsig)
+    return _WrappedFunction(fun, args, outsig, batch_size)
 
 
 class _WrappedFunction(eqx.Module):
-    """Wraps a function in jit/vectorize and masks out inf/nans."""
+    """Wraps a function in jit/vectorize and masks out inf/nans.
+
+    Evaluates at most ``batch_size`` points at once, scanning over the batches. The
+    number of points is fixed at trace time here, so the batches are cut to fit rather
+    than the points being padded up to a whole number of batches: the leftovers are
+    evaluated together in one smaller batch. That costs one extra tracing of the
+    integrand and never an extra evaluation of it, which is the right way round when an
+    evaluation is the expensive part, which is the case ``batch_size`` exists for.
+
+    Callers whose point count is only known at run time cannot do this, and pad instead;
+    see ``_level_sum`` in the Romberg solver.
+    """
 
     fun: Callable[..., jax.Array]
     args: tuple[Any, ...]
     outsig: str
+    batch_size: int | None = None
 
-    @eqx.filter_jit
-    def __call__(self, x: jax.Array) -> jax.Array:
-        f: jax.Array = jnp.vectorize(
+    def _vectorize(self, x: jax.Array) -> jax.Array:
+        return jnp.vectorize(
             self.fun,
             excluded=tuple(range(1, len(self.args) + 1)),
             signature="()->" + self.outsig,
         )(x, *self.args)
+
+    @eqx.filter_jit
+    def __call__(self, x: jax.Array) -> jax.Array:
+        b = self.batch_size
+        # A scalar abscissa has nothing to batch: Romberg calls the integrand one point
+        # at a time, and every caller probes it with a scalar under eval_shape.
+        if b is None or x.ndim == 0 or x.shape[0] <= b:
+            f: jax.Array = self._vectorize(x)
+        else:
+            n = x.shape[0]
+            nfull = n // b
+            full = jax.lax.map(self._vectorize, x[: nfull * b].reshape(nfull, b))
+            parts = [full.reshape(-1, *full.shape[2:])]
+            if n % b:
+                parts.append(self._vectorize(x[nfull * b :]))
+            f = jnp.concatenate(parts)
         return jnp.where(jnp.isfinite(f), f, 0.0)
+
+
+def check_size(size: int | None, name: str = "batch_size") -> None:
+    """Raise if ``size`` is neither ``None`` nor a positive integer.
+
+    Shared by the options that set how many evaluations are grouped together:
+    ``batch_size`` on the quadrature routines and ``chunk_size`` on the adjoints.
+    """
+    errorif(
+        size is not None and (not isinstance(size, (int, np.integer)) or size < 1),
+        ValueError,
+        f"{name} must be None or a positive integer, got {size}",
+    )
 
 
 class QuadratureInfo(NamedTuple):

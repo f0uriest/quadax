@@ -47,6 +47,12 @@ all_methods = adaptive_methods + romberg_methods
 # accuracy is part of what is under test.
 machinery_methods = [quadgk]
 
+# One routine from each family that groups its integrand evaluations differently. The
+# adaptive routines share the wrapper that cuts the batches to fit a node count known
+# when the rule is built; the Romberg pair pads instead, because a level's size is only
+# known at run time, and rombergts pads a mapped integrand.
+batching_families = [quadgk, romberg, rombergts]
+
 # problems exercising the paths that differ: plain, interior breakpoints, an infinite
 # limit, and a vector valued integrand.
 example_problems = [
@@ -1001,3 +1007,252 @@ class TestExtrapolatedAdjoints:
         second = np.asarray(d1(d2(f))(x))
         assert np.all(np.isfinite(second))
         np.testing.assert_allclose(second, 0.0, atol=1e-9)
+
+
+class TestBatchSize:
+    """Batching integrand evaluations must not disturb the derivatives.
+
+    It puts new control flow in the differentiated path of both families: a ``scan``
+    node batches inside the adaptive rules, and a dynamically bounded loop over point
+    batches inside the Romberg levels. Romberg also introduces padded lanes, since its
+    level sizes are only known at run time; those are substituted rather than masked
+    precisely so they cannot poison a gradient, which is what the NaN check below is
+    for.
+
+    The adaptive comparison is at ULP scale, since cutting the batches to fit leaves the
+    arithmetic the same. Romberg's is looser, because batching does reassociate
+    the sum over each level.
+    """
+
+    @pytest.mark.parametrize("quad", machinery_methods)
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_adaptive_matches_unbatched(self, quad, adjoint, transform):
+        """Same derivative, in either mode, under either adjoint."""
+        self._check_adaptive(quad, adjoint, transform, 0)
+
+    # The problems a batched rule application can tell apart from the plain finite one
+    # the tests above run on. An infinite limit, because the abscissae the batches slice
+    # are then the mapped ones rather than the interval's own; and a vector valued
+    # integrand, whose values carry trailing axes that slicing the leading one has to
+    # leave alone. Interior breakpoints are deliberately not among them: they change the
+    # subdivision, and batching happens strictly within a single application of the
+    # rule, so they would re-run the plain case under another name.
+    SHAPES = [3, 4]
+    SHAPE_IDS = ["infinite", "vector"]
+
+    @pytest.mark.parametrize("i", SHAPES, ids=SHAPE_IDS)
+    def test_adaptive_over_problem_shapes(self, i):
+        """And on the shapes of problem a batched rule application can tell apart."""
+        self._check_adaptive(quadgk, adjoints[0], jax.jacrev, i)
+
+    def _check_adaptive(self, quad, adjoint, transform, i):
+        prob = example_problems[i]
+        interval = jnp.asarray(prob["interval"])
+        make = lambda bs: (
+            lambda a: quad(  # noqa: E731
+                prob["fun"], interval, a, adjoint=adjoint, batch_size=bs
+            )[0]
+        )
+        want = transform(make(None))(prob["args"])
+        got = transform(make(4))(prob["args"])
+        want, got = jax.tree.leaves(want)[0], jax.tree.leaves(got)[0]
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=ULP_RTOL, atol=ULP_ATOL
+        )
+
+    @pytest.mark.parametrize("quad", romberg_methods, ids=["romberg", "ts"])
+    @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_romberg_matches_unbatched(self, quad, adjoint, transform):
+        """Reverse mode included, which for Romberg goes through the custom primitive.
+
+        ``DirectAdjoint`` freezes the number of levels and replays them, and that replay
+        has to batch its points exactly as the solve did. Batching one and not the other
+        would differentiate a discretization that was never evaluated.
+        """
+        fun = lambda t, c: jnp.exp(-c * t**2)  # noqa: E731
+        interval = jnp.array([0.0, 2.0])
+        args = jnp.asarray(0.7)
+        make = lambda bs: (
+            lambda c: quad(  # noqa: E731
+                fun, interval, (c,), divmax=10, adjoint=adjoint, batch_size=bs
+            )[0]
+        )
+        want = float(transform(make(None))(args))
+        got = float(transform(make(8))(args))
+        np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-12)
+
+    @pytest.mark.parametrize("quad", batching_families)
+    def test_wrt_interval(self, quad):
+        """The limits are differentiated with respect to as well as the args."""
+        fun = lambda t: jnp.exp(-(t**2))  # noqa: E731
+        make = lambda bs: lambda iv: quad(fun, iv, batch_size=bs)[0]  # noqa: E731
+        iv = jnp.array([0.0, 2.0])
+        np.testing.assert_allclose(
+            np.asarray(jax.jacfwd(make(4))(iv)),
+            np.asarray(jax.jacfwd(make(None))(iv)),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize("quad", batching_families)
+    def test_padding_introduces_no_new_nan(self, quad):
+        """An integrand singular at a limit, where a careless fill would land.
+
+        Romberg's padded lanes repeat a point their batch genuinely evaluates, not a
+        made up one, so they can only ever ask the integrand for a value it is already
+        being asked for. Filling them with a placeholder would mask the value but leave
+        a NaN in its derivative, which masking afterwards does not remove. The adaptive
+        routines pad nothing and are here to show the claim holds trivially for them.
+
+        The claim is that batching adds no NaN, not that there is none: a closed rule
+        (and Romberg's trapezoidal level zero) places a node on the singularity itself
+        and has an unusable derivative there whatever the batch size. So the batched run
+        is held to what the unbatched one already manages, component by component.
+        """
+        fun = lambda t, c: jnp.log(c * t)  # noqa: E731
+        f = lambda bs: jax.grad(  # noqa: E731
+            lambda c: quad(fun, jnp.array([0.0, 1.0]), (c,), batch_size=bs)[0]
+        )(jnp.asarray(2.0))
+        want = np.isfinite(np.asarray(f(None)))
+        got = np.isfinite(np.asarray(f(3)))
+        np.testing.assert_array_equal(got, want)
+
+    @pytest.mark.parametrize("quad", batching_families)
+    def test_vmap(self, quad):
+        """Batching sits inside the loops that ``vmap`` already has to survive."""
+        fun = lambda t, c: jnp.exp(-c * t**2)  # noqa: E731
+        f = lambda c: quad(  # noqa: E731
+            fun, jnp.array([0.0, 2.0]), (c,), batch_size=4
+        )[0]
+        cs = jnp.array([0.5, 0.7, 1.1])
+        np.testing.assert_allclose(
+            np.asarray(jax.vmap(f)(cs)),
+            np.asarray(jnp.array([f(c) for c in cs])),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            np.asarray(jax.vmap(jax.grad(f))(cs)),
+            np.asarray(jnp.array([jax.grad(f)(c) for c in cs])),
+            rtol=1e-10,
+            atol=1e-12,
+        )
+
+
+class TestChunkSize:
+    """How many sub-intervals of the frozen subdivision an adjoint evaluates at once.
+
+    The reverse-mode counterpart of ``batch_size``: that one bounds the work within a
+    sub-interval, this one bounds how many sub-intervals are in flight together. It is
+    purely a memory-against-speed choice, so like ``batch_size`` on the adaptive rules
+    it must not move the derivative - unused slots in a chunk are handed a real
+    sub-interval and masked out, so the chunking changes only the order the same
+    contributions are summed in.
+
+    The blocking is done on the subdivision alone and never looks at the local rule, so
+    these run through ``machinery_methods`` rather than all three adaptive routines.
+    """
+
+    # Straddling the number of slots in the subdivision: one sub-interval at a time, a
+    # size leaving a partial last chunk, the default, and one above the slot count so
+    # the clip fires.
+    CHUNK_SIZES = [1, 3, 8, 64]
+
+    @pytest.mark.parametrize("quad", machinery_methods)
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
+    )
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=str)
+    def test_derivative_is_unchanged(self, quad, adjoint, transform, chunk_size):
+        """Every chunk size gives the derivative the default one gives."""
+        self._check(quad, adjoint, transform, chunk_size, 0)
+
+    # The subdivisions that differ in what the chunking has to do with them, beyond the
+    # plain finite one the test above runs on. Interior breakpoints give the frozen mesh
+    # more than one owner, so rebuilding the endpoints a chunk covers is a different
+    # computation; an infinite limit puts that mesh in mapped coordinates; and a vector
+    # valued integrand is what forces the mask over a chunk's unused slots to broadcast
+    # against trailing axes rather than matching the contributions elementwise.
+    SHAPES = [1, 3, 4]
+    SHAPE_IDS = ["breakpoints", "infinite", "vector"]
+
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
+    )
+    @pytest.mark.parametrize("i", SHAPES, ids=SHAPE_IDS)
+    def test_over_problem_shapes(self, adjoint, i):
+        """And does so on each shape of subdivision there is to chunk.
+
+        A chunk size that does not divide the slot count is the one that pads, so that
+        is the size these run at.
+        """
+        self._check(quadgk, adjoint, jax.jacrev, 3, i)
+
+    def _check(self, quad, adjoint, transform, chunk_size, i):
+        prob = example_problems[i]
+        interval = jnp.asarray(prob["interval"])
+        make = lambda adj: (
+            lambda a: quad(  # noqa: E731
+                prob["fun"], interval, a, adjoint=adj
+            )[0]
+        )
+        want = transform(make(adjoint()))(prob["args"])
+        got = transform(make(adjoint(chunk_size=chunk_size)))(prob["args"])
+        np.testing.assert_allclose(
+            np.asarray(jax.tree.leaves(got)[0]),
+            np.asarray(jax.tree.leaves(want)[0]),
+            rtol=ULP_RTOL,
+            atol=ULP_ATOL,
+        )
+
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
+    )
+    def test_composes_with_batch_size(self, adjoint):
+        """The two knobs are independent, and multiply to the real parallel width."""
+        prob = example_problems[0]
+        interval = jnp.asarray(prob["interval"])
+        f = lambda adj, bs: jax.jacrev(  # noqa: E731
+            lambda a: quadgk(prob["fun"], interval, a, adjoint=adj, batch_size=bs)[0]
+        )(prob["args"])
+        want = f(adjoint(), None)
+        got = f(adjoint(chunk_size=3), 4)
+        np.testing.assert_allclose(
+            np.asarray(jax.tree.leaves(got)[0]),
+            np.asarray(jax.tree.leaves(want)[0]),
+            rtol=ULP_RTOL,
+            atol=ULP_ATOL,
+        )
+
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
+    )
+    def test_romberg_is_unaffected(self, adjoint):
+        """Romberg has no subdivision to chunk, so the option is simply inert there."""
+        f = lambda adj: float(  # noqa: E731
+            jax.grad(
+                lambda c: romberg(
+                    lambda t, c_: jnp.exp(-c_ * t**2),
+                    jnp.array([0.0, 2.0]),
+                    (c,),
+                    adjoint=adj,
+                )[0]
+            )(jnp.asarray(0.7))
+        )
+        np.testing.assert_allclose(
+            f(adjoint(chunk_size=2)), f(adjoint()), rtol=ULP_RTOL, atol=ULP_ATOL
+        )
+
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint, LeibnizAdjoint], ids=adjoint_ids
+    )
+    @pytest.mark.parametrize(
+        "chunk_size", [0, -1, 2.5], ids=["zero", "negative", "float"]
+    )
+    def test_bad_chunk_size_rejected(self, adjoint, chunk_size):
+        """Rejected when the adjoint is built, not on first use."""
+        with pytest.raises(ValueError, match="chunk_size"):
+            adjoint(chunk_size=chunk_size)

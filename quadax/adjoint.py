@@ -17,7 +17,7 @@ from jax.interpreters import ad, batching, mlir
 
 from . import _acceleration
 from .fixed_order import AbstractQuadratureRule
-from .utils import _real_dtype, map_interval, tree_where, wrap_func
+from .utils import _real_dtype, check_size, map_interval, tree_where, wrap_func
 
 
 class _ConvertedFunction(eqx.Module):
@@ -105,13 +105,18 @@ class QuadratureOps(NamedTuple):
     mesh_is_primal: bool = True
 
 
-def _with_checkpoint(ops, checkpoint):
-    """Thread the checkpointing choice down to the fixed-subdivision quadrature."""
+def _with_options(ops, checkpoint, chunk_size):
+    """Thread the adjoint's own options down to the fixed-subdivision quadrature.
+
+    Only the operations that evaluate a fixed subdivision take these; ``solve`` is the
+    primal adaptive loop and is unaffected by either.
+    """
+    opts = {"checkpoint": checkpoint, "chunk_size": chunk_size}
     upd = {}
     if ops.on_mesh is not None:
-        upd["on_mesh"] = partial(ops.on_mesh, checkpoint=checkpoint)
+        upd["on_mesh"] = partial(ops.on_mesh, **opts)
     if ops.rebuild is not None and ops.frozen_solve is not None:
-        upd["frozen_solve"] = partial(ops.frozen_solve, checkpoint=checkpoint)
+        upd["frozen_solve"] = partial(ops.frozen_solve, **opts)
     return ops._replace(**upd) if upd else ops
 
 
@@ -141,17 +146,19 @@ def _rebuild_mesh(interval, frozen):
     return lo + frac_a * width, lo + frac_b * width
 
 
-# How many sub-intervals of a fixed subdivision are evaluated at once. Evaluating all of
-# them together is fastest but makes peak memory scale with ``max_ninter``, which is a
-# safety bound users tend to set generously; evaluating one at a time streams but
-# serializes. Measured on a scalar integrand with an order 21 rule, 8 is where the curve
-# turns over: it matches one-at-a-time peak memory at large ``max_ninter`` while being
-# noticeably faster in reverse mode, and larger blocks buy little more speed for a lot
-# more memory.
+# Default for the adjoints' ``chunk_size``: how many sub-intervals of a fixed
+# subdivision are evaluated at once. Evaluating them all together is fastest but makes
+# peak memory scale with ``max_ninter``, which is a safety bound users tend to set
+# generously; evaluating one at a time streams but serializes. Measured on a scalar
+# integrand with an order 21 rule, 8 is where the curve turns over: it matches
+# one-at-a-time peak memory at large ``max_ninter`` while being noticeably faster in
+# reverse mode, and larger blocks buy little more speed for a lot more memory. That
+# measurement is for one shape of problem, which is why this is a default and not a
+# constant.
 _CHUNK = 8
 
 
-def _block_mesh(rule, vfunc, a_arr, b_arr):
+def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
     """Group a fixed subdivision into blocks of sub-intervals ready for evaluation.
 
     Returns the blocked endpoints and mask to scan over, a function evaluating one
@@ -179,13 +186,13 @@ def _block_mesh(rule, vfunc, a_arr, b_arr):
     # cannot be transposed. Substituting a real sub-interval also stops an integrand
     # that is singular somewhere in the mapped domain from poisoning the unused slots
     # with a NaN that the mask would then propagate. So the granularity of the skip is
-    # ``_CHUNK``.
+    # ``chunk_size``.
     used = a_arr != b_arr
     a_safe = jnp.where(used, a_arr, a_arr[0])
     b_safe = jnp.where(used, b_arr, b_arr[0])
 
     nslot = a_arr.shape[0]
-    chunk = min(_CHUNK, nslot)
+    chunk = min(chunk_size, nslot)
     pad = -nslot % chunk
     reshape = lambda x, fill: jnp.pad(x, (0, pad), constant_values=fill).reshape(
         -1, chunk
@@ -233,10 +240,12 @@ def _checkpointed(bodyfun, checkpoint):
     return jax.checkpoint(bodyfun) if checkpoint else bodyfun
 
 
-def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
+def _quad_on_mesh(
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+):
     """Apply the local rule on a fixed subdivision and sum the contributions."""
     del kwargs
-    blocks, evaluate, sds, _ = _block_mesh(rule, vfunc, a_arr, b_arr)
+    blocks, evaluate, sds, _ = _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size)
 
     def bodyfun(total, block):
         return total + jnp.sum(evaluate(block), axis=0), None
@@ -247,14 +256,16 @@ def _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
     return total
 
 
-def _values_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True):
+def _values_on_mesh(
+    rule, vfunc, a_arr, b_arr, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+):
     """Apply the local rule on a fixed subdivision, keeping the contributions separate.
 
     As ``_quad_on_mesh``, except that the per-sub-interval values are returned rather
     than summed, because the replay has to recombine them in more than one way.
     """
     del kwargs
-    blocks, evaluate, sds, nslot = _block_mesh(rule, vfunc, a_arr, b_arr)
+    blocks, evaluate, sds, nslot = _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size)
 
     def bodyfun(carry, block):
         return carry, evaluate(block)
@@ -268,10 +279,14 @@ def _frozen_mesh(state):
     return (state["owner"], state["frac_a"], state["frac_b"])
 
 
-def _mesh_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
+def _mesh_solve(
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+):
     """Quadrature on the subdivision implied by `frozen`, as a function of interval."""
     a_arr, b_arr = _rebuild_mesh(interval, frozen)
-    return _quad_on_mesh(rule, vfunc, a_arr, b_arr, kwargs, checkpoint=checkpoint)
+    return _quad_on_mesh(
+        rule, vfunc, a_arr, b_arr, kwargs, checkpoint=checkpoint, chunk_size=chunk_size
+    )
 
 
 class _ReplayRecord(NamedTuple):
@@ -317,7 +332,9 @@ def _frozen_replay(state):
     return _ReplayRecord(**{name: state[name] for name in _ReplayRecord._fields})
 
 
-def _replay_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
+def _replay_solve(
+    rule, vfunc, interval, frozen, kwargs, *, checkpoint=True, chunk_size=_CHUNK
+):
     """Re-run an accelerated quadrature on the decisions the primal settled on.
 
     An accelerated solve may return an extrapolated value rather than the sum over the
@@ -347,6 +364,7 @@ def _replay_solve(rule, vfunc, interval, frozen, kwargs, *, checkpoint=True):
         jnp.concatenate([mesh[1], parents[1]]),
         kwargs,
         checkpoint=checkpoint,
+        chunk_size=chunk_size,
     )
     nslot = mesh[0].shape[0]
     v_mesh, v_parent = values[:nslot], values[nslot:]
@@ -529,14 +547,26 @@ class DirectAdjoint(AbstractAdjoint):
         default. Turning it off has not been found to pay for itself even on integrands
         costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
         effect in forward mode.
+    chunk_size : int
+        How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
+        within a chunk, ``scan`` across chunks. Trades peak memory against speed, and is
+        the reverse-mode counterpart of the quadrature routines' ``batch_size``, which
+        bounds the work *within* one sub-interval. The two multiply, so a gradient
+        evaluates the integrand at up to ``chunk_size`` times ``batch_size`` points at a
+        time. Lower it when a derivative runs out of memory and ``checkpoint`` was not
+        enough; raise it when the subdivision is small and the scan is pure overhead.
 
     """
 
     checkpoint: bool = True
+    chunk_size: int = _CHUNK
+
+    def __post_init__(self):
+        check_size(self.chunk_size, "chunk_size")
 
     def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
         """Evaluate the quadrature and differentiate it on the converged subdivision."""
-        ops = _with_checkpoint(ops, self.checkpoint)
+        ops = _with_options(ops, self.checkpoint, self.chunk_size)
         if ops.rebuild is None:
             if ops.frozen_solve is not None:
                 # No subdivision, but a discretization we can freeze (Romberg). Route
@@ -898,13 +928,29 @@ class LeibnizAdjoint(AbstractAdjoint):
         default. Turning it off has not been found to pay for itself even on integrands
         costing megaflops per evaluation, so treat it mainly as a diagnostic knob. No
         effect in forward mode.
+    chunk_size : int
+        How many sub-intervals of the frozen subdivision to evaluate at once: ``vmap``
+        within a chunk, ``scan`` across chunks. Trades peak memory against speed, and is
+        the reverse-mode counterpart of the quadrature routines' ``batch_size``, which
+        bounds the work *within* one sub-interval. The two multiply, so a gradient
+        evaluates the integrand at up to ``chunk_size`` times ``batch_size`` points at a
+        time. Lower it when a derivative runs out of memory and ``checkpoint`` was not
+        enough; raise it when the subdivision is small and the scan is pure overhead.
+
+        Only derivatives with respect to the interval of integration is taken on a
+        frozen subdivision here, so this has less effect than it does for
+        :class:`DirectAdjoint`.
     """
 
     checkpoint: bool = True
+    chunk_size: int = _CHUNK
+
+    def __post_init__(self):
+        check_size(self.chunk_size, "chunk_size")
 
     def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
         """Evaluate the quadrature, differentiating it by the Leibniz rule."""
-        ops = _with_checkpoint(ops, self.checkpoint)
+        ops = _with_options(ops, self.checkpoint, self.chunk_size)
         return _leibniz(
             rule, interval, args, consts, epsabs, epsrel, kwargs, ops=ops, freeze=False
         )
