@@ -34,12 +34,20 @@ below:
 
 Notes
 -----
-The value returned by an extrapolation carries no rigorous error bound. The estimate
-here is the spread of the three most recent extrapolants (same as QUADPACK), which
-measures how far the sequence of extrapolants has settled rather than how far it sits
-from the limit, and it can understate the true error substantially (measured at up to
-170x optimistic for ``alpha = 0.99``), so callers should treat it as a guide rather
-than a guarantee.
+The value returned by an extrapolation carries no rigorous error bound, and the estimate
+reported with it is a heuristic that callers should treat as a guide rather than a
+guarantee. It is built to err towards over-reporting: the spread of the three most
+recent extrapolants says how far the sequence has moved, and on its own that is
+optimistic, because a slowly converging sequence still will have a small spread even
+when far from the limit.
+
+The reported estimate is where this departs furthest from QUADPACK [2], which reports
+the spread alone. The recursion itself, its guards and their constants are from
+QUADPACK. The additions are the tail term, the separate ``abserr_sharp`` that callers
+rank by, and in the adaptive loop a widening of the kept estimate when later
+extrapolations disagree with the value it belongs to; each is marked where it appears.
+They exist because the spread understates the error by more the longer a run goes on,
+without limit, on problems whose asymptotics the algorithm cannot fit.
 
 References
 ----------
@@ -80,6 +88,31 @@ IRREGULAR = 1e-4
 # from. The multiplier is QUADPACK's [2].
 ERR_FLOOR = 5.0
 
+# The three constants below have no counterpart in QUADPACK [2], which reports the
+# spread of the last three extrapolants and nothing else. They parameterize the tail
+# term `_record` adds to that spread, and are set from the behavior of the endpoint
+# singularities in the test suite rather than derived.
+#
+# The remaining tail of a converging extrapolant sequence, as a multiple of the sum of
+# its future steps. A ratio estimated from three steps is itself noisy, and for a
+# sequence whose steps shrink like a power of the index rather than geometrically the
+# geometric sum understates the tail by a factor between one and three; two covers the
+# powers that arise from endpoint singularities. See `_record`.
+TAIL_SAFETY = 2.0
+
+# Largest step ratio the tail estimate acts on. A sequence whose steps are not shrinking
+# has no bounded tail to estimate, so the correction is capped here rather than allowed
+# to run to infinity; what the cap says is "much larger than the last step", and the
+# caller decides whether that is worse than its own mesh estimate.
+RHO_MAX = 0.99
+
+# A step below this multiple of eps times the result is roundoff rather than movement,
+# and the ratios formed from it carry no information. Set well above the point where the
+# steps are pure noise: a sequence whose extrapolants still disagree, but only in the
+# last few digits, has no tail worth estimating, and applying the correction there costs
+# a converged answer its status for nothing.
+STEP_NOISE = 1e3
+
 
 class EpsilonTable(NamedTuple):
     """State of an in-progress epsilon algorithm.
@@ -105,6 +138,11 @@ class EpsilonTable(NamedTuple):
         improvement on the one before is for the caller to decide and remember.
     abserr : Array
         Estimated absolute error in ``result``, a real scalar.
+    abserr_sharp : Array
+        How tightly this extrapolation settled, ie the spread of the last three
+        extrapolants alone. It is the right quantity for ranking one extrapolation
+        against another and the wrong one to report, since it measures how far the
+        sequence has moved rather than how far it has left to go.
     """
 
     table: jax.Array
@@ -113,6 +151,7 @@ class EpsilonTable(NamedTuple):
     last_results: jax.Array
     result: jax.Array
     abserr: jax.Array
+    abserr_sharp: jax.Array
 
 
 def init_table(shape: tuple[int, ...], ytype: Any) -> EpsilonTable:
@@ -126,6 +165,7 @@ def init_table(shape: tuple[int, ...], ytype: Any) -> EpsilonTable:
         result=jnp.zeros(shape, ytype),
         # Starts at infinity so that the first genuine estimate always improves on it.
         abserr=jnp.array(jnp.inf, etype),
+        abserr_sharp=jnp.array(jnp.inf, etype),
     )
 
 
@@ -358,21 +398,70 @@ def _record(
     norm: Callable,
     epmach: float,
 ) -> EpsilonTable:
-    """Store the extrapolation and estimate its error from the last three of them.
+    """Store the extrapolation and estimate how far it still is from the limit.
 
-    The estimate is the spread of the three most recent extrapolated values. It is a
-    heuristic layered on a heuristic, the extrapolated value has no rigorous bound of
-    its own, and needs three of them before it means anything, so the first two calls
-    report no useful error at all.
+    QUADPACK [2] reports the spread of the three most recent extrapolated values. That
+    says how far the sequence has recently *moved*, which is not the same as how far it
+    still has to *go*, and using it as if it were is optimistic by exactly the amount
+    that matters: a sequence whose steps are still shrinking slowly has its whole
+    remaining tail ahead of it. If the extrapolants converge with step ratio ``rho``
+    that tail sums to ``step / (1 - rho)``, and that correction is added here. Where the
+    table is working ``rho`` is small and the correction changes nothing; where the
+    acceleration cannot fit the problem's asymptotics ``rho`` approaches one and the
+    estimate grows to say so, which is the case the spread alone gets wrong and gets
+    wrong by more the longer the run goes on.
+
+    Neither part makes the result a bound; the extrapolated value still has none. Both
+    are chosen to fail towards over-reporting, since a run that overstates its error
+    declines to claim an accuracy it reached, while one that understates it claims an
+    accuracy it did not.
+
+    The uncorrected spread is kept as ``abserr_sharp`` for the caller to rank
+    extrapolations by. QUADPACK ranks on the same number it reports, which is safe only
+    while the two are the same; once the tail is added they are not, and ranking on the
+    corrected figure would let the tail term decide which value is kept rather than only
+    what is said about it. Ranking wants the sequence that settled tightest, which is
+    what the spread measures; only the reported figure needs the tail added.
     """
     have_three = state.n_calls >= 4
-    spread = sum(norm(result - state.last_results[i]) for i in range(3))
-    abserr = jnp.where(have_three, spread, abserr)
+    spread = sum(norm(result - r) for r in state.last_results)
+    est = jnp.where(have_three, spread, abserr)
+    sharp = jnp.maximum(est, ERR_FLOOR * epmach * norm(result))
+
+    # Successive steps of the extrapolant sequence, newest first. Two ratios are
+    # available from three steps; the larger is taken, so that a sequence which has
+    # merely paused is not mistaken for one that has arrived.
+    #
+    # A step of exactly zero is two extrapolations that returned the same value, which
+    # happens while the table is still filling and its unused slots read as equal. The
+    # flags below say only that a denominator is safe to divide by; a ratio whose
+    # denominator vanishes drops out of the maximum rather than suppressing the whole
+    # correction, which is the right way round, since a sequence that stood still and
+    # then moved is the least converged of all and wants the largest tail, not none.
+    d2 = jnp.asarray(norm(result - state.last_results[2]))
+    d1 = jnp.asarray(norm(state.last_results[2] - state.last_results[1]))
+    d0 = jnp.asarray(norm(state.last_results[1] - state.last_results[0]))
+    d1_ok, d0_ok = d1 > 0, d0 > 0
+    rho = jnp.maximum(
+        jnp.where(d1_ok, d2 / jnp.where(d1_ok, d1, 1.0), 0.0),
+        jnp.where(d0_ok, d1 / jnp.where(d0_ok, d0, 1.0), 0.0),
+    )
+    tail = TAIL_SAFETY * d2 / (1.0 - jnp.clip(rho, 0.0, RHO_MAX))
+    # Only while the steps still carry signal. Once the extrapolants agree to roundoff
+    # the ratio between their differences is noise, and the floor below is what applies.
+    # The spread and the tail are two readings of the same quantity, how far the
+    # extrapolant is from the limit, taken from the same three steps, so the larger is
+    # kept rather than the two added: summing would count one movement twice.
+    signal = d2 > STEP_NOISE * epmach * norm(result)
+    est = jnp.where(have_three & signal, jnp.maximum(est, tail), est)
+    est = jnp.maximum(est, ERR_FLOOR * epmach * norm(result))
+
     # Roll the newest in and the oldest out.
     last = jnp.where(
         have_three,
         jnp.concatenate([state.last_results[1:], result[jnp.newaxis]]),
         state.last_results.at[jnp.minimum(state.n_calls - 1, 2)].set(result),
     )
-    abserr = jnp.maximum(abserr, ERR_FLOOR * epmach * norm(result))
-    return state._replace(last_results=last, result=result, abserr=abserr)
+    return state._replace(
+        last_results=last, result=result, abserr=est, abserr_sharp=sharp
+    )

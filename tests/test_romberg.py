@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 from jax import config
 
-import quadax
 from quadax import romberg, rombergts
 
 from .problems import (
@@ -26,8 +25,11 @@ from .problems import (
     TOLS,
     ULP_ATOL,
     ULP_RTOL,
-    assert_contract,
+    assert_converged,
+    assert_honest,
     problem_id,
+    solve_once,
+    xfail_if_dishonest,
     xfail_if_known,
 )
 
@@ -53,21 +55,23 @@ class TestRomberg:
     report its failure with an error estimate that does not understate the true error.
     """
 
-    def test_value_and_error(self, request, method, tol, i):
-        """The answer is good to the tolerance asked for, and the error is honest."""
+    def test_error_is_honest(self, request, method, tol, i):
+        """The reported error does not understate the true error."""
+        prob = PROBLEMS[i]
+        xfail_if_dishonest(request, method, prob, tol)
+        y, info = solve_once(method, i, tol, interval_as_array=True)
+        assert_honest(y, info, prob, tol, model=RICHARDSON_MODEL)
+
+    def test_converges(self, request, method, tol, i):
+        """The routine reaches the tolerance it was asked for and reports success."""
         prob = PROBLEMS[i]
         xfail_if_known(request, method, prob, tol)
-        y, info = method(
-            prob["fun"],
-            jnp.asarray(prob["interval"], float),
-            epsabs=jnp.asarray(tol),
-            epsrel=jnp.asarray(tol),
-        )
-        if i in EXPECTED_TO_CONVERGE[method]:
-            assert int(info.status) == 0, (
-                f"{prob['name']} at tol={tol:g}: {quadax.STATUS[int(info.status)]}"
-            )
-        assert_contract(y, info, prob, tol, model=RICHARDSON_MODEL)
+        y, info = solve_once(method, i, tol, interval_as_array=True)
+        # Convergence is required only of the problems the method is for; the rest are
+        # swept to check they fail honestly, which `test_error_is_honest` covers.
+        if i not in EXPECTED_TO_CONVERGE[method] and int(info.status) != 0:
+            pytest.skip("convergence is not required of this case")
+        assert_converged(y, info, prob, tol)
 
 
 class TestRichardsonFlag:

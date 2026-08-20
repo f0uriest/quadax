@@ -29,6 +29,8 @@ import pytest
 import scipy.special
 from jax import config
 
+from quadax import STATUS
+
 config.update("jax_enable_x64", True)
 
 # What makes the problem hard. One of these four, since they are four answers to that
@@ -508,6 +510,45 @@ PROBLEMS = [
         "interval": [0, 1],
         "val": jnp.array([2.0, 2 / 5]),
     },
+    # problems 45-47 - the family problem 42 belongs to, at three different strengths.
+    # Bisecting towards the endpoint leaves a tail that decays like a power of the
+    # bisection count rather than geometrically, which is the one thing convergence
+    # acceleration by the epsilon algorithm cannot fit: it sums geometric modes, and
+    # here the ratio of successive terms drifts to 1 instead of settling. The exponent
+    # is what varies across the family, so that a routine which handles one strength by
+    # luck is not credited with handling the class.
+    #
+    # Each is checked by the substitution ``u = -log t``, which turns the integral into
+    # a plain power of ``u`` over ``[log 2, inf)``. General purpose quadrature does not
+    # get these right - `scipy.integrate.quad` and `mpmath.quad` are both wrong in the
+    # third digit on problem 42 - so the values come from the substituted form and not
+    # from a reference integrator.
+    #
+    # problem 45: tail after k bisections ~ k**-0.5, the slowest of the three
+    {
+        "name": "loglog-sqrt",
+        "tags": {SINGULAR_TAG},
+        "fun": lambda t: 1 / (2 * t * (-jnp.log(t)) ** 1.5),
+        "interval": [0, 0.5],
+        "val": 1 / jnp.sqrt(jnp.log(2)),
+    },
+    # problem 46: tail ~ k**-2, fast enough that the mesh alone can make progress on it
+    {
+        "name": "loglog-cube",
+        "tags": {SINGULAR_TAG},
+        "fun": lambda t: 1 / (t * jnp.log(t) ** 3),
+        "interval": [0, 0.5],
+        "val": -1 / (2 * jnp.log(2) ** 2),
+    },
+    # problem 47: problem 42 mirrored onto the right endpoint, so that the handling is
+    # not tied to which end of the interval the singularity sits at
+    {
+        "name": "loglog-right",
+        "tags": {SINGULAR_TAG},
+        "fun": lambda t: 1 / ((1 - t) * jnp.log(1 - t) ** 2),
+        "interval": [0.5, 1],
+        "val": 1 / jnp.log(2),
+    },
 ]
 
 ALL = list(range(len(PROBLEMS)))
@@ -560,10 +601,12 @@ _NO_TAIL_TO_ACCELERATE = (4, 5, 7, 8, 10, 11, 15, 31, 39)
 # The acceleration's premise does not hold, so it has nothing correct to converge to.
 # Wynn's epsilon algorithm fits an expansion in powers of the panel width, and on these
 # the true asymptotic is not of that form: 40 and 41 are the same oscillation
-# accumulating at a point no mesh reaches, and 42 approaches its endpoint value
-# logarithmically. Feeding the table anyway makes the answer slightly worse rather than
-# better, which is the honest outcome and not a defect to be tuned away.
-_ACCELERATION_DOES_NOT_APPLY = (40, 41, 42)
+# accumulating at a point no mesh reaches, and 42 and 45-47 approach their endpoint
+# value logarithmically, so the tail left after each bisection decays like a power of
+# the bisection count instead of geometrically. Feeding the table anyway makes the
+# answer slightly worse rather than better, which is the honest outcome and not a
+# defect to be tuned away.
+_ACCELERATION_DOES_NOT_APPLY = (40, 41, 42, 45, 46, 47)
 RESOLVED_BY_ACCELERATION = [
     i
     for i in tagged(SINGULAR_TAG, INDUCED_TAG)
@@ -661,14 +704,30 @@ class ErrorModel(NamedTuple):
 
 # The adaptive routines inflate each panel's error by the QUADPACK model and floor it at
 # `50*eps*integral_abs`, which makes the reported value a bound rather than an estimate:
-# on a converged run it is never optimistic, measured worst case 0.9997x, on quadgk at
+# on a converged run it is never optimistic, measured worst case 0.9999x, on quadcc at
 # `vector-mixed`. Once the routine has given up that guarantee lapses, but the result
-# must still be in the right league; measured worst case 22.1x, on quadgk at `loglog`.
-# Both numbers sit just above their measurement rather than at a round safe distance, so
-# that an estimator getting looser shows up here as a failure. The slack figure now sits
-# so close to the bound that `vector-mixed` is effectively the case defining it: the two
-# components share one mesh and one estimate, which stretches the bound to its limit,
-# and a change that loosened the estimator at all would fail there first.
+# must still be in the right league; measured worst case 10.5x, on quadgk at
+# `loglog-right`, over the cases the suite enforces rather than those in
+# `KNOWN_DISHONEST`. The slack figure sits so close to its measurement that
+# `vector-mixed` is effectively the case defining it: the two components share one mesh
+# and one estimate, which stretches the bound to its limit, and a change that loosened
+# the estimator at all would fail there first.
+#
+# The honesty figure is not held that tight, and is deliberately left at more than twice
+# its worst measurement. What it bounds is the estimate on runs that reported failure,
+# where there is no bound to appeal to and the number is a heuristic layered on a
+# heuristic; pinning it to the measurement would turn ordinary variation between
+# machines into a test failure without saying anything about the estimator. The
+# headroom is the point, and a measurement approaching 25 is the signal to look rather
+# than to raise it.
+#
+# A margin this tight is only worth holding against a case whose ratio is reproducible.
+# Where the acceleration cannot fit a problem's asymptotics, the epsilon table turns
+# last-bit differences in the mesh sums into swings in the reported error, so a ratio
+# measured there samples a chaotic quantity rather than describing the estimator, and
+# will differ between machines and between versions of the underlying libraries. The
+# `loglog` family is the worst of these, which is why the honesty figure is not set from
+# it however far under the bound it currently measures.
 QUADPACK_MODEL = ErrorModel(slack=1.0, honesty=25)
 
 # Romberg reports the difference between successive Richardson diagonals. That is an
@@ -698,18 +757,18 @@ real_of = {jnp.complex128: jnp.float64, jnp.complex64: jnp.float32}
 SLOP = 50
 
 
-def assert_contract(y, info, prob, tol, model=QUADPACK_MODEL):
-    """Assert what a quadrature routine promises about ``y`` and its error estimate.
+def assert_honest(y, info, prob, tol, model=QUADPACK_MODEL):
+    """Assert that the reported error does not understate the true error.
 
-    A status of 0 is a claim that the reported error met the request, and the reported
-    error is a bound rather than an estimate: it is allowed to be loose, but never
-    optimistic. The two together say the answer is good to the tolerance asked for.
+    This is the promise that holds whatever else happened. A routine that cannot solve
+    a problem is free to say so and return whatever it reached, but it is never free to
+    claim an accuracy it did not have, because a caller has nothing but this number to
+    decide whether to trust the answer.
 
-    A run that reports failure makes no accuracy claim, and is only required to be in
-    the right league.
-
-    ``model`` is the `ErrorModel` of the routine under test, which decides how much the
-    true error may exceed the reported one on each branch.
+    Which branch applies is read off the status rather than passed in: a status of 0
+    claims the reported error is a bound, so ``model.slack`` is the whole margin
+    allowed, while a run that reported failure has given that guarantee up and only has
+    to be in the right league, which is ``model.honesty``.
     """
     exact = np.asarray(prob["val"])
     value = np.asarray(y)
@@ -721,10 +780,6 @@ def assert_contract(y, info, prob, tol, model=QUADPACK_MODEL):
             f"{prob['name']} at tol={tol:g}: reported {reported:.3e} "
             f"< true {true_err:.3e}"
         )
-        assert reported <= max(tol, tol * float(np.max(np.abs(value))))
-        np.testing.assert_allclose(
-            value, exact, rtol=tol, atol=tol, err_msg=f"{prob['name']}, tol={tol:g}"
-        )
     else:
         assert true_err <= model.honesty * reported, (
             f"{prob['name']} at tol={tol:g}: failed with reported {reported:.3e} "
@@ -732,11 +787,62 @@ def assert_contract(y, info, prob, tol, model=QUADPACK_MODEL):
         )
 
 
-# Problems the routines do not currently deliver on, as (routine, problem) pointing at
-# the tolerances that fail. Every entry is one of the two contract breaches
-# `assert_contract` checks for, or a non-zero status on a problem the suite expects the
-# routine to solve; which one it is varies with the tolerance, so the tolerances are
-# listed rather than the failure mode.
+def assert_converged(y, info, prob, tol):
+    """Assert that the routine reached the requested tolerance and said so.
+
+    Three things together, all part of the same claim: the run reported success, the
+    error it reported is inside what was asked for, and the answer really is that good.
+    Separate from `assert_honest` because failing to converge and misreporting the error
+    are different defects: a problem no routine solves is expected to fail this, while
+    nothing is expected to fail the other.
+    """
+    exact = np.asarray(prob["val"])
+    value = np.asarray(y)
+    assert int(info.status) == 0, (
+        f"{prob['name']} at tol={tol:g}: {STATUS[int(info.status)]}"
+    )
+    reported = float(np.max(np.asarray(info.err)))
+    assert reported <= max(tol, tol * float(np.max(np.abs(value)))), (
+        f"{prob['name']} at tol={tol:g}: reported {reported:.3e} exceeds the tolerance "
+        f"it claims to have met"
+    )
+    np.testing.assert_allclose(
+        value, exact, rtol=tol, atol=tol, err_msg=f"{prob['name']}, tol={tol:g}"
+    )
+
+
+_SOLVED: dict = {}
+
+
+def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
+    """Run one case, reusing the result if another test has already asked for it.
+
+    The suite asks two separate questions of every solve - whether the error estimate is
+    honest, and whether the routine converged - and wants them to fail separately
+    without paying for the quadrature twice. Keyed on everything that changes the
+    answer, so a miss is a genuinely new case rather than a repeat.
+    """
+    key = (method, i, tol, interval_as_array, tuple(sorted(kwargs.items())))
+    if key not in _SOLVED:
+        prob = PROBLEMS[i]
+        interval = prob["interval"]
+        if interval_as_array:
+            interval = jnp.asarray(interval, float)
+        _SOLVED[key] = method(
+            prob["fun"],
+            interval,
+            epsabs=jnp.asarray(tol),
+            epsrel=jnp.asarray(tol),
+            **kwargs,
+        )
+    return _SOLVED[key]
+
+
+# Problems the routines do not reach the requested tolerance on, as (routine, problem)
+# pointing at the tolerances that fail. An entry says only that `assert_converged` does
+# not hold: the run did not report success, or reported it without the accuracy to back
+# it up. Whether the error it reported was honest is a separate question tracked in
+# `KNOWN_DISHONEST`, so an entry here is a limit on the method rather than a defect.
 #
 # Three groups sit here, with separate causes.
 #
@@ -747,68 +853,129 @@ def assert_contract(y, info, prob, tol, model=QUADPACK_MODEL):
 # truncation error is the floor. Fixing that floor should retire whole blocks at once,
 # so those entries are expected to be removed in groups rather than one at a time.
 #
-# The second is `loglog` and the `sin-inverse`/`osc-tail` pair, which every routine here
-# fails, and which no amount of subdivision or extrapolation is expected to fix at the
-# tighter tolerances: their asymptotics are not of the form either acceleration fits.
-# The loosest tolerance is not out of reach - `scipy.integrate.quad` does land inside
-# 1e-4 on `sin-inverse`, which is why the entry for it is not marked below - but nothing
-# reaches 1e-8. What is wanted from these is an honest report of failure, and the
-# entries record where even that is not met.
+# The second is the `loglog` family and the `sin-inverse`/`osc-tail` pair, which every
+# routine here fails and which no amount of subdivision or extrapolation is expected to
+# fix at the tighter tolerances: their asymptotics are not of the form either
+# acceleration fits. The two are unfittable for different reasons. Bisecting towards the
+# `loglog` endpoints leaves a tail decaying like a power of the bisection count, so the
+# ratio of successive terms drifts to 1 instead of settling and the epsilon algorithm,
+# which sums geometric modes, has nothing to lock onto. `sin-inverse` and `osc-tail`
+# leave a tail that is geometric in size but flips sign erratically, so there is no
+# trend at all. Nothing here reaches even the loosest tolerance on the same budget:
+# `scipy.integrate.quad` misses 1e-4 on both members of the pair with its default
+# `limit`, and only clears it given ten times as many sub-intervals.
 #
 # The third is the Romberg pair reporting success on an answer it never sampled: the
 # level 0 and level 1 estimates can agree by accident - because the integrand is NaN at
 # an endpoint, or because a narrow feature falls between the three points those levels
 # use - and nothing requires a minimum depth before that agreement is believed. These
 # are the most serious entries in the table, being wrong answers returned with a status
-# of 0 rather than shortfalls in accuracy.
+# of 0 rather than shortfalls in accuracy, and they appear in `KNOWN_DISHONEST` as well
+# for that reason.
 #
 # `# scipy too` marks the entries where the nearest scipy routine does not deliver the
 # tolerance either, measured against scipy 1.17.1: `scipy.integrate.tanhsinh` for
 # `quadts` and `rombergts`, `scipy.integrate.quad` for the rest, since scipy has no
-# Clenshaw-Curtis or Romberg to compare against. A routine is counted as delivering only
-# if it both reports success and lands inside the tolerance. Where the note names
-# tolerances, scipy fails at those and delivers at the others.
+# Clenshaw-Curtis or Romberg to compare against. A routine counts as delivering only if
+# it both reports success and lands inside `max(tol, tol*|exact|)`, the same bound the
+# routine under test has to meet, and `quad` keeps its default `limit=50` so that it is
+# allowed the same number of sub-intervals as the default `max_ninter` the quadax runs
+# use. Where the note names tolerances, scipy fails at those and delivers at the others.
 #
-# The split is roughly half: 29 of the 56 entries carry the note at one tolerance or
-# more. That is the useful part of the annotation. An unmarked entry is one where a
-# widely used routine does solve the problem, so the shortfall is quadax's; a marked one
-# says the integrand is hard for the method rather than badly implemented here, and
-# `scipy.integrate.tanhsinh` failing on much the same set as `quadts` and `rombergts` is
-# what the double-exponential reading above rests on. Marked entries are still worth
-# fixing, but they are evidence about the method and not a defect report.
+# 39 of the 54 convergence entries carry the note at one tolerance or more, and 25 of
+# the 49 dishonesty entries. That is the useful part of the annotation. An unmarked
+# entry is one where a widely used routine does solve the problem, so the shortfall is
+# quadax's; a marked one says the integrand is hard for the method rather than badly
+# implemented here, and `scipy.integrate.tanhsinh` failing on much the same set as
+# `quadts` and `rombergts` is what the double-exponential reading above rests on.
+# Marked entries are still worth fixing, but they are evidence about the method and not
+# a defect report.
 KNOWN_FAILURES = {
     ("quadcc", "decay-line"): {1e-4, 1e-8},
     ("quadcc", "interior-marked"): {1e-4, 1e-8},
-    ("quadcc", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("quadcc", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("quadcc", "loglog-cube"): {1e-8},  # scipy too
+    ("quadcc", "loglog-right"): {1e-4, 1e-8},  # scipy too
+    ("quadcc", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "osc-tail"): {1e-4, 1e-8},  # scipy too
-    ("quadcc", "sin-inverse"): {1e-4, 1e-8},  # scipy too at 1e-8
+    ("quadcc", "sin-inverse"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "sqrt-tan"): {1e-4, 1e-8, 1e-12},
     ("quadgk", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("quadgk", "loglog-cube"): {1e-4, 1e-8},  # scipy too
+    ("quadgk", "loglog-right"): {1e-4, 1e-8},  # scipy too
+    ("quadgk", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
     ("quadgk", "osc-tail"): {1e-4, 1e-8},  # scipy too
-    ("quadgk", "sin-inverse"): {1e-4, 1e-8},  # scipy too at 1e-8
+    ("quadgk", "sin-inverse"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "beta-both-ends"): {1e-8},  # scipy too
+    ("quadts", "decay-1.01"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "decay-1.1"): {1e-4, 1e-8},
+    ("quadts", "log-over-sqrt"): {1e-8},
+    ("quadts", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "loglog-cube"): {1e-8},  # scipy too
+    ("quadts", "loglog-right"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "osc-tail"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "pow-0.9-right"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "pow-0.99"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "sin-inverse"): {1e-4, 1e-8},  # scipy too
+    ("rombergts", "beta-both-ends"): {1e-8},  # scipy too
+    ("rombergts", "decay-1.01"): {1e-4},  # scipy too
+    ("rombergts", "decay-1.1"): {1e-4},
+    ("rombergts", "decay-1.5"): {1e-12},
+    ("rombergts", "decay-1.5-from-0"): {1e-12},
+    ("rombergts", "decay-1.5-mirrored"): {1e-12},
+    ("rombergts", "decay-line"): {1e-8},  # scipy too
+    ("rombergts", "exp-over-sqrt"): {1e-12},  # scipy too
+    ("rombergts", "jump"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("rombergts", "log-over-sqrt"): {1e-8},
+    ("rombergts", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("rombergts", "loglog-cube"): {1e-4, 1e-8},  # scipy too at 1e-8
+    ("rombergts", "loglog-right"): {1e-4},  # scipy too
+    ("rombergts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
+    ("rombergts", "narrow-gauss"): {1e-4, 1e-8, 1e-12},
+    ("rombergts", "pow-0.5"): {1e-12},
+    ("rombergts", "pow-0.9"): {1e-4},
+    ("rombergts", "pow-0.9-right"): {1e-4},  # scipy too
+    ("rombergts", "pow-0.99"): {1e-4},  # scipy too
+    ("rombergts", "sqrt-over-semicircle"): {1e-12},  # scipy too
+    ("rombergts", "sqrt-tan"): {1e-12},  # scipy too
+    ("rombergts", "vector-mixed"): {1e-12},
+    ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("romberg", "osc-exp-decay"): {1e-4},
+    ("romberg", "osc-tail"): {1e-4},  # scipy too
+    ("romberg", "sin-inverse"): {1e-4},  # scipy too
+}
+
+# Cases where the reported error understates the true error, which is a defect rather
+# than a limit: every entry here is a run that told its caller the answer was better
+# than it was. Kept apart from `KNOWN_FAILURES` because the two are worth different
+# amounts. Not converging is a statement about how hard a problem is, and the table
+# above is expected to have entries in it forever; misreporting the error is a bug
+# wherever it occurs, and this table is meant to empty rather than to be maintained.
+#
+# Anything not listed here is expected to hold, including on the problems no routine
+# solves, so a new entry needed is a regression and not a new limitation discovered.
+KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
+    ("quadcc", "loglog-cube"): {1e-4},  # scipy too
+    ("quadcc", "sqrt-tan"): {1e-12},
+    ("quadgk", "loglog-cube"): {1e-4},  # scipy too
     ("quadts", "beta-both-ends"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
     ("quadts", "decay-1.01"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("quadts", "decay-1.1"): {1e-4, 1e-8, 1e-12},
-    ("quadts", "decay-1.5"): {1e-4, 1e-8, 1e-12},
-    ("quadts", "decay-1.5-from-0"): {1e-4, 1e-8, 1e-12},
-    ("quadts", "decay-1.5-mirrored"): {1e-4, 1e-8, 1e-12},
+    ("quadts", "decay-1.5"): {1e-4, 1e-8},
+    ("quadts", "decay-1.5-from-0"): {1e-4, 1e-8},
+    ("quadts", "decay-1.5-mirrored"): {1e-4, 1e-8},
     ("quadts", "decay-line"): {1e-4, 1e-8},  # scipy too at 1e-8
-    ("quadts", "exp-over-sqrt"): {1e-8, 1e-12},  # scipy too at 1e-12
+    ("quadts", "exp-over-sqrt"): {1e-8},
     ("quadts", "interior-marked"): {1e-4, 1e-8},  # scipy too
     ("quadts", "log-over-sqrt"): {1e-4, 1e-8},
-    ("quadts", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("quadts", "osc-tail"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("quadts", "pow-0.5"): {1e-4, 1e-8},
     ("quadts", "pow-0.9-right"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("quadts", "pow-0.99"): {1e-4, 1e-8},  # scipy too
-    ("quadts", "sin-inverse"): {1e-4, 1e-8},  # scipy too
-    ("quadts", "sqrt-over-semicircle"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-12
+    ("quadts", "sqrt-over-semicircle"): {1e-4, 1e-8},
     ("quadts", "sqrt-tan"): {1e-4, 1e-8},
     ("quadts", "vector-mixed"): {1e-4, 1e-8},
-    ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("romberg", "osc-exp-decay"): {1e-4},
-    ("romberg", "osc-tail"): {1e-4},  # scipy too
-    ("romberg", "sin-inverse"): {1e-4},
     ("rombergts", "beta-both-ends"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
     ("rombergts", "decay-1.01"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("rombergts", "decay-1.1"): {1e-4, 1e-8, 1e-12},
@@ -822,6 +989,9 @@ KNOWN_FAILURES = {
     ("rombergts", "log-over-sqrt"): {1e-8, 1e-12},
     ("rombergts", "log-squared"): {1e-12},
     ("rombergts", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("rombergts", "loglog-cube"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
+    ("rombergts", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("rombergts", "loglog-sqrt"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("rombergts", "lorentzian-halfline"): {1e-4},
     ("rombergts", "narrow-gauss"): {1e-4, 1e-8, 1e-12},
     ("rombergts", "pow-0.5"): {1e-8, 1e-12},
@@ -831,22 +1001,35 @@ KNOWN_FAILURES = {
     ("rombergts", "sqrt-over-semicircle"): {1e-8, 1e-12},  # scipy too at 1e-12
     ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too at 1e-12
     ("rombergts", "vector-mixed"): {1e-8, 1e-12},
+    ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("romberg", "osc-exp-decay"): {1e-4},
+    ("romberg", "osc-tail"): {1e-4},  # scipy too
+    ("romberg", "sin-inverse"): {1e-4},  # scipy too
 }
 
 
-def xfail_if_known(request, method, prob, tol):
-    """Mark the running test xfail if ``KNOWN_FAILURES`` lists this case.
+def _xfail_from(table, what, request, method, prob, tol):
+    """Mark the running test xfail if ``table`` lists this case.
 
-    Applied by the tests that sweep the example problems, so that a case in the table
-    is reported as an expected failure and one that starts passing is reported as
-    ``XPASS`` rather than silently dropping out of the record.
+    A case in a table is reported as an expected failure and one that starts passing is
+    reported as ``XPASS`` rather than silently dropping out of the record.
     """
-    tols = KNOWN_FAILURES.get((method.__name__, prob["name"]))
+    tols = table.get((method.__name__, prob["name"]))
     if tols is not None and float(tol) in tols:
         request.applymarker(
             pytest.mark.xfail(
-                reason=f"{method.__name__} does not meet the contract on "
-                f"{prob['name']} at tol={tol:g}",
+                reason=f"{method.__name__} {what} on {prob['name']} at tol={tol:g}",
                 strict=False,
             )
         )
+
+
+def xfail_if_known(request, method, prob, tol):
+    """Mark the running test xfail if ``KNOWN_FAILURES`` lists this case."""
+    _xfail_from(KNOWN_FAILURES, "does not converge", request, method, prob, tol)
+
+
+def xfail_if_dishonest(request, method, prob, tol):
+    """Mark the running test xfail if ``KNOWN_DISHONEST`` lists this case."""
+    _xfail_from(KNOWN_DISHONEST, "understates its error", request, method, prob, tol)
