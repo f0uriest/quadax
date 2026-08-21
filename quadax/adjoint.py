@@ -919,13 +919,41 @@ def _tangent_integrand(dyn, dyn_t, *, ops, static):
     return dvfunc
 
 
-def _without_interval(tree):
-    """Zero out the limits' component of a tangent or cotangent, keeping the rest.
+def _live_leaves(dyn, tangents):
+    """Which of ``dyn``'s leaves are being differentiated, in flattened order.
 
-    The limits sit at position 1 of the primal tuple. Zeroing rather than dropping keeps
-    the pytree structure the solve and ``ravel_pytree`` expect.
+    ``eqx.filter_custom_jvp`` hands us a ``None`` tangent for every leaf that is not
+    differentiated, and a non-``None`` tangent for every leaf that is. Reverse mode
+    integrates the cotangent of the live leaves alone: the rest are asked for by nobody,
+    and integrating them is both wasteful and potentially harmful, since the error
+    control couples every component of the vector it measures through ``norm``.
     """
-    return (tree[0], jax.tree.map(jnp.zeros_like, tree[1]), *tree[2:])
+    is_none = lambda x: x is None
+    dyn_leaves = jax.tree.flatten(dyn, is_leaf=is_none)[0]
+    tan_leaves = jax.tree.flatten(tangents, is_leaf=is_none)[0]
+    return tuple(t is not None for d, t in zip(dyn_leaves, tan_leaves) if d is not None)
+
+
+def _keep_live(tree, live, treedef):
+    """Drop the leaves that are not being differentiated, keeping the tree's shape.
+
+    The dropped leaves become ``None``, which is an empty pytree node rather than a
+    leaf, so ``ravel_pytree`` skips them and the vector the solve carries holds the live
+    components alone. Unravelling puts the ``None`` back, which is what tells the
+    transpose rule to report a symbolic zero cotangent there.
+    """
+    leaves = jax.tree.flatten(tree)[0]
+    return jax.tree.unflatten(treedef, [x if k else None for x, k in zip(leaves, live)])
+
+
+def _add_live(tree, other):
+    """Add ``other`` into the live leaves of ``tree``, leaving dropped ones alone."""
+    is_none = lambda x: x is None
+    leaves, treedef = jax.tree.flatten(tree, is_leaf=is_none)
+    others = jax.tree.flatten(other, is_leaf=is_none)[0]
+    return jax.tree.unflatten(
+        treedef, [a if a is None else a + b for a, b in zip(leaves, others)]
+    )
 
 
 def _leibniz_impl(
@@ -937,10 +965,12 @@ def _leibniz_impl(
     kwargs_items,
     frozen_treedef,
     freeze,
+    live,
     interval_from_solve,
     out_sds,
 ):
     """Forward direction: integrate the tangent of the mapped integrand."""
+    del live  # only used on backward pass
     dyn_t, dyn, primals, frozen = _leibniz_unpack(
         flat, n, treedef, static, frozen_treedef
     )
@@ -978,6 +1008,7 @@ def _leibniz_transpose(
     kwargs_items,
     frozen_treedef,
     freeze,
+    live,
     interval_from_solve,
     out_sds,
 ):
@@ -993,25 +1024,20 @@ def _leibniz_transpose(
     rule, interval, args, consts, epsabs, epsrel = primals
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
-    _, unravel = ravel_pytree(dyn)
+    # Only the arguments actually being differentiated reach the solve. Integrating the
+    # rest buys nothing, since nobody asked for them, and it costs: the error control is
+    # driven by `rule.norm` over the whole raveled vector, so a component that
+    # misbehaves sets the mesh for every component, and the limits are exactly such a
+    # component: differentiating an integral whose integrand is unbounded at a limit
+    # gives an unbounded adjoint integrand. Convergence acceleration couples them harder
+    # still, since the epsilon table's structural decisions are made on the norm as
+    # well.
+    _, unravel = ravel_pytree(_keep_live(dyn, live, treedef))
 
     def adjoint_integrand(t):
         at_t = partial(_integrand_at, t=t, ops=ops, static=static)
         _, vjp = jax.vjp(at_t, dyn)
-        ct_dyn = vjp(ct)[0]
-        if not interval_from_solve:
-            # Drop the limits' components before they reach the solve. Nobody asked for
-            # them, so integrating them buys nothing, and it costs, because they are the
-            # components that misbehave: differentiating an integral whose integrand is
-            # unbounded at a limit gives an unbounded adjoint integrand, and the error
-            # control is driven by `rule.norm` over the whole raveled vector, so one
-            # divergent component sets the mesh for every component. Convergence
-            # acceleration couples them harder still, since the epsilon table's
-            # structural decisions are made on the norm as well. Forward mode zeroes the
-            # tangent's limits the same way, see `_leibniz_impl`; without this the two
-            # modes are not solving the same problem.
-            ct_dyn = _without_interval(ct_dyn)
-        return ravel_pytree(ct_dyn)[0]
+        return ravel_pytree(_keep_live(vjp(ct)[0], live, treedef))[0]
 
     flat_ct = _run_solve(
         ops,
@@ -1028,8 +1054,12 @@ def _leibniz_transpose(
         # The adjoint integrand carries the limits' cotangent only through the
         # integrand, so the boundary term is added here, as in forward mode.
         term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
-        ct_tree = jax.tree.map(jnp.add, ct_tree, jax.vjp(term, dyn)[1](ct)[0])
-    ct_leaves = jax.tree.flatten(ct_tree)[0]
+        ct_tree = _add_live(ct_tree, jax.vjp(term, dyn)[1](ct)[0])
+    # One cotangent per linear operand, in the order they were bound: the solved ones
+    # in tree order, and `None` (the symbolic zero JAX expects for an operand that was
+    # not differentiated) for the leaves dropped above.
+    solved = iter(jax.tree.flatten(ct_tree)[0])
+    ct_leaves = [next(solved) if k else None for k in live]
     # cotangents for the linear operands, then None for every residual operand
     n_res = len(flat) - n
     return tuple(ct_leaves) + (None,) * n_res
@@ -1139,6 +1169,10 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
     # is whenever they are being differentiated at all. `filter_custom_jvp` tells us at
     # trace time by handing us a `None` tangent for anything that is not.
     interval_from_solve = any(t is not None for t in jax.tree.leaves(tangents[1]))
+    # The same statement for every argument rather than for the limits alone: which
+    # cotangents the reverse solve has to carry, and so what the vector its `norm`
+    # measures is made of.
+    live = _live_leaves(dyn, tangents[:-1])
     if freeze:
         frozen_leaves, frozen_treedef = jax.tree.flatten(
             jax.lax.stop_gradient(ops.frozen(state))
@@ -1156,6 +1190,7 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
         kwargs_items=tuple(sorted(kwargs.items())),
         frozen_treedef=frozen_treedef,
         freeze=freeze,
+        live=live,
         interval_from_solve=interval_from_solve,
         out_sds=jax.ShapeDtypeStruct(jnp.shape(y), jnp.result_type(y)),
     )
