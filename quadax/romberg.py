@@ -6,6 +6,7 @@ from functools import partial
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.typing import ArrayLike
 
 from .adjoint import (
@@ -43,6 +44,7 @@ def romberg(
     extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
+    initial_points: int = 2,
 ):
     """Romberg integration of a callable function or method.
 
@@ -77,7 +79,7 @@ def romberg(
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
-        most 2**divmax + 1
+        most (initial_points - 1)*2**divmax + 1
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -106,6 +108,12 @@ def romberg(
         however few points they place; that padding is what keeps a single batch shape
         traced for every level rather than one per level. Clipped to the largest level
         ``divmax`` allows.
+    initial_points : int > 1, optional
+        Number of points on the first refinement level, default 2. Each later level
+        doubles the number of new points, so the grids run ``initial_points``,
+        ``2*initial_points - 1``, and so on. Raising it does the early work of the
+        integration up front, which pays on GPU/TPU where the default
+        schedule spends its first levels evaluating only a handful of points each.
 
     Returns
     -------
@@ -152,9 +160,15 @@ def romberg(
     epsabs = jnp.asarray(epsabs, dtypes.etype)
     epsrel = jnp.asarray(epsrel, dtypes.etype)
     check_size(batch_size)
-    # No level ever places more than `2**(divmax - 1)` new points, so a larger batch
-    # would only ever be padding.
-    batch_size = min(batch_size or 1, 2 ** max(divmax - 1, 0))
+    errorif(
+        not isinstance(initial_points, (int, np.integer)) or initial_points < 2,
+        ValueError,
+        f"initial_points must be an integer >= 2, got {initial_points}",
+    )
+    m = initial_points - 1
+    # No level ever places more than `m * 2**(divmax - 1)` new points, so a larger
+    # batch would only ever be padding.
+    batch_size = min(batch_size or 1, m * 2 ** max(divmax - 1, 0))
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -174,6 +188,7 @@ def romberg(
         dtypes.xtype,
         extrapolate,
         batch_size,
+        m,
     )
 
 
@@ -191,6 +206,7 @@ def _romberg(
     xtype,
     extrapolate,
     batch_size,
+    m,
 ):
     """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
     # Closure conversion has to happen on the user's function, before any wrapping:
@@ -207,6 +223,7 @@ def _romberg(
             _norm=_norm,
             extrapolate=extrapolate,
             batch_size=batch_size,
+            m=m,
         ),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
@@ -220,6 +237,7 @@ def _romberg(
             divmax=divmax,
             extrapolate=extrapolate,
             batch_size=batch_size,
+            m=m,
         ),
     )
     y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
@@ -239,11 +257,13 @@ def _build_tanhsinh(interval, args, consts, *, f_conv, safe=False):
     return wrap_func(fun_m, (), interval_m.dtype, safe=safe), interval_m
 
 
-def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype):
-    """Sum the integrand over the new nodes of one refinement level.
+def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
+    """Sum the integrand over ``npts`` nodes spaced ``step`` multiples of ``h`` apart.
 
-    Level ``k`` adds the ``npts = 2**(k - 1)`` points sitting at odd multiples of ``h``
-    above ``a``, interleaving the nodes the previous levels already placed. ``npts`` is
+    A refinement level adds the ``npts = m * 2**(k - 1)`` points sitting at odd
+    multiples of ``h`` above ``a``, interleaving the nodes the previous levels already
+    placed: ``step=2``, the default. The first level instead sums the interior nodes of
+    the starting grid, consecutive multiples of its own step: ``step=1``. ``npts`` is
     only known at run time, so the points are evaluated in fixed size batches and the
     last batch is padded up to a full one. Padding rather than shaping each level to its
     own point count is what keeps one batch traced for all of them; the cost is that a
@@ -262,7 +282,7 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype):
     def bodyfun(j, s):
         i = j * batch_size + offs
         used = i <= npts
-        x = a + h * (2 * i - 1)
+        x = a + h * (1 + step * (i - 1))
         x = jnp.where(used, x, x[0])
         f: jax.Array = vfunc(x)
         mask = used.reshape((-1,) + (1,) * (f.ndim - 1))
@@ -283,6 +303,7 @@ def _romberg_solve(
     _norm,
     extrapolate=True,
     batch_size=1,
+    m=1,
 ):
     """Run the refinement loop, with Richardson extrapolation if it is switched on.
 
@@ -306,9 +327,12 @@ def _romberg_solve(
     best = (lambda res, k: res[k, k]) if extrapolate else (lambda res, k: res[k, 0])
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    # The trapezoid rule at one interval.
-    result = result.at[0, 0].set((b - a) / 2 * (vfunc(a) + vfunc(b)))
-    neval = 2
+    # The composite trapezoid rule over the m intervals of the first level: interior
+    # nodes summed in batches, endpoints evaluated directly at half weight.
+    h0 = (b - a) / m
+    s, nbatch = _level_sum(vfunc, a, h0, m - 1, batch_size, f.shape, f.dtype, step=1)
+    result = result.at[0, 0].set(h0 * (s + (vfunc(a) + vfunc(b)) / 2))
+    neval = 2 + nbatch * batch_size
     # Explicitly typed rather than left a weak python float: this is a loop carry, and
     # has to match what `_norm` writes back into it. Real, because the error in a
     # complex valued integral is still real.
@@ -324,17 +348,19 @@ def _romberg_solve(
     def nloop(state):
         # loop over outer number of subdivisions
         result, n, neval, err = state
-        h = (b - a) / 2**n
-        s, nbatch = _level_sum(vfunc, a, h, (2**n) // 2, batch_size, f.shape, f.dtype)
+        h = h0 / 2**n
+        s, nbatch = _level_sum(
+            vfunc, a, h, (m * 2**n) // 2, batch_size, f.shape, f.dtype
+        )
         result = result.at[n, 0].set(0.5 * result[n - 1, 0] + h * s)
         # The padded lanes of the last batch are evaluations of the integrand like any
         # other, so they are counted here even though they do not reach the sum.
         neval += nbatch * batch_size
 
-        def mloop(m, result):
+        def mloop(col, result):
             # richardson extrapolation
-            temp = 1 / (4.0**m - 1.0) * (result[n, m - 1] - result[n - 1, m - 1])
-            result = result.at[n, m].set(result[n, m - 1] + temp)
+            temp = 1 / (4.0**col - 1.0) * (result[n, col - 1] - result[n - 1, col - 1])
+            result = result.at[n, col].set(result[n, col - 1] + temp)
             return result
 
         if extrapolate:
@@ -357,7 +383,7 @@ def _romberg_solve(
 
 
 def _romberg_levels(
-    rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=True, batch_size=1
+    rule, vfunc, interval, n, kwargs, *, divmax, extrapolate=True, batch_size=1, m=1
 ):
     """Evaluate the table at a fixed number of levels.
 
@@ -371,17 +397,20 @@ def _romberg_levels(
     vfunc = wrap_func(vfunc, (), interval.dtype)  # see ``_romberg_solve``
     f = jax.eval_shape(vfunc, (a + b) / 2)
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    # The trapezoid rule at one interval.
-    result = result.at[0, 0].set((b - a) / 2 * (vfunc(a) + vfunc(b)))
+    # The composite trapezoid rule over the m intervals of the first level, as in
+    # ``_romberg_solve``.
+    h0 = (b - a) / m
+    s, _ = _level_sum(vfunc, a, h0, m - 1, batch_size, f.shape, f.dtype, step=1)
+    result = result.at[0, 0].set(h0 * (s + (vfunc(a) + vfunc(b)) / 2))
 
     def nloop(k, result):
-        h = (b - a) / 2**k
-        s, _ = _level_sum(vfunc, a, h, (2**k) // 2, batch_size, f.shape, f.dtype)
+        h = h0 / 2**k
+        s, _ = _level_sum(vfunc, a, h, (m * 2**k) // 2, batch_size, f.shape, f.dtype)
         result = result.at[k, 0].set(0.5 * result[k - 1, 0] + h * s)
 
-        def mloop(m, result):
-            temp = 1 / (4.0**m - 1.0) * (result[k, m - 1] - result[k - 1, m - 1])
-            return result.at[k, m].set(result[k, m - 1] + temp)
+        def mloop(col, result):
+            temp = 1 / (4.0**col - 1.0) * (result[k, col - 1] - result[k - 1, col - 1])
+            return result.at[k, col].set(result[k, col - 1] + temp)
 
         if not extrapolate:
             return result
@@ -404,6 +433,7 @@ def rombergts(
     extrapolate: bool = True,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
+    initial_points: int = 2,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -438,7 +468,7 @@ def rombergts(
     divmax : int, optional
         Maximum order of extrapolation. Default is 20.
         Total number of function evaluations will be at
-        most 2**divmax + 1
+        most (initial_points - 1)*2**divmax + 1
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -467,7 +497,12 @@ def rombergts(
         however few points they place; that padding is what keeps a single batch shape
         traced for every level rather than one per level. Clipped to the largest level
         ``divmax`` allows.
-
+    initial_points : int > 1, optional
+        Number of points on the first refinement level, default 2. Each later level
+        doubles the number of new points, so the grids run ``initial_points``,
+        ``2*initial_points - 1``, and so on. Raising it does the early work of the
+        integration up front, which pays on GPU/TPU where the default schedule spends
+        its first levels evaluating only a handful of points each.
 
     Returns
     -------
@@ -514,9 +549,15 @@ def rombergts(
     epsabs = jnp.asarray(epsabs, dtypes.etype)
     epsrel = jnp.asarray(epsrel, dtypes.etype)
     check_size(batch_size)
-    # No level ever places more than `2**(divmax - 1)` new points, so a larger batch
-    # would only ever be padding.
-    batch_size = min(batch_size or 1, 2 ** max(divmax - 1, 0))
+    errorif(
+        not isinstance(initial_points, (int, np.integer)) or initial_points < 2,
+        ValueError,
+        f"initial_points must be an integer >= 2, got {initial_points}",
+    )
+    m = initial_points - 1
+    # No level ever places more than `m * 2**(divmax - 1)` new points, so a larger
+    # batch would only ever be padding.
+    batch_size = min(batch_size or 1, m * 2 ** max(divmax - 1, 0))
     if callable(norm):
         _norm: Callable[[jax.Array], jax.Array] = norm
     else:
@@ -536,4 +577,5 @@ def rombergts(
         dtypes.xtype,
         extrapolate,
         batch_size,
+        m,
     )

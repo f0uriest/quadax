@@ -96,7 +96,9 @@ can be less efficient, but often still wins on wall time on accelerators.
 refinement level places is only known at run time, so there is no single shape for
 JAX to vectorize over. Setting ``batch_size`` will vectorize over the points on each
 level, but will pad the coarser levels, so the total number of function evaluations
-will slightly increase.
+will slightly increase. Raising ``initial_points`` shifts that trade the other way:
+the first level then places that many points at once, so a run can start wide enough
+to keep an accelerator busy instead of waiting for its levels to grow into it.
 
 In reverse mode there is a second axis to parallelize over, since the sub-intervals of
 the converged subdivision are independent. ``DirectAdjoint`` evaluates them

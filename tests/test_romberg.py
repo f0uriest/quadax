@@ -8,6 +8,7 @@ on a rule that converges without it. Romberg also takes ``divmax`` where they ta
 ``max_ninter``, and rejects breakpoints outright.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -332,8 +333,200 @@ class TestBatchSize:
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
+class TestInitialPoints:
+    """Starting the halving schedule from more than two points."""
+
+    DIVMAX = 8
+    TOL = 1e-10
+
+    def _run(self, method, i, initial_points, divmax=None, **kwargs):
+        """Run to a fixed depth with the tolerance zeroed, as in ``TestBatchSize``."""
+        prob = PROBLEMS[i]
+        return method(
+            prob["fun"],
+            jnp.asarray(prob["interval"], float),
+            epsabs=0.0,
+            epsrel=0.0,
+            divmax=divmax or self.DIVMAX,
+            full_output=True,
+            initial_points=initial_points,
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize("k", [1, 2, 4], ids=str)
+    def test_power_of_two_start_is_the_default_run_shifted(self, method, k):
+        """Starting at 2**k + 1 points replays the default run from level k on.
+
+        A first level of 2**k intervals is the state the default schedule reaches
+        after k refinements, so carrying the default run k levels further covers the
+        same nodes: the evaluation counts come out identical, and the trapezoidal
+        columns agree row for row once shifted, the diagonals the algorithm actually
+        reads with them.
+
+        Only those two are compared. An extrapolation entry above the diagonal of the
+        started run has no counterpart in the default table, because Richardson
+        builds it from levels below it in the same table and the started run has k
+        fewer levels to draw on - its early rows are genuinely first rows, not copies.
+        What is compared differs by rounding alone, since the started run sums its
+        first row in one pass where the default accumulates it across k halvings.
+        """
+        want, want_info = self._run(method, SMOOTH_FINITE[0], 2, divmax=self.DIVMAX + k)
+        got, got_info = self._run(method, SMOOTH_FINITE[0], 2**k + 1)
+        assert int(got_info.neval) == int(want_info.neval)
+        tables = [np.asarray(o.info) for o in (got_info, want_info)]
+        depth = tables[0].shape[0]
+        rows = np.arange(depth)
+        np.testing.assert_allclose(
+            tables[0][:, 0], tables[1][k:, 0], rtol=1e-12, atol=1e-13
+        )
+        np.testing.assert_allclose(
+            tables[0][rows, rows], tables[1][rows + k, rows], rtol=1e-12, atol=1e-13
+        )
+
+    @pytest.mark.parametrize("i", SMOOTH_FINITE, ids=problem_id)
+    @pytest.mark.parametrize("initial_points", [3, 5, 10, 17], ids=str)
+    def test_converges_from_an_arbitrary_start(self, method, i, initial_points):
+        """Starts that are not one more than a power of two converge all the same.
+
+        The claim is accuracy against the exact value at a tolerance the default run
+        meets comfortably, not agreement with another run of this same method, since
+        the question is whether a standalone halving sequence started anywhere at all
+        is sound.
+        """
+        prob = PROBLEMS[i]
+        y, info = method(
+            prob["fun"],
+            jnp.asarray(prob["interval"], float),
+            epsabs=self.TOL,
+            epsrel=self.TOL,
+            divmax=12,
+            initial_points=initial_points,
+        )
+        assert int(info.status) == 0
+        np.testing.assert_allclose(
+            np.asarray(y), np.asarray(prob["val"]), rtol=self.TOL, atol=self.TOL
+        )
+
+    @pytest.mark.parametrize("batch_size", [1, 4], ids=["serial", "batched"])
+    def test_neval_follows_the_schedule(self, method, batch_size):
+        """Level 0 places ``initial_points`` evaluations, level k places m*2**(k-1).
+
+        With the tolerance zeroed every level runs, so the count is the sum over the
+        schedule: the two endpoints directly plus the padded batches of the level 0
+        interior sum, then each level's new points in their own padded batches. One
+        point at a time nothing is padded and the sum collapses to the documented
+        bound ``(initial_points - 1)*2**divmax + 1``.
+        """
+        divmax, initial_points = 5, 10
+        m = initial_points - 1
+        _, info = self._run(
+            method, 0, initial_points, divmax=divmax, batch_size=batch_size
+        )
+        expected = (
+            2
+            + -(-(m - 1) // batch_size) * batch_size
+            + sum(
+                -(-(m * 2 ** (k - 1)) // batch_size) * batch_size
+                for k in range(1, divmax + 1)
+            )
+        )
+        assert int(info.neval) == expected
+        if batch_size == 1:
+            assert expected == m * 2**divmax + 1
+
+    def test_batch_size_is_clipped_to_the_deepest_level(self, method):
+        """No level places more than ``m*2**(divmax - 1)`` points; nothing above helps.
+
+        Mirrors the clip test for ``batch_size`` itself: without the clip a generous
+        batch size would be padding on every level of a shallow run, and ``neval``
+        would grow without the run doing any more work. The start multiplies into the
+        deepest level's point count, so it multiplies into the clip.
+        """
+        divmax, initial_points = 4, 9
+        deepest = (initial_points - 1) * 2 ** (divmax - 1)
+        _, clipped = self._run(
+            method, 0, initial_points, divmax=divmax, batch_size=10**6
+        )
+        _, exact = self._run(
+            method, 0, initial_points, divmax=divmax, batch_size=deepest
+        )
+        assert int(clipped.neval) == int(exact.neval)
+
+    def test_vector_valued(self, method):
+        """The mask has to broadcast against the integrand's own trailing axes."""
+        fun = lambda x: jnp.array([jnp.sin(x), jnp.cos(x), x**2])  # noqa: E731
+        interval = jnp.array([0.0, 1.0])
+        want, _ = method(fun, interval, divmax=self.DIVMAX, full_output=True)
+        got, _ = method(
+            fun, interval, divmax=self.DIVMAX, full_output=True, initial_points=13
+        )
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=1e-10, atol=1e-12
+        )
+
+    def test_infinite_range(self, method):
+        """A wide start over a mapped infinite interval.
+
+        Level 0 then sums interior nodes of the mapped domain, which sit differently
+        from anything the default schedule visits, so this exercises the node formula
+        off the finite case. Both methods reach this problem: the exponential decay
+        is one the map turns into a smooth integrand, which is the setting Romberg is
+        for.
+        """
+        prob = PROBLEMS[12]  # gaussian-line, [0, inf)
+        y, info = method(
+            prob["fun"],
+            jnp.asarray(prob["interval"], float),
+            epsabs=1e-9,
+            epsrel=1e-9,
+            divmax=12,
+            initial_points=33,
+        )
+        assert int(info.status) == 0
+        np.testing.assert_allclose(
+            np.asarray(y), np.asarray(prob["val"]), rtol=1e-9, atol=1e-9
+        )
+
+    def test_gradient_does_not_depend_on_the_start(self, method):
+        """Reverse mode through the frozen-level adjoint agrees across starts.
+
+        ``DirectAdjoint`` freezes the number of levels the primal solve used and
+        differentiates that fixed linear functional of the integrand. A wider start
+        changes which functional that is, but on a problem every one of them resolves,
+        the derivatives they return are the continuous one to the accuracy of their
+        discretizations.
+        """
+        fun = lambda t, c: c * jnp.cos(t)  # noqa: E731
+
+        def grad_at(initial_points):
+            return jax.grad(
+                lambda a: method(
+                    fun,
+                    jnp.array([a, 1.0]),
+                    args=(2.0,),
+                    divmax=12,
+                    initial_points=initial_points,
+                )[0]
+            )(jnp.array(0.25))
+
+        want = -2.0 * jnp.cos(0.25)
+        np.testing.assert_allclose(grad_at(2), want, rtol=1e-9, atol=1e-11)
+        np.testing.assert_allclose(grad_at(17), want, rtol=1e-9, atol=1e-11)
+
+
+@pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
 @pytest.mark.parametrize("batch_size", [0, -1, 2.5], ids=["zero", "negative", "float"])
 def test_bad_batch_size_rejected(method, batch_size):
     """A batch size that is not a positive integer is a mistake, not a default."""
     with pytest.raises(ValueError, match="batch_size"):
         method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), batch_size=batch_size)
+
+
+@pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
+@pytest.mark.parametrize(
+    "initial_points", [1, 0, -3, 2.5], ids=["one", "zero", "negative", "float"]
+)
+def test_bad_initial_points_rejected(method, initial_points):
+    """A starting grid smaller than two points, or not a count at all, is a mistake."""
+    with pytest.raises(ValueError, match="initial_points"):
+        method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), initial_points=initial_points)
