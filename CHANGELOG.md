@@ -68,6 +68,12 @@ v0.3.0
     integrals over ``[a, b]`` that their docstrings describe; they were previously
     scaled by a factor of ``2 / (b - a)``. Relevant when calling a rule directly or
     implementing a custom one.
+  - ``rombergts``'s reported ``err`` now accounts for the mass its tanh-sinh map leaves
+    outside the range it integrates over. That mass is fixed by the map rather than by
+    the mesh, so refining converges onto it and the level-to-level movement the estimate
+    was built from says nothing about it. Runs that cannot reach the requested tolerance
+    because of it now say so rather than reporting success, and stop once refining can
+    no longer help instead of spending the rest of ``divmax`` budget.
 - **Breaking**: removed ``fixed_quadgk``, ``fixed_quadcc``, and ``fixed_quadts``,
   deprecated since v0.2.2. Use ``GaussKronrodRule``, ``ClenshawCurtisRule``, and
   ``TanhSinhRule`` instead, eg

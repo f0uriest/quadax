@@ -228,8 +228,14 @@ def _romberg(
     extrapolate,
     batch_size,
     divmin,
+    truncation=None,
 ):
-    """Shared driver for ``romberg`` and ``rombergts``, differing only in ``build``."""
+    """Shared driver for ``romberg`` and ``rombergts``.
+
+    They differ in ``build``, and in whether that map truncates: ``truncation``
+    estimates the mass left outside the range the solve integrates over, and is unset
+    for the maps that leave none.
+    """
     # Closure conversion has to happen on the user's function, before any wrapping:
     # once a transformed integrand crosses a filter_jit boundary its leaves become
     # tracers that closure_convert cannot hoist.
@@ -245,6 +251,7 @@ def _romberg(
             extrapolate=extrapolate,
             batch_size=batch_size,
             divmin=divmin,
+            truncation=truncation,
         ),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
@@ -278,6 +285,20 @@ def _build_tanhsinh(interval, args, consts, *, f_conv, safe=False):
     return wrap_func(fun_m, (), interval_m.dtype, safe=safe), interval_m
 
 
+def _outermost(i, f, npts):
+    """Magnitude of the first and last of the points a sweep places, as a stacked pair.
+
+    The two sit nearest the ends of the range, which is what the truncation estimate
+    reads. Picked out of whichever batch happens to hold them rather than evaluated
+    again; the lanes that hold neither contribute zero to the sum over batches.
+    """
+    keep = lambda which: jnp.sum(
+        jnp.where((i == which).reshape((-1,) + (1,) * (f.ndim - 1)), jnp.abs(f), 0),
+        axis=0,
+    )
+    return jnp.stack([keep(1), keep(npts)])
+
+
 def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
     """Sum the integrand over ``npts`` nodes spaced ``step`` multiples of ``h`` apart.
 
@@ -297,16 +318,17 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
 
     ``vfunc`` takes a whole batch of abscissae; the callers wrap it to guarantee that.
 
-    Returns the sum, the sum of ``abs`` of the same values, and the number of batches.
-    The second is what the error estimate's roundoff floor is built from; it needs no
-    extra evaluations, so it is always accumulated and left to be eliminated as dead
-    code on the paths that do not read it.
+    Returns the sum, the sum of ``abs`` of the same values, the magnitude of the
+    outermost new node either side, and the number of batches.
+    The middle two are what the error estimate's roundoff floor and its truncation term
+    are built from; neither needs extra evaluations, so both are always accumulated and
+    left to be eliminated as dead code on the paths that do not read them.
     """
     nbatch = (npts + batch_size - 1) // batch_size
     offs = jnp.arange(1, batch_size + 1)
 
     def bodyfun(j, carry):
-        s, sabs = carry
+        s, sabs, ends = carry
         i = j * batch_size + offs
         used = i <= npts
         x = a + h * (1 + step * (i - 1))
@@ -314,11 +336,16 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
         f: jax.Array = vfunc(x)
         mask = used.reshape((-1,) + (1,) * (f.ndim - 1))
         f = jnp.where(mask, f, 0)
-        return s + jnp.sum(f, axis=0), sabs + jnp.sum(jnp.abs(f), axis=0)
+        return (
+            s + jnp.sum(f, axis=0),
+            sabs + jnp.sum(jnp.abs(f), axis=0),
+            ends + _outermost(i, f, npts),
+        )
 
-    init = (jnp.zeros(shape, dtype), jnp.zeros(shape, _real_dtype(dtype)))
-    s, sabs = jax.lax.fori_loop(0, nbatch, bodyfun, init)
-    return s, sabs, nbatch
+    rzero = jnp.zeros(shape, _real_dtype(dtype))
+    init = (jnp.zeros(shape, dtype), rzero, jnp.stack([rzero, rzero]))
+    s, sabs, ends = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    return s, sabs, ends, nbatch
 
 
 def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
@@ -337,14 +364,24 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
     where a run started beyond the order its sums are accumulated in.
 
     Returns the rule indexed by row, the same rule applied to ``abs`` of the integrand
-    on the finest of these grids, and the number of evaluations spent. Only the finest
-    row of the second is needed, since the refinement loop carries it forward by the
-    same halving recursion.
+    on the finest of these grids, the magnitude of the integrand at the two endpoints
+    and at the outermost interior node either side, and the number of evaluations spent.
+    Only the finest row of the second is needed, since the refinement loop carries it
+    forward by the same halving recursion. The last two are handed back rather than
+    evaluated again because the truncation estimate reads exactly those nodes; see
+    ``_tanhsinh_truncation``.
     """
     fa, fb = vfunc(a), vfunc(b)
+    edges = jnp.stack([jnp.abs(fa), jnp.abs(fb)])
     fab = (jnp.abs(fa) + jnp.abs(fb)) / 2
     if divmin == 0:
-        return jnp.stack([(b - a) * (fa + fb) / 2]), (b - a) * fab, 2
+        return (
+            jnp.stack([(b - a) * (fa + fb) / 2]),
+            (b - a) * fab,
+            edges,
+            jnp.zeros_like(edges),
+            2,
+        )
 
     npts = 2**divmin - 1  # interior points of the finest of these grids
     h = (b - a) / 2**divmin
@@ -352,7 +389,7 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
     offs = jnp.arange(1, batch_size + 1)
 
     def bodyfun(k, carry):
-        s, sabs = carry
+        s, sabs, ends = carry
         i = k * batch_size + offs
         used = i <= npts
         x = a + h * i
@@ -371,16 +408,21 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
             new = new.reshape((-1,) + (1,) * (fx.ndim - 1))
             added.append(jnp.sum(jnp.where(new, fx, 0), axis=0))
         # `abs` needs no such split: only the finest grid's value is ever read.
-        return s + jnp.stack(added), sabs + jnp.sum(jnp.abs(fx), axis=0)
+        return (
+            s + jnp.stack(added),
+            sabs + jnp.sum(jnp.abs(fx), axis=0),
+            ends + _outermost(i, fx, npts),
+        )
 
-    init = (jnp.zeros((divmin, *shape), dtype), jnp.zeros(shape, _real_dtype(dtype)))
-    added, sabs = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    rzero = jnp.zeros(shape, _real_dtype(dtype))
+    init = (jnp.zeros((divmin, *shape), dtype), rzero, jnp.stack([rzero, rzero]))
+    added, sabs, outer = jax.lax.fori_loop(0, nbatch, bodyfun, init)
 
     col0 = [(b - a) * (fa + fb) / 2]
     for j in range(1, divmin + 1):
         col0.append(0.5 * col0[j - 1] + ((b - a) / 2**j) * added[j - 1])
     resabs = ((b - a) / 2**divmin) * (sabs + fab)
-    return jnp.stack(col0), resabs, 2 + nbatch * batch_size
+    return jnp.stack(col0), resabs, edges, outer, 2 + nbatch * batch_size
 
 
 def _extrapolate_row(result, n, extrapolate):
@@ -415,7 +457,15 @@ _TAIL_CAP = 0.9
 _ANOMALY = 0.1
 
 
-def _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow):
+def _romberg_err(
+    d: jax.Array,
+    dprev: jax.Array,
+    dprev2: jax.Array,
+    resabs: jax.Array,
+    _norm: Callable,
+    eps: float,
+    uflow: float,
+):
     """Estimate the error in the level whose estimate moved by ``d``.
 
     ``d``, ``dprev`` and ``dprev2`` are the last three level-to-level movements of the
@@ -472,6 +522,39 @@ def _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow):
     )
 
 
+def _tanhsinh_truncation(edges, outer, rtype, _norm):
+    """Estimate the mass the tanh-sinh map leaves outside the range it is truncated to.
+
+    ``rombergts`` integrates over ``[-tmax, tmax]``, and the substitution is a change of
+    variable, so what it omits in ``t`` is exactly the sliver in ``x`` beyond the
+    outermost node. That is a shortfall of the map rather than of the mesh: refining
+    converges onto it, so the movement between levels says nothing about it at all.
+    Left out of the estimate it is the one error a run can have while reporting success,
+    which is why it is charged whatever the table is doing.
+
+    Its size is read off the outermost term of the sum, which is the standard tanh-sinh
+    indicator (``d4`` of [1]_ section 5). Past the cutoff the weight falls double
+    exponentially, so the last term bounds what is left of the sum wherever the
+    integrand is not itself growing faster than that.
+
+    ``edges`` is the term at the cutoff and ``outer`` the term at the outermost node any
+    level has placed and got a value from. The cutoff is preferred, and the fallback is
+    what makes the estimate work where it is unusable: on an interval whose endpoints
+    are large relative to its width the outermost nodes round onto the endpoint itself,
+    and an integrand singular there returns a non-finite value that the wrapper masks
+    away. Reading that as "no tail" is exactly backwards, it being the case where the
+    tail is largest. Both ends are omitted, so both are charged.
+
+    References
+    ----------
+    .. [1] Bailey, Jeyabalan and Li, "A comparison of three high-precision quadrature
+       schemes", Experimental Mathematics 14.3 (2005).
+
+    """
+    term = jnp.where(edges > 0, edges, outer).astype(rtype)
+    return _norm(term[0] + term[1])
+
+
 def _romberg_solve(
     rule,
     vfunc,
@@ -485,6 +568,7 @@ def _romberg_solve(
     extrapolate=True,
     batch_size=1,
     divmin=4,
+    truncation=None,
 ):
     """Run the refinement loop, with Richardson extrapolation if it is switched on.
 
@@ -513,10 +597,40 @@ def _romberg_solve(
     best = (lambda res, k: res[k, k]) if extrapolate else (lambda res, k: res[k, 0])
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    col0, resabs, neval = _initial_rows(
+    col0, resabs, edges, outer, neval = _initial_rows(
         vfunc, a, b, divmin, batch_size, f.shape, f.dtype
     )
     result = result.at[: divmin + 1, 0].set(col0)
+
+    def trunc_of(outer):
+        """What the map leaves outside the range the solve integrates over.
+
+        Zero for the variants whose map truncates nothing, which is every one but
+        tanh-sinh.
+        """
+        if truncation is None:
+            return jnp.array(0.0, rtype)
+        return truncation(edges, outer, rtype, _norm)
+
+    def keep_outer(outer, ends):
+        """Take the newer pair of outermost nodes, for whichever end got a value.
+
+        Each level places its outermost nodes closer to the ends than the last did, so a
+        value from this level supersedes the one carried. A zero does not: it is a node
+        that has rounded onto the endpoint and been masked away, and the last node that
+        resolved remains the best that end has to say.
+        """
+        return jnp.where(ends > 0, ends, outer)
+
+    def total_err(d, dprev, dprev2, resabs, outer):
+        """The error in the current estimate.
+
+        What the mesh has left to give, plus what the map never had. The two are
+        independent shortfalls, so they add.
+        """
+        return _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow) + trunc_of(
+            outer
+        )
 
     def advance(result, n, yprev):
         """Extrapolate row ``n`` and measure how far its estimate moved."""
@@ -550,38 +664,52 @@ def _romberg_solve(
     result, y, d, dprev, dprev2 = jax.lax.fori_loop(
         1, divmin + 1, initloop, (result, result[0, 0], zero, zero, zero)
     )
-    err = _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow)
+    err = total_err(d, dprev, dprev2, resabs, outer)
     # A run given no rows to compare has no estimate at all, whatever the table says:
     # with no movements the formula would return its roundoff floor, which reads as
     # convergence on the strength of a single trapezoidal value.
     if divmin < 1:
         err = jnp.array(jnp.inf, rtype)
 
-    state = (result, divmin + 1, neval, err, y, resabs, d, dprev)
+    state = (result, divmin + 1, neval, err, y, resabs, d, dprev, outer)
 
     def ncond(state):
-        result, n, neval, err, y, resabs, dprev, dprev2 = state
+        result, n, neval, err, y, resabs, dprev, dprev2, outer = state
         # `n` is the row about to be computed, so `n - 1` rows are complete and `y` is
         # the value read off the last of them.
-        return (n < divmax + 1) & unconverged(y, err, n - 1)
+        tol = jnp.maximum(epsabs, epsrel * _norm(y))
+        trunc = trunc_of(outer)
+        # Refining is pointless once the mesh has converged onto a floor the map itself
+        # holds above the tolerance: every further level doubles the evaluations while
+        # the reported error stays where it is. Since the two shares are added,
+        # `err <= 2 * trunc` is the mesh's own share having fallen to that floor. The
+        # run still ends unconverged, which is the honest outcome; this only declines to
+        # spend the rest of `divmax` reaching it.
+        # A zero tolerance is not a threshold that can be missed, it is a request to
+        # refine as far as `divmax` allows, so it is never read as unreachable.
+        hopeless = (
+            (tol > 0) & (trunc > tol) & (err <= 2 * trunc) & (n - 1 >= _MIN_LEVELS)
+        )
+        return (n < divmax + 1) & unconverged(y, err, n - 1) & ~hopeless
 
     def nloop(state):
         # loop over outer number of subdivisions
-        result, n, neval, err, yprev, resabs, dprev, dprev2 = state
+        result, n, neval, err, yprev, resabs, dprev, dprev2, outer = state
         h = (b - a) / 2**n
-        s, sabs, nbatch = _level_sum(
+        s, sabs, ends, nbatch = _level_sum(
             vfunc, a, h, 2 ** (n - 1), batch_size, f.shape, f.dtype
         )
         result = result.at[n, 0].set(0.5 * result[n - 1, 0] + h * s)
         resabs = 0.5 * resabs + h * sabs
+        outer = keep_outer(outer, ends)
         # The padded lanes of the last batch are evaluations of the integrand like any
         # other, so they are counted here even though they do not reach the sum.
         neval += nbatch * batch_size
         result, y, d = advance(result, n, yprev)
-        err = _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow)
-        return result, n + 1, neval, err, y, resabs, d, dprev
+        err = total_err(d, dprev, dprev2, resabs, outer)
+        return result, n + 1, neval, err, y, resabs, d, dprev, outer
 
-    result, n, neval, err, y, resabs, dprev, dprev2 = bounded_while_loop(
+    result, n, neval, err, y, resabs, dprev, dprev2, outer = bounded_while_loop(
         ncond, nloop, state, max(divmax - divmin, 0) + 1
     )
 
@@ -620,7 +748,7 @@ def _romberg_levels(
     vfunc = wrap_func(vfunc, (), interval.dtype)  # see ``_romberg_solve``
     f = jax.eval_shape(vfunc, (a + b) / 2)
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    col0, _, _ = _initial_rows(vfunc, a, b, divmin, batch_size, f.shape, f.dtype)
+    col0, *_ = _initial_rows(vfunc, a, b, divmin, batch_size, f.shape, f.dtype)
     result = result.at[: divmin + 1, 0].set(col0)
     result = jax.lax.fori_loop(
         1, divmin + 1, lambda k, res: _extrapolate_row(res, k, extrapolate), result
@@ -628,7 +756,7 @@ def _romberg_levels(
 
     def nloop(k, result):
         h = (b - a) / 2**k
-        s, _, _ = _level_sum(vfunc, a, h, 2 ** (k - 1), batch_size, f.shape, f.dtype)
+        s, *_ = _level_sum(vfunc, a, h, 2 ** (k - 1), batch_size, f.shape, f.dtype)
         result = result.at[k, 0].set(0.5 * result[k - 1, 0] + h * s)
         return _extrapolate_row(result, k, extrapolate)
 
@@ -810,4 +938,5 @@ def rombergts(
         extrapolate,
         batch_size,
         divmin,
+        truncation=_tanhsinh_truncation,
     )

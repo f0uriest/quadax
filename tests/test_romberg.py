@@ -424,9 +424,9 @@ class TestDivmin:
 
         With the tolerance zeroed every level runs, so the count is the sum over the
         schedule: the two endpoints directly, then the starting sweep's interior points
-        in padded batches, then each later level's new points in their own. One point at
-        a time nothing is padded and the sum collapses to the documented bound
-        ``2**divmax + 1``.
+        in padded batches, then each later level's new points in their own, plus
+        whatever the variant spends off the schedule. One point at a time nothing is
+        padded and the sum collapses to the documented bound.
         """
         divmax, divmin = 5, 3
         _, info = self._run(method, 0, divmin, divmax=divmax, batch_size=batch_size)

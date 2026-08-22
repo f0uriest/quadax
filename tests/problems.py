@@ -732,11 +732,20 @@ QUADPACK_MODEL = ErrorModel(slack=1.0, honesty=25)
 
 # Romberg builds its estimate from the movement of the Richardson diagonal over the last
 # few levels, inflates it by the geometric tail that movement's own contraction rate
-# implies, and floors it at `50*eps*integral_abs`. As with the QUADPACK model, that
-# makes the reported value a bound rather than an estimate on a converged run; measured
-# worst case 0.5393x, on romberg at `log-squared`. Once the routine has given up the
-# bound lapses; measured worst case 14.38x, on romberg at `decay-1.01`, and given the
-# same headroom over its measurement as the QUADPACK pair, for the same reason.
+# implies, and floors it at `50*eps*integral_abs`. `rombergts` adds to that the mass its
+# map leaves outside the range being integrated over, taken from the outermost term of
+# the sum. That mass is fixed by the map rather than by the mesh, so refining converges
+# onto it and the movement between levels says nothing about it at all. Left out, it was
+# the one error either routine could have while reporting success, and it is what every
+# dishonest tanh-sinh case this table used to carry was made of.
+#
+# As with the QUADPACK model, the sum is a bound rather than an estimate on a converged
+# run; measured worst case 0.5393x, on romberg at `log-squared`. Once the routine has
+# given up the bound lapses; measured worst case 14.38x, on romberg at `decay-1.01`, and
+# given the same headroom over its measurement as the QUADPACK pair, for the same
+# reason. The tanh-sinh variant stays well inside that, its own worst being 2.71x at
+# `pow-0.99` and `decay-1.01`, the two whose endpoints come nearest to being
+# non-integrable and where the outermost term therefore has most left to account for.
 RICHARDSON_MODEL = ErrorModel(slack=1.0, honesty=35)
 
 # Tolerance for two routes to the same computation - extrapolation on against off, a
@@ -921,24 +930,25 @@ KNOWN_FAILURES = {
     ("rombergts", "beta-both-ends"): {1e-8},  # scipy too
     ("rombergts", "decay-1.01"): {1e-4},  # scipy too
     ("rombergts", "decay-1.1"): {1e-4},
-    ("rombergts", "decay-1.5"): {1e-12},
-    ("rombergts", "decay-1.5-from-0"): {1e-12},
-    ("rombergts", "decay-1.5-mirrored"): {1e-12},
+    ("rombergts", "decay-1.5"): {1e-8, 1e-12},
+    ("rombergts", "decay-1.5-from-0"): {1e-8, 1e-12},
+    ("rombergts", "decay-1.5-mirrored"): {1e-8, 1e-12},
     ("rombergts", "decay-line"): {1e-8},  # scipy too
-    ("rombergts", "exp-over-sqrt"): {1e-12},  # scipy too
+    ("rombergts", "exp-over-sqrt"): {1e-8, 1e-12},  # scipy too
     ("rombergts", "jump"): {1e-8, 1e-12},  # scipy too
     ("rombergts", "log-over-sqrt"): {1e-8},
+    ("rombergts", "log-squared"): {1e-12},
     ("rombergts", "loglog"): {1e-4, 1e-8},  # scipy too
     ("rombergts", "loglog-cube"): {1e-4, 1e-8},  # scipy too at 1e-8
     ("rombergts", "loglog-right"): {1e-4},  # scipy too
     ("rombergts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
-    ("rombergts", "pow-0.5"): {1e-12},
+    ("rombergts", "pow-0.5"): {1e-8, 1e-12},
     ("rombergts", "pow-0.9"): {1e-4},
     ("rombergts", "pow-0.9-right"): {1e-4},  # scipy too
     ("rombergts", "pow-0.99"): {1e-4},  # scipy too
     ("rombergts", "sqrt-over-semicircle"): {1e-12},  # scipy too
     ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too
-    ("rombergts", "vector-mixed"): {1e-12},
+    ("rombergts", "vector-mixed"): {1e-8, 1e-12},
     ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
 }
@@ -978,28 +988,7 @@ KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadts", "sqrt-over-semicircle"): {1e-4, 1e-8},
     ("quadts", "sqrt-tan"): {1e-4, 1e-8},
     ("quadts", "vector-mixed"): {1e-4, 1e-8},
-    ("rombergts", "beta-both-ends"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
-    ("rombergts", "decay-1.01"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "decay-1.1"): {1e-4, 1e-8, 1e-12},
-    ("rombergts", "decay-1.5"): {1e-8, 1e-12},
-    ("rombergts", "decay-1.5-from-0"): {1e-8, 1e-12},
-    ("rombergts", "decay-1.5-mirrored"): {1e-8, 1e-12},
-    ("rombergts", "decay-line"): {1e-8, 1e-12},  # scipy too
-    ("rombergts", "exp-over-sqrt"): {1e-8, 1e-12},  # scipy too at 1e-12
     ("rombergts", "jump"): {1e-4},  # scipy too
-    ("rombergts", "log-over-sqrt"): {1e-8, 1e-12},
-    ("rombergts", "log-squared"): {1e-12},
-    ("rombergts", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "loglog-cube"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
-    ("rombergts", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "loglog-sqrt"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "pow-0.5"): {1e-8, 1e-12},
-    ("rombergts", "pow-0.9"): {1e-4, 1e-8, 1e-12},
-    ("rombergts", "pow-0.9-right"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "pow-0.99"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("rombergts", "sqrt-over-semicircle"): {1e-8, 1e-12},  # scipy too at 1e-12
-    ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too at 1e-12
-    ("rombergts", "vector-mixed"): {1e-8, 1e-12},
 }
 
 
