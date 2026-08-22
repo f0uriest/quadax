@@ -211,6 +211,10 @@ class TestBatchSize:
         exhausts ``divmax``. Without that a batch size could stop a level earlier or
         later than the serial run purely on the last-bit differences above, and the
         comparison would be between two different discretizations.
+
+        ``divmin=0`` starts from two points, so every level below ``divmax`` is placed
+        by the refinement loop and the schedule these tests count against is the loop's
+        alone. What the starting sweep does with a batch is ``TestDivmin``'s business.
         """
         prob = PROBLEMS[i]
         return method(
@@ -221,6 +225,7 @@ class TestBatchSize:
             divmax=divmax or self.DIVMAX,
             full_output=True,
             batch_size=batch_size,
+            divmin=0,
         )
 
     def _depth(self, info, batch_size):
@@ -283,8 +288,8 @@ class TestBatchSize:
         """
         self._assert_matches_serial(method, i, self.PADS)
 
-    def test_serial_is_the_default(self, method):
-        """``batch_size=None`` and ``batch_size=1`` are the same computation.
+    def test_serial_is_the_default_at_divmin_zero(self, method):
+        """``batch_size=None`` is ``2**divmin``, so at ``divmin=0`` it is one point.
 
         One point per batch leaves the mask always true and the sum over a single row,
         so no term is reordered and the two agree to roundoff rather than merely to
@@ -333,13 +338,13 @@ class TestBatchSize:
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
-class TestInitialPoints:
-    """Starting the halving schedule from more than two points."""
+class TestDivmin:
+    """Starting the halving schedule several levels in."""
 
     DIVMAX = 8
     TOL = 1e-10
 
-    def _run(self, method, i, initial_points, divmax=None, **kwargs):
+    def _run(self, method, i, divmin, divmax=None, **kwargs):
         """Run to a fixed depth with the tolerance zeroed, as in ``TestBatchSize``."""
         prob = PROBLEMS[i]
         return method(
@@ -349,50 +354,56 @@ class TestInitialPoints:
             epsrel=0.0,
             divmax=divmax or self.DIVMAX,
             full_output=True,
-            initial_points=initial_points,
+            divmin=divmin,
             **kwargs,
         )
 
-    @pytest.mark.parametrize("k", [1, 2, 4], ids=str)
-    def test_power_of_two_start_is_the_default_run_shifted(self, method, k):
-        """Starting at 2**k + 1 points replays the default run from level k on.
+    @staticmethod
+    def _filled(table):
+        """Last row a run actually wrote.
 
-        A first level of 2**k intervals is the state the default schedule reaches
-        after k refinements, so carrying the default run k levels further covers the
-        same nodes: the evaluation counts come out identical, and the trapezoidal
-        columns agree row for row once shifted, the diagonals the algorithm actually
-        reads with them.
-
-        Only those two are compared. An extrapolation entry above the diagonal of the
-        started run has no counterpart in the default table, because Richardson
-        builds it from levels below it in the same table and the started run has k
-        fewer levels to draw on - its early rows are genuinely first rows, not copies.
-        What is compared differs by rounding alone, since the started run sums its
-        first row in one pass where the default accumulates it across k halvings.
+        Zeroing the tolerance does not quite pin the depth: the loop also stops when two
+        successive estimates agree to the last bit, so two runs can write different
+        numbers of rows and only the rows both filled can be compared.
         """
-        want, want_info = self._run(method, SMOOTH_FINITE[0], 2, divmax=self.DIVMAX + k)
-        got, got_info = self._run(method, SMOOTH_FINITE[0], 2**k + 1)
-        assert int(got_info.neval) == int(want_info.neval)
+        rows = [k for k in range(table.shape[0]) if np.any(table[k] != 0)]
+        return max(rows) if rows else 0
+
+    @pytest.mark.parametrize("divmin", [1, 2, 3, 5], ids=str)
+    @pytest.mark.parametrize("i", SMOOTH_FINITE, ids=problem_id)
+    def test_table_matches_the_run_from_scratch(self, method, divmin, i):
+        """Starting `divmin` levels in builds the same table, not a shorter one.
+
+        The starting grid contains every coarser grid of the halving sequence, so the
+        rows below it are filled from the same evaluations, and the table is the one a
+        run from ``divmin=0`` holds at the same depth. That is the whole claim
+        ``divmin`` rests on: it moves where the evaluations are batched without moving
+        which extrapolations are available, which is what separates it from starting
+        the refinement on a finer mesh and leaving the coarse rows empty.
+
+        To rounding rather than exactly, for the reason batching is: the two accumulate
+        a level's points in a different order.
+        """
+        want, want_info = self._run(method, i, 0)
+        got, got_info = self._run(method, i, divmin)
         tables = [np.asarray(o.info) for o in (got_info, want_info)]
-        depth = tables[0].shape[0]
-        rows = np.arange(depth)
+        depth = min(self._filled(tables[0]), self._filled(tables[1]))
+        assert depth > divmin, "the run stopped inside its own starting sweep"
+        scale = max(np.max(np.abs(tables[1])), 1.0)
         np.testing.assert_allclose(
-            tables[0][:, 0], tables[1][k:, 0], rtol=1e-12, atol=1e-13
+            tables[0][: depth + 1],
+            tables[1][: depth + 1],
+            rtol=1e-11,
+            atol=1e-13 * scale,
         )
         np.testing.assert_allclose(
-            tables[0][rows, rows], tables[1][rows + k, rows], rtol=1e-12, atol=1e-13
+            np.asarray(got), np.asarray(want), rtol=1e-11, atol=1e-13 * scale
         )
 
     @pytest.mark.parametrize("i", SMOOTH_FINITE, ids=problem_id)
-    @pytest.mark.parametrize("initial_points", [3, 5, 10, 17], ids=str)
-    def test_converges_from_an_arbitrary_start(self, method, i, initial_points):
-        """Starts that are not one more than a power of two converge all the same.
-
-        The claim is accuracy against the exact value at a tolerance the default run
-        meets comfortably, not agreement with another run of this same method, since
-        the question is whether a standalone halving sequence started anywhere at all
-        is sound.
-        """
+    @pytest.mark.parametrize("divmin", [0, 1, 3, 6], ids=str)
+    def test_converges_from_any_start(self, method, i, divmin):
+        """Every start reaches a tolerance the default run meets comfortably."""
         prob = PROBLEMS[i]
         y, info = method(
             prob["fun"],
@@ -400,7 +411,7 @@ class TestInitialPoints:
             epsabs=self.TOL,
             epsrel=self.TOL,
             divmax=12,
-            initial_points=initial_points,
+            divmin=divmin,
         )
         assert int(info.status) == 0
         np.testing.assert_allclose(
@@ -409,69 +420,65 @@ class TestInitialPoints:
 
     @pytest.mark.parametrize("batch_size", [1, 4], ids=["serial", "batched"])
     def test_neval_follows_the_schedule(self, method, batch_size):
-        """Level 0 places ``initial_points`` evaluations, level k places m*2**(k-1).
+        """The starting sweep places ``2**divmin + 1`` points, level k places 2**(k-1).
 
         With the tolerance zeroed every level runs, so the count is the sum over the
-        schedule: the two endpoints directly plus the padded batches of the level 0
-        interior sum, then each level's new points in their own padded batches. One
-        point at a time nothing is padded and the sum collapses to the documented
-        bound ``(initial_points - 1)*2**divmax + 1``.
+        schedule: the two endpoints directly, then the starting sweep's interior points
+        in padded batches, then each later level's new points in their own. One point at
+        a time nothing is padded and the sum collapses to the documented bound
+        ``2**divmax + 1``.
         """
-        divmax, initial_points = 5, 10
-        m = initial_points - 1
-        _, info = self._run(
-            method, 0, initial_points, divmax=divmax, batch_size=batch_size
-        )
+        divmax, divmin = 5, 3
+        _, info = self._run(method, 0, divmin, divmax=divmax, batch_size=batch_size)
         expected = (
             2
-            + -(-(m - 1) // batch_size) * batch_size
+            + -(-(2**divmin - 1) // batch_size) * batch_size
             + sum(
-                -(-(m * 2 ** (k - 1)) // batch_size) * batch_size
-                for k in range(1, divmax + 1)
+                -(-(2 ** (k - 1)) // batch_size) * batch_size
+                for k in range(divmin + 1, divmax + 1)
             )
         )
         assert int(info.neval) == expected
         if batch_size == 1:
-            assert expected == m * 2**divmax + 1
+            assert expected == 2**divmax + 1
 
-    def test_batch_size_is_clipped_to_the_deepest_level(self, method):
-        """No level places more than ``m*2**(divmax - 1)`` points; nothing above helps.
+    def test_default_batch_covers_the_starting_sweep(self, method):
+        """``batch_size=None`` is ``2**divmin``: one batch for the whole start."""
+        divmin = 4
+        _, default = self._run(method, 0, divmin, batch_size=None)
+        _, explicit = self._run(method, 0, divmin, batch_size=2**divmin)
+        assert int(default.neval) == int(explicit.neval)
 
-        Mirrors the clip test for ``batch_size`` itself: without the clip a generous
-        batch size would be padding on every level of a shallow run, and ``neval``
-        would grow without the run doing any more work. The start multiplies into the
-        deepest level's point count, so it multiplies into the clip.
+    def test_batch_size_is_clipped_to_the_largest_level(self, method):
+        """Nothing above the largest number of points one level places helps.
+
+        Without the clip a generous batch size would be padding on every level of a
+        shallow run, and ``neval`` would grow without the run doing any more work. The
+        starting sweep counts as a level here, since for a deep start it is the largest.
         """
-        divmax, initial_points = 4, 9
-        deepest = (initial_points - 1) * 2 ** (divmax - 1)
-        _, clipped = self._run(
-            method, 0, initial_points, divmax=divmax, batch_size=10**6
-        )
-        _, exact = self._run(
-            method, 0, initial_points, divmax=divmax, batch_size=deepest
-        )
+        divmax, divmin = 4, 3
+        largest = max(2**divmin, 2 ** (divmax - 1))
+        _, clipped = self._run(method, 0, divmin, divmax=divmax, batch_size=10**6)
+        _, exact = self._run(method, 0, divmin, divmax=divmax, batch_size=largest)
         assert int(clipped.neval) == int(exact.neval)
 
     def test_vector_valued(self, method):
-        """The mask has to broadcast against the integrand's own trailing axes."""
+        """The masks have to broadcast against the integrand's own trailing axes."""
         fun = lambda x: jnp.array([jnp.sin(x), jnp.cos(x), x**2])  # noqa: E731
         interval = jnp.array([0.0, 1.0])
-        want, _ = method(fun, interval, divmax=self.DIVMAX, full_output=True)
-        got, _ = method(
-            fun, interval, divmax=self.DIVMAX, full_output=True, initial_points=13
-        )
+        want, _ = method(fun, interval, divmax=self.DIVMAX, full_output=True, divmin=0)
+        got, _ = method(fun, interval, divmax=self.DIVMAX, full_output=True, divmin=4)
         np.testing.assert_allclose(
             np.asarray(got), np.asarray(want), rtol=1e-10, atol=1e-12
         )
 
     def test_infinite_range(self, method):
-        """A wide start over a mapped infinite interval.
+        """A deep start over a mapped infinite interval.
 
-        Level 0 then sums interior nodes of the mapped domain, which sit differently
-        from anything the default schedule visits, so this exercises the node formula
-        off the finite case. Both methods reach this problem: the exponential decay
-        is one the map turns into a smooth integrand, which is the setting Romberg is
-        for.
+        The starting sweep then places interior nodes of the mapped domain, so this
+        exercises the node formula off the finite case. Both methods reach this problem:
+        the exponential decay is one the map turns into a smooth integrand, which is the
+        setting Romberg is for.
         """
         prob = PROBLEMS[12]  # gaussian-line, [0, inf)
         y, info = method(
@@ -480,7 +487,7 @@ class TestInitialPoints:
             epsabs=1e-9,
             epsrel=1e-9,
             divmax=12,
-            initial_points=33,
+            divmin=5,
         )
         assert int(info.status) == 0
         np.testing.assert_allclose(
@@ -491,27 +498,23 @@ class TestInitialPoints:
         """Reverse mode through the frozen-level adjoint agrees across starts.
 
         ``DirectAdjoint`` freezes the number of levels the primal solve used and
-        differentiates that fixed linear functional of the integrand. A wider start
-        changes which functional that is, but on a problem every one of them resolves,
-        the derivatives they return are the continuous one to the accuracy of their
-        discretizations.
+        differentiates that fixed linear functional of the integrand. A deeper start
+        can settle on a different number of them, but on a problem every one of them
+        resolves, the derivatives they return are the continuous one to the accuracy of
+        their discretizations.
         """
         fun = lambda t, c: c * jnp.cos(t)  # noqa: E731
 
-        def grad_at(initial_points):
+        def grad_at(divmin):
             return jax.grad(
                 lambda a: method(
-                    fun,
-                    jnp.array([a, 1.0]),
-                    args=(2.0,),
-                    divmax=12,
-                    initial_points=initial_points,
+                    fun, jnp.array([a, 1.0]), args=(2.0,), divmax=12, divmin=divmin
                 )[0]
             )(jnp.array(0.25))
 
         want = -2.0 * jnp.cos(0.25)
-        np.testing.assert_allclose(grad_at(2), want, rtol=1e-9, atol=1e-11)
-        np.testing.assert_allclose(grad_at(17), want, rtol=1e-9, atol=1e-11)
+        np.testing.assert_allclose(grad_at(0), want, rtol=1e-9, atol=1e-11)
+        np.testing.assert_allclose(grad_at(5), want, rtol=1e-9, atol=1e-11)
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
@@ -523,10 +526,23 @@ def test_bad_batch_size_rejected(method, batch_size):
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
-@pytest.mark.parametrize(
-    "initial_points", [1, 0, -3, 2.5], ids=["one", "zero", "negative", "float"]
-)
-def test_bad_initial_points_rejected(method, initial_points):
-    """A starting grid smaller than two points, or not a count at all, is a mistake."""
-    with pytest.raises(ValueError, match="initial_points"):
-        method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), initial_points=initial_points)
+@pytest.mark.parametrize("divmin", [-1, -3, 2.5], ids=["minusone", "negative", "float"])
+def test_bad_divmin_rejected(method, divmin):
+    """A start that is not a count of halvings is a mistake, not a default."""
+    with pytest.raises(ValueError, match="divmin"):
+        method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), divmin=divmin)
+
+
+@pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
+@pytest.mark.parametrize("divmax", [-1, -3, 2.5], ids=["minusone", "negative", "float"])
+def test_bad_divmax_rejected(method, divmax):
+    """A divmax that is not a count of halvings is a mistake, not a default."""
+    with pytest.raises(ValueError, match="divmax"):
+        method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), divmax=divmax)
+
+
+@pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
+def test_divmin_above_divmax_rejected(method):
+    """Starting below the floor the run is allowed to reach is a contradiction."""
+    with pytest.raises(ValueError, match="divmin"):
+        method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), divmin=6, divmax=4)

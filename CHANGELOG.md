@@ -114,10 +114,11 @@ v0.3.0
   where it amplifies the error rather than cancelling it. The convergence check and the
   reported ``err`` follow whichever estimate is in use, and the ``table`` returned by
   ``full_output`` then has only its first column filled.
-- ``romberg`` and ``rombergts`` take a new ``initial_points`` argument, default 2. It
-  sets how many points the first refinement level places, where the schedule previously
-  started from just the two endpoints; every later level still doubles the number of new
-  points.
+- ``romberg`` and ``rombergts`` take a new ``divmin`` argument, default 4. It sets what
+  refinement level the solver starts at (number of initial intervals = ``2**divmin``),
+  with the old behavior corresponding to ``divmin=0``. The new default is more efficient
+  on accelerators, and is generally more robust against false early termination, with a
+  small increase in cost on extremely simple integrands.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and

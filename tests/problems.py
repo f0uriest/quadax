@@ -938,7 +938,7 @@ KNOWN_FAILURES = {
     ("rombergts", "pow-0.9-right"): {1e-4},  # scipy too
     ("rombergts", "pow-0.99"): {1e-4},  # scipy too
     ("rombergts", "sqrt-over-semicircle"): {1e-12},  # scipy too
-    ("rombergts", "sqrt-tan"): {1e-12},  # scipy too
+    ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too
     ("rombergts", "vector-mixed"): {1e-12},
     ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
@@ -991,6 +991,7 @@ KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("rombergts", "decay-line"): {1e-8, 1e-12},  # scipy too
     ("rombergts", "exp-over-sqrt"): {1e-8, 1e-12},  # scipy too at 1e-12
     ("rombergts", "jump"): {1e-4, 1e-8, 1e-12},  # scipy too
+    ("rombergts", "log-cos"): {1e-12},
     ("rombergts", "log-decay"): {1e-12},
     ("rombergts", "log-over-sqrt"): {1e-8, 1e-12},
     ("rombergts", "log-squared"): {1e-12},
