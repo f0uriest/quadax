@@ -71,9 +71,11 @@ def romberg(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float
-        Absolute and relative tolerances. If I1 and I2 are two successive approximations
-        to the integral, algorithm terminates when abs(I1-I2) < max(epsabs,
-        epsrel*|I2|). Default is the square root of the machine precision of the working
+        Absolute and relative tolerances. The algorithm terminates once its estimate of
+        the error in the current approximation ``I`` falls below ``max(epsabs,
+        epsrel*|I|)``, which takes at least two refinement levels whatever the tolerance
+        and ``divmin``, since the first level's estimate has no earlier one to be judged
+        against. Default is the square root of the machine precision of the working
         dtype, ie of `interval`, or of the integrand's own dtype if that is the coarser
         of the two.
     divmax : int, optional
@@ -129,7 +131,10 @@ def romberg(
     info : QuadratureInfo
         Named tuple with the following fields:
 
-        * err : (float) Estimate of the error in the approximation.
+        * err : (float) Estimate of the error in the approximation. Built from how far
+          the estimate moved over the last few refinement levels rather than over the
+          last one alone, plus the tail that movement's own contraction rate implies,
+          and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
         * status : (int) Flag indicating reason for termination. status of 0 means
           normal termination, any other value indicates a possible error. A human
@@ -291,20 +296,29 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
     and masking that out of the sum afterwards still leaves a NaN in its derivative.
 
     ``vfunc`` takes a whole batch of abscissae; the callers wrap it to guarantee that.
+
+    Returns the sum, the sum of ``abs`` of the same values, and the number of batches.
+    The second is what the error estimate's roundoff floor is built from; it needs no
+    extra evaluations, so it is always accumulated and left to be eliminated as dead
+    code on the paths that do not read it.
     """
     nbatch = (npts + batch_size - 1) // batch_size
     offs = jnp.arange(1, batch_size + 1)
 
-    def bodyfun(j, s):
+    def bodyfun(j, carry):
+        s, sabs = carry
         i = j * batch_size + offs
         used = i <= npts
         x = a + h * (1 + step * (i - 1))
         x = jnp.where(used, x, x[0])
         f: jax.Array = vfunc(x)
         mask = used.reshape((-1,) + (1,) * (f.ndim - 1))
-        return s + jnp.sum(jnp.where(mask, f, 0), axis=0)
+        f = jnp.where(mask, f, 0)
+        return s + jnp.sum(f, axis=0), sabs + jnp.sum(jnp.abs(f), axis=0)
 
-    return jax.lax.fori_loop(0, nbatch, bodyfun, jnp.zeros(shape, dtype)), nbatch
+    init = (jnp.zeros(shape, dtype), jnp.zeros(shape, _real_dtype(dtype)))
+    s, sabs = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    return s, sabs, nbatch
 
 
 def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
@@ -322,18 +336,23 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
     rather than by summing each grid outright, so that the table does not depend on
     where a run started beyond the order its sums are accumulated in.
 
-    Returns the rule indexed by row, and the number of evaluations spent.
+    Returns the rule indexed by row, the same rule applied to ``abs`` of the integrand
+    on the finest of these grids, and the number of evaluations spent. Only the finest
+    row of the second is needed, since the refinement loop carries it forward by the
+    same halving recursion.
     """
     fa, fb = vfunc(a), vfunc(b)
+    fab = (jnp.abs(fa) + jnp.abs(fb)) / 2
     if divmin == 0:
-        return jnp.stack([(b - a) * (fa + fb) / 2]), 2
+        return jnp.stack([(b - a) * (fa + fb) / 2]), (b - a) * fab, 2
 
     npts = 2**divmin - 1  # interior points of the finest of these grids
     h = (b - a) / 2**divmin
     nbatch = (npts + batch_size - 1) // batch_size
     offs = jnp.arange(1, batch_size + 1)
 
-    def bodyfun(k, s):
+    def bodyfun(k, carry):
+        s, sabs = carry
         i = k * batch_size + offs
         used = i <= npts
         x = a + h * i
@@ -351,14 +370,17 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
             new = ((i % stride) == 0) & ((i % (2 * stride)) != 0)
             new = new.reshape((-1,) + (1,) * (fx.ndim - 1))
             added.append(jnp.sum(jnp.where(new, fx, 0), axis=0))
-        return s + jnp.stack(added)
+        # `abs` needs no such split: only the finest grid's value is ever read.
+        return s + jnp.stack(added), sabs + jnp.sum(jnp.abs(fx), axis=0)
 
-    added = jax.lax.fori_loop(0, nbatch, bodyfun, jnp.zeros((divmin, *shape), dtype))
+    init = (jnp.zeros((divmin, *shape), dtype), jnp.zeros(shape, _real_dtype(dtype)))
+    added, sabs = jax.lax.fori_loop(0, nbatch, bodyfun, init)
 
     col0 = [(b - a) * (fa + fb) / 2]
     for j in range(1, divmin + 1):
         col0.append(0.5 * col0[j - 1] + ((b - a) / 2**j) * added[j - 1])
-    return jnp.stack(col0), 2 + nbatch * batch_size
+    resabs = ((b - a) / 2**divmin) * (sabs + fab)
+    return jnp.stack(col0), resabs, 2 + nbatch * batch_size
 
 
 def _extrapolate_row(result, n, extrapolate):
@@ -372,6 +394,82 @@ def _extrapolate_row(result, n, extrapolate):
         return result.at[n, col].set(result[n, col - 1] + temp)
 
     return jax.lax.fori_loop(1, n + 1, mloop, result)
+
+
+# Two levels have to be complete before convergence may be declared, because the first
+# movement has nothing to be judged against. Without it the level 0 and level 1
+# estimates agreeing by accident - because a narrow feature falls between the three
+# points those levels use, or because the integrand is non-finite at an endpoint and
+# both levels inherit the same substituted value - is read as convergence, and the
+# routine returns an answer it never sampled with a status of 0. A ``divmin`` of 2 or
+# more satisfies this on its own.
+_MIN_LEVELS = 2
+# Largest contraction ratio the tail term will extrapolate from, so a sequence that has
+# stopped contracting is charged a bounded penalty - here 9x the last movement - rather
+# than the infinite one the geometric series would give at a ratio of 1.
+_TAIL_CAP = 0.9
+# How far below the previous contraction ratio this one has to fall for the movement to
+# count as an anomaly rather than a trend. Loose enough that a sequence whose ratio
+# improves from level to level, which is what Richardson does on a smooth integrand, is
+# still read as a trend.
+_ANOMALY = 0.1
+
+
+def _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow):
+    """Estimate the error in the level whose estimate moved by ``d``.
+
+    ``d``, ``dprev`` and ``dprev2`` are the last three level-to-level movements of the
+    reported estimate, newest first, normed to scalars; the two older ones are zero
+    before there is any history. ``resabs`` is the same rule applied to ``abs`` of the
+    integrand.
+
+    The movement between successive levels measures how far the estimate last *went*,
+    which is only a proxy for how far it still has *to go*. Two things make it a poor
+    one, and each gets a correction:
+
+    - Two levels can land close together on the way past a value neither has resolved,
+      which reads as convergence but is a coincidence. What distinguishes the two is
+      whether the movement follows the trend: a sequence in the regime its error
+      expansion describes contracts by a roughly steady ratio, or by an improving one,
+      whereas a coincidence shows up as a single ratio far below the one before it.
+      Where the ratio collapses like that, the largest of the last three movements is
+      reported instead, so that one lucky near-repeat cannot end the run.
+    - Even a well behaved movement understates the total remaining, which is the whole
+      geometric tail rather than its first term. Adding ``d * r / (1 - r)`` charges that
+      tail: negligible for a rapidly contracting sequence, and growing without bound as
+      the contraction stalls, which is where the movement alone is least informative.
+      For the trapezoidal column, whose ratio settles at 1/4, the two together come to
+      ``4/3`` of the movement, which is that column's error exactly.
+
+    Finally the result is floored at ``50 * eps * resabs``, since no estimate is
+    meaningful below the noise of evaluating and summing the integrand.
+    """
+    # Substituted rather than masked, in both ratios: the denominators are exactly zero
+    # both before there is any history and whenever two levels agree to the last bit,
+    # and dividing by them would put a NaN into the estimate by way of `inf * 0`.
+    # A missing `dprev` is read as no contraction, and a missing `dprev2` as no trend to
+    # depart from, which are the conservative readings of each.
+    ratio = jnp.where(dprev > 0, d / jnp.where(dprev > 0, dprev, 1), _TAIL_CAP)
+    prev_ratio = jnp.where(
+        dprev2 > 0, dprev / jnp.where(dprev2 > 0, dprev2, 1), jnp.inf
+    )
+    anomaly = ratio < _ANOMALY * prev_ratio
+    err = jnp.where(anomaly, jnp.maximum(d, jnp.maximum(dprev, dprev2)), d)
+
+    ratio = jnp.minimum(ratio, _TAIL_CAP)
+    err = err + d * ratio / (1 - ratio)
+
+    # The floor covers the conditioning of the integrand rather than the summation:
+    # abscissae carry `~eps*|x|`, which the integrand amplifies by `|f'|`. 50 is
+    # QUADPACK's constant for the same quantity. The guard keeps the product from
+    # underflowing to zero, which would make the floor a no-op precisely where the
+    # integrand is smallest.
+    absnorm = _norm(resabs)
+    return jnp.where(
+        absnorm > uflow / (50.0 * eps),
+        jnp.maximum((50.0 * eps) * absnorm, err),
+        err,
+    )
 
 
 def _romberg_solve(
@@ -404,6 +502,10 @@ def _romberg_solve(
     vfunc = wrap_func(vfunc, (), interval.dtype)
     f = jax.eval_shape(vfunc, (a + b) / 2)
     rtype = _real_dtype(f.dtype)
+    # Compile time constants, as python floats rather than arrays of the working dtype:
+    # forming `uflow / (50 * eps)` in half precision is a needless underflow risk.
+    eps = float(jnp.finfo(rtype).eps)
+    uflow = float(jnp.finfo(rtype).tiny)
 
     # Which entry of row `k` is the estimate. Richardson's is the diagonal, having
     # applied `k` rounds of extrapolation to the trapezoidal values in column 0; without
@@ -411,7 +513,9 @@ def _romberg_solve(
     best = (lambda res, k: res[k, k]) if extrapolate else (lambda res, k: res[k, 0])
 
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    col0, neval = _initial_rows(vfunc, a, b, divmin, batch_size, f.shape, f.dtype)
+    col0, resabs, neval = _initial_rows(
+        vfunc, a, b, divmin, batch_size, f.shape, f.dtype
+    )
     result = result.at[: divmin + 1, 0].set(col0)
 
     def advance(result, n, yprev):
@@ -420,49 +524,68 @@ def _romberg_solve(
         y = best(result, n)
         return result, y, _norm(y - yprev)
 
+    def unconverged(y, err, nlevels):
+        """Whether the run has to keep going.
+
+        Either the estimate is still above tolerance, or there are not yet enough
+        levels for it to rest on; see ``_MIN_LEVELS``.
+        """
+        return (err > jnp.maximum(epsabs, epsrel * _norm(y))) | (nlevels < _MIN_LEVELS)
+
     # Rows 1 through `divmin` came out of the sweep above, so they are processed
     # unconditionally: their evaluations are already spent, and running them is what
-    # gives the run a history before the first refinement rather than after it.
+    # gives the run a history before the first refinement rather than after it. Only
+    # the movements are kept, since the error estimate reads the last three of them and
+    # anything it would have said about an intermediate row is never looked at.
     def initloop(k, carry):
-        result, yprev, _ = carry
-        return advance(result, k, yprev)
+        result, yprev, d, dprev, _ = carry
+        result, y, dnew = advance(result, k, yprev)
+        return result, y, dnew, d, dprev
 
-    # Explicitly typed rather than left a weak python float: this is a loop carry, and
-    # has to match what `_norm` writes back into it. Real, because the error in a
-    # complex valued integral is still real.
-    err = jnp.array(jnp.inf, rtype)
-    result, y, err = jax.lax.fori_loop(
-        1, divmin + 1, initloop, (result, result[0, 0], err)
+    # Explicitly typed rather than left weak python floats: these are loop carries, and
+    # have to match what `_norm` writes back into them. Real, because the error in a
+    # complex valued integral is still real. The movements start at zero, which
+    # `_romberg_err` reads as "no history yet".
+    zero = jnp.array(0.0, rtype)
+    result, y, d, dprev, dprev2 = jax.lax.fori_loop(
+        1, divmin + 1, initloop, (result, result[0, 0], zero, zero, zero)
     )
-    # A run given no rows to compare has no estimate at all, whatever the table says.
+    err = _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow)
+    # A run given no rows to compare has no estimate at all, whatever the table says:
+    # with no movements the formula would return its roundoff floor, which reads as
+    # convergence on the strength of a single trapezoidal value.
     if divmin < 1:
         err = jnp.array(jnp.inf, rtype)
 
-    state = (result, divmin + 1, neval, err, y)
+    state = (result, divmin + 1, neval, err, y, resabs, d, dprev)
 
     def ncond(state):
-        result, n, neval, err, y = state
+        result, n, neval, err, y, resabs, dprev, dprev2 = state
         # `n` is the row about to be computed, so `n - 1` rows are complete and `y` is
         # the value read off the last of them.
-        return (n < divmax + 1) & (err > jnp.maximum(epsabs, epsrel * _norm(y)))
+        return (n < divmax + 1) & unconverged(y, err, n - 1)
 
     def nloop(state):
         # loop over outer number of subdivisions
-        result, n, neval, err, yprev = state
+        result, n, neval, err, yprev, resabs, dprev, dprev2 = state
         h = (b - a) / 2**n
-        s, nbatch = _level_sum(vfunc, a, h, 2 ** (n - 1), batch_size, f.shape, f.dtype)
+        s, sabs, nbatch = _level_sum(
+            vfunc, a, h, 2 ** (n - 1), batch_size, f.shape, f.dtype
+        )
         result = result.at[n, 0].set(0.5 * result[n - 1, 0] + h * s)
+        resabs = 0.5 * resabs + h * sabs
         # The padded lanes of the last batch are evaluations of the integrand like any
         # other, so they are counted here even though they do not reach the sum.
         neval += nbatch * batch_size
-        result, y, err = advance(result, n, yprev)
-        return result, n + 1, neval, err, y
+        result, y, d = advance(result, n, yprev)
+        err = _romberg_err(d, dprev, dprev2, resabs, _norm, eps, uflow)
+        return result, n + 1, neval, err, y, resabs, d, dprev
 
-    result, n, neval, err, y = bounded_while_loop(
+    result, n, neval, err, y, resabs, dprev, dprev2 = bounded_while_loop(
         ncond, nloop, state, max(divmax - divmin, 0) + 1
     )
 
-    status = 2 * (err > jnp.maximum(epsabs, epsrel * _norm(y)))
+    status = 2 * unconverged(y, err, n - 1)
     state = {
         "table": result,
         "err_sum": err,
@@ -497,7 +620,7 @@ def _romberg_levels(
     vfunc = wrap_func(vfunc, (), interval.dtype)  # see ``_romberg_solve``
     f = jax.eval_shape(vfunc, (a + b) / 2)
     result = jnp.zeros((divmax + 1, divmax + 1, *f.shape), f.dtype)
-    col0, _ = _initial_rows(vfunc, a, b, divmin, batch_size, f.shape, f.dtype)
+    col0, _, _ = _initial_rows(vfunc, a, b, divmin, batch_size, f.shape, f.dtype)
     result = result.at[: divmin + 1, 0].set(col0)
     result = jax.lax.fori_loop(
         1, divmin + 1, lambda k, res: _extrapolate_row(res, k, extrapolate), result
@@ -505,7 +628,7 @@ def _romberg_levels(
 
     def nloop(k, result):
         h = (b - a) / 2**k
-        s, _ = _level_sum(vfunc, a, h, 2 ** (k - 1), batch_size, f.shape, f.dtype)
+        s, _, _ = _level_sum(vfunc, a, h, 2 ** (k - 1), batch_size, f.shape, f.dtype)
         result = result.at[k, 0].set(0.5 * result[k - 1, 0] + h * s)
         return _extrapolate_row(result, k, extrapolate)
 
@@ -553,11 +676,13 @@ def rombergts(
         If True, return the full state of the integrator. See below for more
         information.
     epsabs, epsrel : float
-        Absolute and relative tolerances. If I1 and I2 are two successive approximations
-        to the integral, algorithm terminates when abs(I1-I2) < max(epsabs,
-        epsrel*|I2|). Default is the square root of the machine precision of the
-        working dtype, ie of `interval`, or of the integrand's own dtype if that is the
-        coarser of the two.
+        Absolute and relative tolerances. The algorithm terminates once its estimate of
+        the error in the current approximation ``I`` falls below ``max(epsabs,
+        epsrel*|I|)``, which takes at least two refinement levels whatever the tolerance
+        and ``divmin``, since the first level's estimate has no earlier one to be judged
+        against. Default is the square root of the machine precision of the working
+        dtype, ie of `interval`, or of the integrand's own dtype if that is the coarser
+        of the two.
     divmax : int, optional
         Maximum order of extrapolation. Default is 20. Total number of function
         evaluations will be at most 2**divmax + 1
@@ -611,7 +736,10 @@ def rombergts(
     info : QuadratureInfo
         Named tuple with the following fields:
 
-        * err : (float) Estimate of the error in the approximation.
+        * err : (float) Estimate of the error in the approximation. Built from how far
+          the estimate moved over the last few refinement levels rather than over the
+          last one alone, plus the tail that movement's own contraction rate implies,
+          and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
         * status : (int) Flag indicating reason for termination. status of 0 means
           normal termination, any other value indicates a possible error. A human
