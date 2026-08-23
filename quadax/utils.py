@@ -106,23 +106,6 @@ def _map_identity_inv(x: jax.Array, a: jax.Array, b: jax.Array):
     return x.squeeze()
 
 
-def _map_linear(t: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point t in [-1, 1] to x in [a, b]."""
-    c = (b - a) / 2
-    d = (b + a) / 2
-    x = d + c * t
-    w = c * jnp.ones_like(t)
-    return x.squeeze(), w.squeeze()
-
-
-def _map_linear_inv(x: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point x in [a, b] to t in [-1, 1]."""
-    c = (b - a) / 2
-    d = (b + a) / 2
-    t = (x - d) / c
-    return t.squeeze()
-
-
 def _map_ninfinf(t: jax.Array, a: jax.Array, b: jax.Array):
     """Map a point t in [-1, 1] to x in [-inf, inf]."""
     x = jnp.tan(t * jnp.pi / 2)
@@ -171,27 +154,21 @@ def _map_ninfb_inv(x: jax.Array, a: jax.Array, b: jax.Array):
 
 
 # A finite interval stays where it is; the three infinite cases have to be brought into
-# [-1, 1] because there is no other way to subdivide them. ``MAPFUNS_REF`` normalizes
-# the finite case too, for the one caller that needs a function on the reference
-# interval rather than one it can integrate directly: ``tanhsinh_transform`` substitutes
-# ``x = tanh(pi/2 sinh u)``, which produces points in [-1, 1] by construction.
+# [-1, 1] because there is no other way to subdivide them.
 MAPFUNS = [_map_identity, _map_ninfb, _map_ainf, _map_ninfinf]
 MAPFUNS_INV = [_map_identity_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
-MAPFUNS_REF = [_map_linear, _map_ninfb, _map_ainf, _map_ninfinf]
-MAPFUNS_REF_INV = [_map_linear_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
 
 # These are the branches of a `lax.switch`, so all four have to return the same dtypes,
 # and they only do so if `t`, `a` and `b` agree. Note in particular that they must not
 # be given a *weakly* typed `t`: the four differ in which of `a`/`b` they use, and a
-# weak `t` lets each branch settle on whichever of the two is present. `_map_linear`'s
-# `c * jnp.ones_like(t)` would follow a strong float32 `a`, while `_map_ninfb`'s
-# `2 / (t + 1) ** 2` would stay at the weak default, and the switch would not build.
+# weak `t` lets each branch settle on whichever of the two is present. `_map_ainf`'s
+# `a + (1 + t) / (1 - t)` would follow a strong float32 `a`, while `_map_ninfinf`'s
+# `jnp.tan(t * jnp.pi / 2)` would stay at the weak default, and the switch would not
+# build.
 # This is why the integrand is probed with `jnp.zeros((), xtype)`, not `jnp.array(0.0)`.
 
 
-def map_interval(
-    fun: Callable[..., jax.Array], interval: ArrayLike, *, reference: bool = False
-):
+def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
     """Map a function over an arbitrary interval [a, b] to one that can be subdivided.
 
     Transform a function such that integral(fun) on interval is the same as
@@ -204,11 +181,6 @@ def map_interval(
     interval : array-like
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals.
-    reference : bool
-        Whether a finite interval should be normalized to [-1, 1] rather than left
-        alone. Only for callers that need the integrand on the reference interval
-        specifically; leaving it alone is more accurate near the endpoints. Infinite
-        intervals are mapped to [-1, 1] either way.
 
     Returns
     -------
@@ -243,15 +215,14 @@ def map_interval(
     # 3 : both infinite
     bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
 
-    fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b, reference)
+    fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b)
     # map original breakpoints to new domain
-    inv = MAPFUNS_REF_INV if reference else MAPFUNS_INV
     # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
     # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
     # where type trick to avoid nan in reverse mode.
     finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
     interval_finite = jnp.where(jnp.isinf(interval), finite, interval)
-    interval_t: jax.Array = jax.lax.switch(bitmask, inv, interval_finite, a, b)
+    interval_t: jax.Array = jax.lax.switch(bitmask, MAPFUNS_INV, interval_finite, a, b)
     interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
     interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
     return fun_mapped, interval_t
@@ -265,12 +236,10 @@ class _MappedFunction(eqx.Module):
     sgn: jax.Array
     a: jax.Array
     b: jax.Array
-    reference: bool = eqx.field(static=True, default=False)
 
     @eqx.filter_jit
     def __call__(self, t: jax.Array, *args):
-        mapfuns = MAPFUNS_REF if self.reference else MAPFUNS
-        x, w = jax.lax.switch(self.bitmask, mapfuns, t, self.a, self.b)
+        x, w = jax.lax.switch(self.bitmask, MAPFUNS, t, self.a, self.b)
         return self.sgn * w * self.fun(x, *args)
 
 
@@ -344,11 +313,163 @@ def tanhsinh_tmax(dtype, order: int | None = None) -> float:
     return tmax
 
 
+def tanhsinh_complement(t: jax.Array) -> jax.Array:
+    """Distance from the nearer end of [-1, 1] to the tanh-sinh node at ``t``.
+
+    That is ``1 - |tanh(pi/2 sinh t)|``, formed as a reciprocal rather than as a
+    subtraction so that the distance keeps its own exponent instead of being rounded
+    against the one it is measured from. Distances below an eps are the whole point of a
+    doubly exponential rule, and subtracting loses every one of them.
+    """
+    z = jnp.pi / 2 * jnp.sinh(jnp.abs(t))
+    # 1 - tanh(z) = 1/(exp(z) cosh(z)). Splitting the denominator across two factors
+    # rather than writing it as (exp(2z) + 1)/2 keeps each of them in range until the
+    # product itself leaves it, and that happens by overflowing to +inf, so the distance
+    # flushes to zero rather than to a nan.
+    return 1 / (jnp.exp(z) * jnp.cosh(z))
+
+
+def _saturated(w: jax.Array, inside: jax.Array):
+    """Drop the weight of a node whose offset from the endpoint has rounded away.
+
+    The range runs out to where the *offset* stops being representable, which is far
+    past where the position does. Beyond that the abscissa sits on the endpoint however
+    much further the offset shrinks, so its weight is one computed for a place it is not
+    and cannot stand in for the mass out there. Dropping it says so: the estimate then
+    reads the outermost node that is where it claims to be, instead of a node that has
+    stopped moving while its weight went on decaying. The mass it gives up is bounded by
+    an eps of the endpoint whatever the integrand does, since that is how far in the
+    abscissa can still resolve.
+    """
+    return jnp.where(inside, w, 0)
+
+
+def _ts_finite(t: jax.Array, c: jax.Array, a: jax.Array, b: jax.Array):
+    """Tanh-sinh node in a finite [a, b], placed as an offset from the near endpoint."""
+    alpha = (b - a) / 2
+    x = jnp.where(t > 0, b - alpha * c, a + alpha * c)
+    w = alpha * jnp.pi / 2 * jnp.cosh(t) * c * (2 - c)
+    return x.squeeze(), _saturated(w, (x > a) & (x < b)).squeeze()
+
+
+def _ts_ainf(t: jax.Array, c: jax.Array, a: jax.Array, b: jax.Array):
+    """Tanh-sinh node in [a, inf], through ``x = a + (1 + r)/(1 - r)``."""
+    del b
+    # The composed Jacobian is ``1 - r**2`` from the substitution times ``2/(1 - r)**2``
+    # from the map, which together are twice the offset. Evaluating the two factors
+    # separately would overflow at nodes whose offset is still comfortably finite, since
+    # the offset is the ratio of the two rather than either one of them.
+    #
+    # Which of the two distances goes on top is selected rather than derived, because
+    # recovering one from the other costs exactly what carrying them was meant to save:
+    # ``2 - c`` rounds to 2 for every ``c`` below an eps, and subtracting it back off
+    # returns zero instead of the distance.
+    offset = jnp.where(t > 0, 2 - c, c) / jnp.where(t > 0, c, 2 - c)
+    x = a + offset
+    w = _saturated(jnp.pi * jnp.cosh(t) * offset, x > a)
+    return x.squeeze(), w.squeeze()
+
+
+def _ts_ninfb(t: jax.Array, c: jax.Array, a: jax.Array, b: jax.Array):
+    """Tanh-sinh node in [-inf, b], through ``x = b - (1 - r)/(1 + r)``."""
+    del a
+    offset = jnp.where(t > 0, c, 2 - c) / jnp.where(t > 0, 2 - c, c)
+    x = b - offset
+    w = _saturated(jnp.pi * jnp.cosh(t) * offset, x < b)
+    return x.squeeze(), w.squeeze()
+
+
+def _ts_ninfinf(t: jax.Array, c: jax.Array, a: jax.Array, b: jax.Array):
+    """Tanh-sinh node in [-inf, inf], through ``x = tan(pi r / 2)``."""
+    del a, b
+    # Both sines are taken of the small angle rather than of one near pi/2: that puts
+    # the node at t = 0 exactly on the origin, and lets the outermost ones reach the
+    # largest representable abscissa instead of stopping where a tangent near its pole
+    # loses its argument. The ``1 - r**2`` of the substitution is split across the two
+    # so that neither the squared sine nor the secant is ever formed alone; either one
+    # leaves the range while their combination is still well inside it.
+    half = jnp.pi / 2 * c
+    x = jnp.sign(t) * jnp.sin(jnp.pi / 2 * (1 - c)) / jnp.sin(half)
+    w = (
+        jnp.pi
+        / 2
+        * jnp.cosh(t)
+        * (c / jnp.sin(half))
+        * (jnp.pi / 2 * (2 - c) / jnp.sin(half))
+    )
+    return x.squeeze(), w.squeeze()
+
+
+# The four cases of ``MAPFUNS``, each composed with the tanh-sinh substitution and
+# rewritten in terms of the node's distance from the end of [-1, 1] it clusters against.
+# Composing them rather than applying one after the other is what keeps the outermost
+# nodes: the substitution reaches far closer to an endpoint than a node written down as
+# a position can record, and the two Jacobians have factors that cancel and would
+# otherwise leave the range on their own. Being branches of a ``switch``, these carry
+# the same dtype requirement as ``MAPFUNS``.
+TS_MAPFUNS = [_ts_finite, _ts_ninfb, _ts_ainf, _ts_ninfinf]
+
+
+def tanhsinh_tmax_complement(dtype) -> float:
+    """Largest ``t`` at which a tanh-sinh node and its weight are both representable.
+
+    The counterpart of :func:`tanhsinh_tmax` for nodes carried as a distance from the
+    endpoint rather than as a position. A distance is bounded below by the smallest
+    normal instead of by one eps, most of the exponent range further out, so what
+    actually sets the cutoff is the largest weight: on an unbounded interval the weight
+    grows like the reciprocal of the distance, and so overflows before the distance
+    underflows. The bound below is the weight one, with the representability of the
+    distance as a floor under it.
+
+    Both move only logarithmically in ``t``, the clustering being doubly exponential, so
+    a margin costs almost nothing and the iteration settles in a step or two.
+
+    Warns when the precision is coarse enough that the clustering only survives against
+    an endpoint of zero. Computed in float64 on the host; the result is a compile time
+    constant.
+    """
+    eps = float(jnp.finfo(dtype).eps)
+    if eps > 1e-4:
+        warnings.warn(
+            f"tanh-sinh quadrature in {jnp.dtype(dtype).name} places its nodes as "
+            "offsets from the endpoints, so the double exponential clustering that "
+            "makes the method good at endpoint singularities survives only where the "
+            f"endpoint is zero. Anywhere else the offset is lost below {eps:.1e} of "
+            "the endpoint's own magnitude (float64 reaches 2.2e-16), leaving the rule "
+            "no better than a plain trapezoidal one there. Results are still valid; "
+            "use float32 or better, or use quadgk/quadcc instead.",
+            UserWarning,
+            stacklevel=2,
+        )
+    tiny = float(jnp.finfo(dtype).tiny)
+    huge = float(jnp.finfo(dtype).max)
+    # Inverting c = 1/(exp(z) cosh(z)) with z = pi/2 sinh(t), ie exp(2z) = 2/c - 1.
+    reach = lambda c: float(np.arcsinh(np.log(2.0 / c - 1.0) / np.pi))
+    # The largest weight any of the maps gives a node at distance ``c`` is
+    # ``2 pi cosh(t) / c``, from the two semi-infinite ones. Solving for the ``c`` that
+    # keeps it finite needs the ``t`` it is reached at, hence the iteration; taking the
+    # running minimum is safe whether or not it has settled, since the iterates
+    # alternate around the fixed point rather than approaching it from one side. The
+    # margin leaves the outermost weight an order of magnitude short of overflowing,
+    # rather than exactly on it, for a cost in ``t`` of well under a percent.
+    limit = huge / 16
+    tmax = reach(tiny)
+    for _ in range(3):
+        tmax = min(tmax, reach(max(tiny, 2 * np.pi * np.cosh(tmax) / limit)))
+    return tmax
+
+
 def tanhsinh_transform(fun, interval):
     """Transform a function by mapping with tanh-sinh.
 
     Transform a function such that integral(fun) on interval is the same as
     integral(fun_t) on interval_t
+
+    The substitution is composed with the map onto ``interval`` rather than applied
+    after it, so that every node is built as an offset from the endpoint it clusters
+    against. Written down as a position instead, a node could get no closer to an
+    endpoint than one eps of that endpoint's own magnitude, and on an integrand singular
+    there that distance is the accuracy floor.
 
     Parameters
     ----------
@@ -369,41 +490,44 @@ def tanhsinh_transform(fun, interval):
         NotImplementedError,
         "tanh-sinh transformation with breakpoints not supported",
     )
-    xtype = jnp.asarray(interval).dtype
-    # map a, b -> [-1, 1]. The substitution below produces points in [-1, 1] whatever
-    # the original limits were, so this one caller needs the reference interval rather
-    # than the interval it was handed.
-    fun, interval = map_interval(fun, interval, reference=True)
-
-    func = _TanhSinhTransformedFunction(fun)
-
-    # we generally only need to integrate ~[-3, 3] or ~[-4, 4]
-    # we don't want to include the endpoint that maps to x==1 to avoid
-    # possible singularities, so we find the largest t s.t. x(t) < 1
-    # and use that as our interval. How large that is depends on the precision the
-    # abscissae are carried at, so it follows `interval`.
-    tmax = tanhsinh_tmax(xtype)
+    interval = jnp.asarray(interval)
+    errorif(
+        not jnp.issubdtype(interval.dtype, jnp.floating),
+        TypeError,
+        "integration limits must be real floating point, got dtype "
+        f"{interval.dtype}. Complex limits are not supported: the substitution has to "
+        "know which endpoint each node is approaching, which complex numbers do not "
+        "admit.",
+    )
+    xtype = interval.dtype
+    a, b = interval[0], interval[-1]
+    # An `xtype` scalar rather than the integer `(-1) ** (a > b)`, so that it cannot
+    # participate in promotion downstream.
+    sgn = jnp.where(a > b, -1, 1).astype(xtype)
+    a, b = jnp.minimum(a, b), jnp.maximum(a, b)
+    # bit mask to select mapping case, as in `map_interval`
+    bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
+    # The substitution lands in [-1, 1] whatever the original limits were, so how far
+    # out the range runs is a question about the arithmetic and not about `interval`.
+    tmax = tanhsinh_tmax_complement(xtype)
     interval_t = jnp.array([-tmax, tmax], dtype=xtype)
-    return func, interval_t
-
-
-# map [-1, 1] to [-inf, inf], but with mass concentrated near 0
-tanhsinh_x = lambda t: jnp.tanh(jnp.pi / 2 * jnp.sinh(t))
-tanhsinh_w = lambda t: (
-    jnp.pi / 2 * jnp.cosh(t) / jnp.cosh(jnp.pi / 2 * jnp.sinh(t)) ** 2
-)
+    return _TanhSinhTransformedFunction(fun, bitmask, sgn, a, b), interval_t
 
 
 class _TanhSinhTransformedFunction(eqx.Module):
-    """Function transformed by tanh-sinh transformation."""
+    """Function under the tanh-sinh substitution composed with the interval map."""
 
     fun: Callable[..., jax.Array]
+    bitmask: jax.Array
+    sgn: jax.Array
+    a: jax.Array
+    b: jax.Array
 
     @eqx.filter_jit
     def __call__(self, t, *args):
-        x = tanhsinh_x(t)
-        w = tanhsinh_w(t)
-        return self.fun(x, *args) * w
+        c = tanhsinh_complement(t)
+        x, w = jax.lax.switch(self.bitmask, TS_MAPFUNS, t, c, self.a, self.b)
+        return self.sgn * w * self.fun(x, *args)
 
 
 messages = {

@@ -15,7 +15,7 @@ jobs:
     outputs:
       jax-versions: ${{ steps.discover.outputs.versions }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
         with:
@@ -129,7 +129,7 @@ jobs:
             '$ARGS.named' > result.json
       - name: Upload test result
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jax-result-${{ matrix.jax-version }}
           path: result.json
@@ -151,7 +151,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Download test results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: jax-result-*
           path: results
@@ -185,7 +185,7 @@ jobs:
           } > summary.md
           cat summary.md
       - name: Add or update comment on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');

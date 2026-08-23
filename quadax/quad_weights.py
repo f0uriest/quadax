@@ -4,6 +4,8 @@ import functools
 
 import numpy as np
 
+from .utils import errorif
+
 kronrod_15_weights = np.array(
     [
         2.29353220105292249637320080589695919936e-2,
@@ -772,6 +774,34 @@ gk_weights = {
 }
 
 
+def _check_chebyshev_order(order: int, rule: str, multiple: int):
+    """Reject an order that would build a malformed rule, for both Chebyshev tables.
+
+    Both node sets are formed on the half interval and reflected, so that they come out
+    symmetric by construction rather than by the rounding of ``cos`` happening to agree
+    on both sides. An odd order leaves that reflection a node short, and the resulting
+    weights do not integrate a constant, so the rule returns a wrong integral rather
+    than merely a coarse one. Below order 4 there are too few points for the embedded
+    rule the error estimate is a difference against to exist at all.
+
+    ``multiple`` is what the caller's own orders step by, so that the orders offered as
+    a way out are ones it will accept rather than merely even.
+    """
+    errorif(
+        order < 4,
+        ValueError,
+        f"{rule} needs an order of at least 4 to have an embedded rule to estimate "
+        f"error against, got order={order}.",
+    )
+    errorif(
+        order % multiple != 0,
+        ValueError,
+        f"{rule} needs order to be a multiple of {multiple}, got order={order}. "
+        f"Use order={multiple * (order // multiple)} or "
+        f"order={multiple * (order // multiple + 1)}.",
+    )
+
+
 @functools.lru_cache
 def get_cc_table(order: int):
     """Clenshaw-Curtis nodes and weights, built in float64 on the host.
@@ -779,7 +809,10 @@ def get_cc_table(order: int):
     In numpy rather than with ``jnp`` ops so that the table does not inherit whatever
     the JAX default dtype happens to be. Building the DCT matrix in float32 and using it
     in float32 is strictly worse than building it in float64 and rounding it once.
+
+    ``order`` must be a multiple of 4; see ``_check_chebyshev_order``.
     """
+    _check_chebyshev_order(order, "The closed Clenshaw-Curtis rule", 4)
 
     def _cc_get_weights(N):
         d = 2 / (1 - np.arange(0, N + 1, 2, dtype=float) ** 2)
@@ -807,12 +840,54 @@ def get_cc_table(order: int):
 
 
 @functools.lru_cache
+def get_fejer2_table(order: int):
+    """Fejer-2 nodes and weights, built in float64 on the host.
+
+    The open counterpart of ``get_cc_table``: the same ``cos(k*pi/order)`` family with
+    the two endpoints dropped, so no node falls on the interval boundary. The 2:1
+    nesting is retained, the order ``order // 2`` rule sitting on the even numbered
+    nodes.
+
+    In numpy rather than with ``jnp`` ops for the same reason as ``get_cc_table``.
+
+    ``order`` must be even and at least 4; see ``_check_chebyshev_order``. Unlike the
+    closed table this one has no further requirement, its node index starting at 1 so
+    that the reflection recovers the coarse nodes the half interval table leaves out.
+    """
+    _check_chebyshev_order(order, "The open Clenshaw-Curtis (Fejer-2) rule", 2)
+
+    def _fejer2_get_weights(N):
+        # Only the k <= N/2 half is formed, and the caller reflects it, so that the
+        # node set comes out symmetric by construction rather than by the rounding of
+        # cos happening to agree on both sides.
+        k = np.arange(1, N // 2 + 1)
+        t = k * np.pi / N
+        j = np.arange(1, N // 2 + 1)
+        w = 4 / N * np.sin(t) * (np.sin(np.outer(t, 2 * j - 1)) / (2 * j - 1)).sum(1)
+        return np.cos(t), w
+
+    xh, wh = _fejer2_get_weights(order)
+    wl = np.zeros_like(wh)
+    # The coarse rule occupies the even numbered nodes, which sit at odd indices here
+    # because k starts at 1 rather than at 0 as it does for the closed rule.
+    wl[1::2] = _fejer2_get_weights(order // 2)[1]
+
+    return (
+        np.concatenate([xh, -xh[:-1][::-1]]),
+        np.concatenate([wh, wh[:-1][::-1]]),
+        np.concatenate([wl, wl[:-1][::-1]]),
+    )
+
+
+@functools.lru_cache
 def get_tanhsinh_table(order: int, tmax: float):
     """Tanh-sinh nodes and weights on ``[-tmax, tmax]``, built in float64 on the host.
 
     ``tmax`` is a parameter rather than being derived here because it depends on the
     precision the nodes will be *used* at; see ``quadax.utils.tanhsinh_tmax``.
     """
+    errorif(order % 2 != 1, ValueError, "tanh-sinh order must be odd")
+
     _xts = lambda t: np.tanh(np.pi / 2 * np.sinh(t))
     _wts = lambda t: np.pi / 2 * np.cosh(t) / np.cosh(np.pi / 2 * np.sinh(t)) ** 2
 

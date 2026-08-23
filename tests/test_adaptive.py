@@ -38,6 +38,7 @@ from .problems import (
     complex_dtypes,
     exp_neg,
     problem_id,
+    quadcc_open,
     real_dtypes,
     real_of,
     solve_once,
@@ -48,19 +49,70 @@ from .problems import (
 config.update("jax_enable_x64", True)
 
 
-# Extrapolation is what makes the hard problems solvable, so it is switched on for the
-# whole suite. The unaccelerated path is swept over the smooth problems only, where
-# the subdivision converges on its own and there is a right answer to hold it to; on
-# the rest it can only fail, which the acceleration tests below pin down directly.
-CASES = [(i, True) for i in ALL] + [(i, False) for i in SMOOTH]
+METHODS = [(quadgk, "gk"), (quadcc, "cc"), (quadcc_open, "cc-open"), (quadts, "ts")]
 
 
-# A list rather than a callable: pytest passes an id function each argument of the pair
-# separately, so it cannot name the two together.
-CASE_IDS = [
-    f"{problem_id(i)}-{'extrap' if extrapolate else 'plain'}"
-    for i, extrapolate in CASES
-]
+def accelerates(method):
+    """Whether the convergence acceleration is used with ``method`` at all.
+
+    Not with ``quadts``, which is also the one routine it is off by default in. The
+    epsilon algorithm accelerates the sequence of mesh sums, and every one of those
+    sums omits the mass the tanh-sinh map leaves outside the range it integrates over.
+    Whether the acceleration can do anything with that depends on the endpoint.
+
+    Where the singular endpoint is zero, bisecting towards it narrows the omitted
+    sliver as well, and the bias falls geometrically - a clean factor per level, since
+    the omitted mass is a fixed power of the sub-interval width. That is exactly the
+    kind of sequence the table sums, so the extrapolated value is far better than the
+    mesh sum and its estimate covers it. Where the endpoint has no floating point range
+    beneath it, an infinite interval's mapped end or a breakpoint away from the origin,
+    the outermost node rounds onto the endpoint however narrow the sub-interval gets,
+    the omitted mass stops falling, and the bias becomes a constant offset that the
+    table can neither remove nor see. Its estimate is preferred wherever it is the
+    smaller of the two, so what gets reported is then not a bound, by up to three
+    orders of magnitude on the slowly decaying tails.
+
+    The sweep cannot choose per problem, so the acceleration is off for the whole of
+    ``quadts``. What that costs is the endpoint-at-zero problems, tabulated in
+    ``KNOWN_FAILURES`` as ``# unaccelerated``; carrying the omitted mass through to the
+    extrapolated estimate would let it stay on and cost neither.
+    """
+    return method is not quadts
+
+
+def _sweep():
+    """The ``(routine, problem, extrapolate)`` cases, each with a readable id.
+
+    Extrapolation is what makes the hard problems solvable, so the routines that use it
+    take the sweep over every problem with it on, and their unaccelerated path is swept
+    over the smooth problems only, where the subdivision converges on its own and there
+    is a right answer to hold it to. On the rest it can only fail, which the
+    acceleration tests below pin down directly. A routine that never accelerates takes
+    the one sweep over every problem and has no second one to run.
+    """
+    for method, name in METHODS:
+        on = accelerates(method)
+        tag = "extrap" if on else "plain"
+        for i in ALL:
+            yield (method, i, on), f"{problem_id(i)}-{tag}-{name}"
+        if on:
+            for i in SMOOTH:
+                yield (method, i, False), f"{problem_id(i)}-plain-{name}"
+
+
+# Lists rather than callables: pytest passes an id function each argument of a tuple
+# separately, so it cannot name them together.
+CASES, CASE_IDS = (list(t) for t in zip(*_sweep()))
+
+
+def is_main_sweep(method, extrapolate):
+    """Whether this case is the routine's sweep over every problem.
+
+    The tables of expected failures describe that sweep, and only it is required to
+    converge. The smooth-only sweep with the acceleration off exists to show that the
+    un-accelerated path does not regress, so it is held to neither.
+    """
+    return extrapolate or not accelerates(method)
 
 
 # The tightest tolerance is where the subdivision runs deepest and most of the sweep's
@@ -72,9 +124,8 @@ TOL_PARAMS = [
 ]
 
 
-@pytest.mark.parametrize("method", [quadgk, quadcc, quadts], ids=["gk", "cc", "ts"])
 @pytest.mark.parametrize("tol", TOL_PARAMS)
-@pytest.mark.parametrize("i, extrapolate", CASES, ids=CASE_IDS)
+@pytest.mark.parametrize("method, i, extrapolate", CASES, ids=CASE_IDS)
 class TestAdaptive:
     """Every example problem, through every adaptive routine, at every tolerance.
 
@@ -98,7 +149,7 @@ class TestAdaptive:
         solve, since reporting failure is not an excuse for misreporting by how much.
         """
         prob = PROBLEMS[i]
-        if extrapolate:
+        if is_main_sweep(method, extrapolate):
             xfail_if_dishonest(request, method, prob, tol)
         y, info = solve_once(method, i, tol, extrapolate=extrapolate)
         assert_honest(y, info, prob, tol)
@@ -106,14 +157,14 @@ class TestAdaptive:
     def test_converges(self, request, method, tol, i, extrapolate):
         """The routine reaches the tolerance it was asked for and reports success."""
         prob = PROBLEMS[i]
-        if extrapolate:
+        main = is_main_sweep(method, extrapolate)
+        if main:
             xfail_if_known(request, method, prob, tol)
         y, info = solve_once(method, i, tol, extrapolate=extrapolate)
         # The tightest tolerance sits below the roundoff floor of the near-divergent
         # problems, where declining to converge is the right answer rather than a
-        # failure, and the un-accelerated path is only swept to show it does not
-        # regress.
-        if not (extrapolate and tol in CONVERGENT_TOLS) and int(info.status) != 0:
+        # failure, and the smooth-only sweep is there to show it does not regress.
+        if not (main and tol in CONVERGENT_TOLS) and int(info.status) != 0:
             pytest.skip("convergence is not required of this case")
         assert_converged(y, info, prob, tol)
 
@@ -158,7 +209,7 @@ class TestRuleOrders:
                 epsabs=self.TOL,
                 epsrel=self.TOL,
                 order=order,
-                extrapolate=True,
+                extrapolate=accelerates(method),
             )
             assert int(info.status) == 0, (
                 f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
