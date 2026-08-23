@@ -891,8 +891,8 @@ def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
 # allowed the same number of sub-intervals as the default `max_ninter` the quadax runs
 # use. Where the note names tolerances, scipy fails at those and delivers at the others.
 #
-# 39 of the 54 convergence entries carry the note at one tolerance or more, and 25 of
-# the 49 dishonesty entries. That is the useful part of the annotation. An unmarked
+# 35 of the 40 convergence entries carry the note at one tolerance or more, and 8 of
+# the 21 dishonesty entries. That is the useful part of the annotation. An unmarked
 # entry is one where a widely used routine does solve the problem, so the shortfall is
 # quadax's; a marked one says the integrand is hard for the method rather than badly
 # implemented here, and `scipy.integrate.tanhsinh` failing on much the same set as
@@ -929,26 +929,15 @@ KNOWN_FAILURES = {
     ("quadts", "sin-inverse"): {1e-4, 1e-8},  # scipy too
     ("rombergts", "beta-both-ends"): {1e-8},  # scipy too
     ("rombergts", "decay-1.01"): {1e-4},  # scipy too
-    ("rombergts", "decay-1.1"): {1e-4},
-    ("rombergts", "decay-1.5"): {1e-8, 1e-12},
-    ("rombergts", "decay-1.5-from-0"): {1e-8, 1e-12},
-    ("rombergts", "decay-1.5-mirrored"): {1e-8, 1e-12},
-    ("rombergts", "decay-line"): {1e-8},  # scipy too
-    ("rombergts", "exp-over-sqrt"): {1e-8, 1e-12},  # scipy too
     ("rombergts", "jump"): {1e-8, 1e-12},  # scipy too
-    ("rombergts", "log-over-sqrt"): {1e-8},
-    ("rombergts", "log-squared"): {1e-12},
     ("rombergts", "loglog"): {1e-4, 1e-8},  # scipy too
-    ("rombergts", "loglog-cube"): {1e-4, 1e-8},  # scipy too at 1e-8
+    ("rombergts", "loglog-cube"): {1e-8},  # scipy too
     ("rombergts", "loglog-right"): {1e-4},  # scipy too
     ("rombergts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
-    ("rombergts", "pow-0.5"): {1e-8, 1e-12},
-    ("rombergts", "pow-0.9"): {1e-4},
     ("rombergts", "pow-0.9-right"): {1e-4},  # scipy too
     ("rombergts", "pow-0.99"): {1e-4},  # scipy too
     ("rombergts", "sqrt-over-semicircle"): {1e-12},  # scipy too
     ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too
-    ("rombergts", "vector-mixed"): {1e-8, 1e-12},
     ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
 }
@@ -988,7 +977,6 @@ KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadts", "sqrt-over-semicircle"): {1e-4, 1e-8},
     ("quadts", "sqrt-tan"): {1e-4, 1e-8},
     ("quadts", "vector-mixed"): {1e-4, 1e-8},
-    ("rombergts", "jump"): {1e-4},  # scipy too
 }
 
 

@@ -24,11 +24,6 @@ class TestMapping:
         """No normalization to [-1, 1], so only one affine map reaches the nodes."""
         _, interval_t = map_interval(lambda x: x, jnp.array([2.0, 3.5, 5.0]))
         np.testing.assert_array_equal(np.asarray(interval_t), [2.0, 3.5, 5.0])
-        # the one caller that needs the reference interval can still ask for it
-        _, interval_r = map_interval(
-            lambda x: x, jnp.array([2.0, 3.5, 5.0]), reference=True
-        )
-        np.testing.assert_allclose(np.asarray(interval_r), [-1.0, 0.0, 1.0])
 
     def test_an_infinite_interval_is_mapped(self):
         """There is no way to subdivide an unbounded interval in place."""

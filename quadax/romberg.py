@@ -285,18 +285,54 @@ def _build_tanhsinh(interval, args, consts, *, f_conv, safe=False):
     return wrap_func(fun_m, (), interval_m.dtype, safe=safe), interval_m
 
 
-def _outermost(i, f, npts):
-    """Magnitude of the first and last of the points a sweep places, as a stacked pair.
+def _outermost(x, f, opos, oval):
+    """Fold a batch of nodes into the outermost one either side that returned a value.
 
-    The two sit nearest the ends of the range, which is what the truncation estimate
-    reads. Picked out of whichever batch happens to hold them rather than evaluated
-    again; the lanes that hold neither contribute zero to the sum over batches.
+    Which node that is cannot be read off the sweep's shape, so it is carried as a
+    position alongside its magnitude. The tanh-sinh map clusters its nodes far closer to
+    an endpoint than an abscissa near that endpoint can record, so a whole stretch of
+    the outermost ones can round onto the endpoint itself, where an integrand singular
+    there returns a non-finite value that the wrapper masks away. The truncation
+    estimate wants the last node that did resolve, wherever inside the sweep it fell.
+
+    A node whose value is genuinely zero counts as not having resolved. That can only
+    move the estimate inward onto a larger term, so it costs conservatism rather than
+    correctness.
     """
-    keep = lambda which: jnp.sum(
-        jnp.where((i == which).reshape((-1,) + (1,) * (f.ndim - 1)), jnp.abs(f), 0),
+    live = jnp.any(jnp.abs(f) > 0, axis=tuple(range(1, f.ndim)))
+    far = jnp.asarray(jnp.inf, x.dtype)
+    ends = jnp.stack(
+        [jnp.min(jnp.where(live, x, far)), jnp.max(jnp.where(live, x, -far))]
+    )
+    # Padded lanes can repeat an abscissa this sweep genuinely evaluates, but they are
+    # masked to zero before they get here, so counting them again adds nothing.
+    at = lambda which: jnp.sum(
+        jnp.where((x == which).reshape((-1,) + (1,) * (f.ndim - 1)), jnp.abs(f), 0),
         axis=0,
     )
-    return jnp.stack([keep(1), keep(npts)])
+    return _keep_outermost((ends, jnp.stack([at(ends[0]), at(ends[1])])), (opos, oval))
+
+
+def _keep_outermost(new, held):
+    """Whichever of two outermost-node records reaches further out, end by end.
+
+    Reaching further out is a question about position and not about which record is
+    newer: a level places only the points interleaving those already there, so the
+    outermost of them that resolves can fall well inside the one already held.
+    """
+    (npos, nval), (opos, oval) = new, held
+    take = jnp.stack([npos[0] < opos[0], npos[1] > opos[1]])
+    return (
+        jnp.where(take, npos, opos),
+        jnp.where(take.reshape((2,) + (1,) * (oval.ndim - 1)), nval, oval),
+    )
+
+
+def _outermost_init(xtype, shape, dtype):
+    """Record for a sweep that has not resolved a node at either end yet."""
+    far = jnp.asarray(jnp.inf, xtype)
+    rzero = jnp.zeros(shape, _real_dtype(dtype))
+    return jnp.stack([far, -far]), jnp.stack([rzero, rzero])
 
 
 def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
@@ -318,8 +354,8 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
 
     ``vfunc`` takes a whole batch of abscissae; the callers wrap it to guarantee that.
 
-    Returns the sum, the sum of ``abs`` of the same values, the magnitude of the
-    outermost new node either side, and the number of batches.
+    Returns the sum, the sum of ``abs`` of the same values, the position and magnitude
+    of the outermost new node either side that resolved, and the number of batches.
     The middle two are what the error estimate's roundoff floor and its truncation term
     are built from; neither needs extra evaluations, so both are always accumulated and
     left to be eliminated as dead code on the paths that do not read them.
@@ -328,7 +364,7 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
     offs = jnp.arange(1, batch_size + 1)
 
     def bodyfun(j, carry):
-        s, sabs, ends = carry
+        s, sabs, opos, oval = carry
         i = j * batch_size + offs
         used = i <= npts
         x = a + h * (1 + step * (i - 1))
@@ -339,13 +375,16 @@ def _level_sum(vfunc, a, h, npts, batch_size, shape, dtype, *, step=2):
         return (
             s + jnp.sum(f, axis=0),
             sabs + jnp.sum(jnp.abs(f), axis=0),
-            ends + _outermost(i, f, npts),
+            *_outermost(x, f, opos, oval),
         )
 
-    rzero = jnp.zeros(shape, _real_dtype(dtype))
-    init = (jnp.zeros(shape, dtype), rzero, jnp.stack([rzero, rzero]))
-    s, sabs, ends = jax.lax.fori_loop(0, nbatch, bodyfun, init)
-    return s, sabs, ends, nbatch
+    init = (
+        jnp.zeros(shape, dtype),
+        jnp.zeros(shape, _real_dtype(dtype)),
+        *_outermost_init(jnp.asarray(a).dtype, shape, dtype),
+    )
+    s, sabs, *ends = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    return s, sabs, tuple(ends), nbatch
 
 
 def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
@@ -365,7 +404,9 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
 
     Returns the rule indexed by row, the same rule applied to ``abs`` of the integrand
     on the finest of these grids, the magnitude of the integrand at the two endpoints
-    and at the outermost interior node either side, and the number of evaluations spent.
+    and at the outermost interior node either side that resolved, and the number of
+    evaluations spent.
+
     Only the finest row of the second is needed, since the refinement loop carries it
     forward by the same halving recursion. The last two are handed back rather than
     evaluated again because the truncation estimate reads exactly those nodes; see
@@ -379,7 +420,7 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
             jnp.stack([(b - a) * (fa + fb) / 2]),
             (b - a) * fab,
             edges,
-            jnp.zeros_like(edges),
+            _outermost_init(jnp.asarray(a).dtype, shape, dtype),
             2,
         )
 
@@ -389,7 +430,7 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
     offs = jnp.arange(1, batch_size + 1)
 
     def bodyfun(k, carry):
-        s, sabs, ends = carry
+        s, sabs, opos, oval = carry
         i = k * batch_size + offs
         used = i <= npts
         x = a + h * i
@@ -411,12 +452,16 @@ def _initial_rows(vfunc, a, b, divmin, batch_size, shape, dtype):
         return (
             s + jnp.stack(added),
             sabs + jnp.sum(jnp.abs(fx), axis=0),
-            ends + _outermost(i, fx, npts),
+            *_outermost(x, fx, opos, oval),
         )
 
-    rzero = jnp.zeros(shape, _real_dtype(dtype))
-    init = (jnp.zeros((divmin, *shape), dtype), rzero, jnp.stack([rzero, rzero]))
-    added, sabs, outer = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    init = (
+        jnp.zeros((divmin, *shape), dtype),
+        jnp.zeros(shape, _real_dtype(dtype)),
+        *_outermost_init(jnp.asarray(a).dtype, shape, dtype),
+    )
+    added, sabs, *outer = jax.lax.fori_loop(0, nbatch, bodyfun, init)
+    outer = tuple(outer)
 
     col0 = [(b - a) * (fa + fb) / 2]
     for j in range(1, divmin + 1):
@@ -610,17 +655,7 @@ def _romberg_solve(
         """
         if truncation is None:
             return jnp.array(0.0, rtype)
-        return truncation(edges, outer, rtype, _norm)
-
-    def keep_outer(outer, ends):
-        """Take the newer pair of outermost nodes, for whichever end got a value.
-
-        Each level places its outermost nodes closer to the ends than the last did, so a
-        value from this level supersedes the one carried. A zero does not: it is a node
-        that has rounded onto the endpoint and been masked away, and the last node that
-        resolved remains the best that end has to say.
-        """
-        return jnp.where(ends > 0, ends, outer)
+        return truncation(edges, outer[1], rtype, _norm)
 
     def total_err(d, dprev, dprev2, resabs, outer):
         """The error in the current estimate.
@@ -701,7 +736,7 @@ def _romberg_solve(
         )
         result = result.at[n, 0].set(0.5 * result[n - 1, 0] + h * s)
         resabs = 0.5 * resabs + h * sabs
-        outer = keep_outer(outer, ends)
+        outer = _keep_outermost(ends, outer)
         # The padded lanes of the last batch are evaluations of the integrand like any
         # other, so they are counted here even though they do not reach the sum.
         neval += nbatch * batch_size

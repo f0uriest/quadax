@@ -177,7 +177,12 @@ class TestRichardsonFlag:
         # How far each column got: the length of its leading run of nonzeros. Counted
         # as a run rather than located as the first zero, because a column filled to
         # the end has no zero in it and a search would have to report its absence.
-        depth = min(*(int((c != 0).cumprod().sum()) for c in columns), self.DIVMAX)
+        # Row 0 is exempt: it is the trapezoidal rule on the two ends of the range
+        # alone, and under the tanh-sinh map both of those carry no weight, so a filled
+        # row 0 is legitimately zero and would end the run before it started.
+        depth = min(
+            *(1 + int((c[1:] != 0).cumprod().sum()) for c in columns), self.DIVMAX
+        )
         assert depth > 1, "neither setting filled the trapezoidal column"
         np.testing.assert_allclose(
             columns[0][:depth], columns[1][:depth], rtol=ULP_RTOL, atol=ULP_ATOL
