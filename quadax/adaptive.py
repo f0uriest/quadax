@@ -588,9 +588,17 @@ def adaptive_quadrature(
 
     f_conv, consts = closure_convert(fun, args, dtypes.xtype)
 
+    # The options an adjoint may run its own solve with.
+    opts = {
+        "rule": rule,
+        "epsabs": epsabs,
+        "epsrel": epsrel,
+        "max_ninter": max_ninter,
+        "extrapolate": extrapolate,
+    }
     ops = QuadratureOps(
         build=partial(build_integrand, f_conv=f_conv),
-        solve=partial(_adaptive_solve, max_ninter=max_ninter, extrapolate=extrapolate),
+        solve=_adaptive_solve,
         rebuild=_rebuild_mesh,
         on_mesh=_quad_on_mesh,
         # An accelerated solve may return an extrapolated value rather than the sum over
@@ -600,9 +608,7 @@ def adaptive_quadrature(
         frozen_solve=_replay_solve if extrapolate else _mesh_solve,
         mesh_is_primal=not extrapolate,
     )
-    y, state = adjoint.quadrature(
-        ops, rule, interval, args, consts, epsabs, epsrel, kwargs
-    )
+    y, state = adjoint.quadrature(ops, interval, args, consts, kwargs, opts)
 
     err = state["err_sum"]
     neval = state["neval"]
@@ -1162,7 +1168,16 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
 
 
 def _adaptive_solve(
-    rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter, extrapolate=False
+    vfunc,
+    interval,
+    kwargs,
+    *,
+    rule,
+    epsabs,
+    epsrel,
+    max_ninter,
+    extrapolate=False,
+    norm=None,
 ):
     """Run the globally adaptive subdivision loop.
 
@@ -1178,7 +1193,13 @@ def _adaptive_solve(
     a term each time it does. See ``_acceleration`` for the table itself,
     ``_accelerate_full`` for the control flow that decides all this, and
     ``_accept_extrapolation`` for the choice between the two answers at the end.
+
+    ``norm`` replaces the one the rule was built with, for a caller that measures a
+    vector other than the integrand's output. ``None``, the primal's case, keeps the
+    rule's own.
     """
+    if norm is not None:
+        rule = rule._with_norm(norm)
     intfun = partial(rule.integrate, **kwargs) if kwargs else rule.integrate
     _norm = rule.norm
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)

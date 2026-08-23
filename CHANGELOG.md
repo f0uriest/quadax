@@ -28,6 +28,13 @@ v0.3.0
   - ``LeibnizAdjoint`` gives the derivative its own adaptive solve, so it gets its own
     error control rather than inheriting the subdivision chosen for the integral. Often
     several times faster for a gradient of a scalar-valued integral.
+  - That solve can be configured separately from the integral's, via
+    ``LeibnizAdjoint(options={...}, options_fwd={...}, options_rev={...})``.
+    ``options_fwd`` and ``options_rev`` configure one direction alone, taking precedence
+    over ``options``. This matters most for ``norm``, because the two directions measure
+    different vectors: forward mode integrates the tangent of the integrand, of the
+    integrand's own shape, while reverse mode integrates the cotangent of the arguments
+    being differentiated, whose layout is documented on ``LeibnizAdjoint``.
 - Added control over how many integrand evaluations are made in parallel.
   - ``quadgk``, ``quadcc`` and ``quadts`` take a new ``batch_size``, as do the rule
     classes ``GaussKronrodRule``, ``ClenshawCurtisRule`` and ``TanhSinhRule``. It bounds

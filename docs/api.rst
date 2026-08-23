@@ -89,16 +89,56 @@ is relative to the quadrature around it, how hard its derivative is to integrate
 compared to the integrand, and how many parameters are involved. Time both on your own
 problem before caring much about the difference.
 
-Both take two options controlling the memory a derivative needs. ``checkpoint`` (off by
-default) recomputes each block of sub-intervals during the backward pass instead of
-storing it, and is where nearly all of the saving is for :class:`~quadax.DirectAdjoint`,
-whose backward pass replays the frozen subdivision. :class:`~quadax.LeibnizAdjoint`
-solves for the adjoint instead of replaying anything, so there both options touch only
-the fixed-mesh pass that supplies the derivative with respect to the interval, and
-``checkpoint`` does nothing at all unless the limits are being differentiated.
-``chunk_size`` sets how many sub-intervals of the frozen subdivision are evaluated at
-once, and multiplies with the ``batch_size`` of the routine itself: a gradient evaluates
-the integrand at up to ``chunk_size * batch_size`` points at a time.
+:class:`~quadax.DirectAdjoint` takes two options controlling the memory a derivative
+needs. ``checkpoint`` (off by default) recomputes each block of sub-intervals during the
+backward pass instead of storing it, rather than replaying the frozen subdivision.
+``chunk_size`` sets how many sub-intervals of that subdivision are evaluated at once,
+and multiplies with the ``batch_size`` of the routine itself: a gradient evaluates the
+integrand at up to ``chunk_size * batch_size`` points at a time.
+:class:`~quadax.LeibnizAdjoint` takes neither. It replays no subdivision, its backward
+pass being an error controlled solve, and the derivative with respect to the limits is
+a boundary term rather than a mesh evaluation.
+
+Options for the derivative solve
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`~quadax.LeibnizAdjoint` runs a solve of its own, and it does not have to be the
+solve the integral got. Give it ``options`` to override what the routine was called
+with::
+
+    quadgk(fun, interval, args, epsabs=1e-6,
+           adjoint=LeibnizAdjoint(options={"epsabs": 1e-10, "max_ninter": 200}))
+
+The integral is then computed to 1e-6 and its derivative to 1e-10, each stopping when it
+has converged rather than sharing a budget. :class:`~quadax.DirectAdjoint` takes no
+options of this kind, having no solve of its own to configure.
+
+Which vector the norm measures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The two directions of the derivative do not integrate the same vector, which is what
+``options_fwd`` and ``options_rev`` are for. They take the same names as ``options`` and
+take precedence over it, for one direction alone.
+
+Forward mode integrates the tangent of the integrand, a vector of the integrand's own
+shape. Reverse mode integrates the cotangent of the arguments being differentiated,
+raveled into a single flat vector. Its length is the total number of differentiated
+parameter components, which has nothing to do with the integrand's shape, and its
+entries are parameters rather than components of the integral. They appear in the order
+the quadrature's own arguments do: the limits, ``args``, and whatever the integrand
+closes over. Each contributes ``size`` entries if it is being differentiated and none
+at all if it is not. Differentiating a two point ``interval`` and a length three
+``args[0]`` gives a vector of five with the limits first; differentiating ``args[0]``
+alone gives a vector of three::
+
+    weights = jnp.array([1.0, 10.0, 100.0])          # one per parameter
+    norm = lambda x: jnp.linalg.norm(x * weights, ord=2)
+    jax.grad(lambda c: quadgk(fun, interval, (c,),
+                              adjoint=LeibnizAdjoint(options_rev={"norm": norm}))[0])(c)
+
+Putting that norm in ``options_rev`` rather than ``options`` is what stops it from being
+handed a tangent instead, which the two vectors being the same length by coincidence
+would otherwise hide.
 
 
 Integrating function from sampled values

@@ -16,6 +16,7 @@ from quadax import (
     DirectAdjoint,
     GaussKronrodRule,
     LeibnizAdjoint,
+    TanhSinhRule,
     quadcc,
     quadgk,
     quadts,
@@ -686,6 +687,188 @@ class TestUnifiedLeibnizAdjoint:
         )
 
 
+class TestAdjointOptions:
+    """LeibnizAdjoint's solve can be configured separately from the primal's."""
+
+    # Vector valued, so that the integrand's own shape and the number of parameters are
+    # different numbers and a norm can tell which of the two it is being handed.
+    fun = staticmethod(
+        lambda t, c: jnp.array([jnp.sum(jnp.sin(c * t)), jnp.sum(jnp.cos(c * t))])
+    )
+    interval = jnp.array([0.0, 1.0])
+    args = jnp.linspace(0.5, 2.0, 3)
+
+    # An integrand far easier to integrate than to differentiate: the peak the tangent
+    # sees has width sqrt(s), while the integral itself is smooth. The derivative solve
+    # is then what the options are visibly doing something to.
+    peaked = staticmethod(lambda t, s: jnp.exp(-((t - 0.5) ** 2) / s[0]))
+    peak_args = jnp.array([1e-3])
+
+    def _spy(self, seen):
+        """A norm that records the shape of every vector it measures."""
+
+        def norm(x):
+            seen.append(jnp.shape(x))
+            return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
+
+        return norm
+
+    def _dpeak(self, **options):
+        f = lambda s: quadgk(  # noqa: E731
+            self.peaked,
+            self.interval,
+            (s,),
+            epsabs=1e-6,
+            epsrel=1e-6,
+            adjoint=LeibnizAdjoint(options=options),
+        )[0]
+        return float(jax.grad(f)(self.peak_args)[0])
+
+    def test_options_leave_the_integral_alone(self):
+        """Only the derivative solve is reconfigured, never the primal."""
+        y0, info0 = quadgk(
+            self.peaked, self.interval, (self.peak_args,), epsabs=1e-6, epsrel=1e-6
+        )
+        y1, info1 = quadgk(
+            self.peaked,
+            self.interval,
+            (self.peak_args,),
+            epsabs=1e-6,
+            epsrel=1e-6,
+            adjoint=LeibnizAdjoint(options={"epsabs": 1e-1, "max_ninter": 2}),
+        )
+        assert float(y0) == float(y1)
+        assert float(info0.err) == float(info1.err)
+        assert int(info0.neval) == int(info1.neval)
+
+    def test_budget_reaches_the_derivative(self):
+        """A derivative solved on a starved budget is measurably worse."""
+        exact = lambda s: float(  # noqa: E731
+            quadgk(self.peaked, self.interval, (s,), epsabs=1e-13, epsrel=1e-13)[0]
+        )
+        h = 1e-9
+        ref = (exact(self.peak_args + h) - exact(self.peak_args - h)) / (2 * h)
+        assert abs(self._dpeak(max_ninter=2) - ref) > 100 * abs(self._dpeak() - ref)
+
+    @pytest.mark.parametrize("quad", [quadgk, romberg])
+    def test_unknown_option_raises(self, quad):
+        """A misspelled option is caught by the solve rather than silently ignored."""
+        f = lambda c: quad(  # noqa: E731
+            self.fun, self.interval, (c,), adjoint=LeibnizAdjoint(options={"nope": 1})
+        )[0].sum()
+        with pytest.raises(TypeError, match="nope"):
+            jax.grad(f)(self.args)
+
+    def test_traced_tolerance_does_not_retrace(self):
+        """An override may be a traced array, and then costs no recompilation."""
+        traces = []
+        f = lambda s, tol: (  # noqa: E731
+            traces.append(None),
+            quadgk(
+                self.peaked,
+                self.interval,
+                (s,),
+                adjoint=LeibnizAdjoint(options={"epsabs": tol}),
+            )[0],
+        )[1]
+        g = jax.jit(jax.grad(f))
+        values = [float(g(self.peak_args, jnp.asarray(t))[0]) for t in (1e-8, 1e-10)]
+        assert len(traces) == 1
+        np.testing.assert_allclose(values[0], values[1], rtol=1e-6)
+
+    def test_norm_is_scoped_to_one_direction(self):
+        """Each direction measures its own vector, and only the norm it was given.
+
+        The two vectors have different lengths here, the integrand having two components
+        and there being three parameters, so which norm saw which is not in doubt.
+        """
+        primal, fwd, rev = [], [], []
+        f = lambda c: quadgk(  # noqa: E731
+            self.fun,
+            self.interval,
+            (c,),
+            norm=self._spy(primal),
+            adjoint=LeibnizAdjoint(
+                options_fwd={"norm": self._spy(fwd)},
+                options_rev={"norm": self._spy(rev)},
+            ),
+        )[0].sum()
+        jax.grad(f)(self.args)
+        # Reverse mode integrates the cotangent of the three parameters, and forward
+        # mode did not run at all.
+        assert set(rev) == {(3,)} and fwd == []
+        for seen in (primal, fwd, rev):
+            seen.clear()
+        jax.jvp(f, (self.args,), (jnp.ones_like(self.args),))
+        # Forward mode integrates the tangent of the integrand, a vector of the
+        # integrand's own shape, which a norm meant for the cotangent must not be
+        # handed, all the more so because the two can be the same length elsewhere.
+        assert set(fwd) == {(2,)} and rev == []
+        assert set(primal) == {(2,)}
+
+    def test_weighted_norm_against_the_documented_layout(self):
+        """The workflow the reverse layout is for: weight a parameter, and solve.
+
+        The cotangent vector holds the differentiated arguments in order, so with only
+        ``args[0]`` differentiated it is the three parameters and nothing else, and a
+        weight per parameter can be written down directly.
+        """
+        f = lambda c, adj: quadgk(  # noqa: E731
+            self.fun, self.interval, (c,), adjoint=adj
+        )[0].sum()
+        weights = jnp.array([1.0, 10.0, 100.0])
+        norm = lambda x: jnp.linalg.norm(x * weights, ord=jnp.inf)  # noqa: E731
+        np.testing.assert_allclose(
+            np.asarray(
+                jax.grad(f)(self.args, LeibnizAdjoint(options_rev={"norm": norm}))
+            ),
+            np.asarray(jax.grad(f)(self.args, LeibnizAdjoint())),
+            rtol=1e-8,
+        )
+
+    @pytest.mark.parametrize("rule", [GaussKronrodRule(61), TanhSinhRule(61)])
+    def test_derivative_takes_its_own_rule(self, rule):
+        """The derivative may be taken with a different local rule than the integral."""
+        f = lambda c, adj: quadgk(  # noqa: E731
+            self.fun, self.interval, (c,), adjoint=adj
+        )[0].sum()
+        np.testing.assert_allclose(
+            np.asarray(
+                jax.grad(f)(self.args, LeibnizAdjoint(options_rev={"rule": rule}))
+            ),
+            np.asarray(jax.grad(f)(self.args, LeibnizAdjoint())),
+            rtol=1e-8,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize("quad", romberg_methods)
+    def test_romberg_options(self, quad):
+        """Romberg takes its own level schedule and norm."""
+        seen = []
+        adjoint = LeibnizAdjoint(
+            options={"divmax": 15, "divmin": 6, "batch_size": 32, "epsabs": 1e-11},
+            options_rev={"norm": self._spy(seen)},
+        )
+        f = lambda c: quad(self.fun, self.interval, (c,), adjoint=adjoint)[0].sum()
+        ref = jax.grad(lambda c: quad(self.fun, self.interval, (c,))[0].sum())(
+            self.args
+        )
+        np.testing.assert_allclose(np.asarray(jax.grad(f)(self.args)), ref, rtol=1e-8)
+        assert set(seen) == {(3,)}
+
+    def test_starved_schedule_is_rejected(self):
+        """A schedule the adjoint's options make inconsistent is caught too."""
+        with pytest.raises(ValueError, match="divmin"):
+            jax.grad(
+                lambda c: romberg(
+                    self.fun,
+                    self.interval,
+                    (c,),
+                    adjoint=LeibnizAdjoint(options={"divmax": 3, "divmin": 9}),
+                )[0].sum()
+            )(self.args)
+
+
 @pytest.mark.parametrize("quad", all_methods)
 @pytest.mark.parametrize("adjoint", [DirectAdjoint(), LeibnizAdjoint()])
 def test_integer_limits(quad, adjoint):
@@ -1016,12 +1199,12 @@ class TestExtrapolatedAdjoints:
         )
         rule = GaussKronrodRule(21)
         y, state = _adaptive_solve(
-            rule,
             vfunc,
             interval_t,
-            jnp.asarray(1e-12),
-            jnp.asarray(1e-12),
             {},
+            rule=rule,
+            epsabs=jnp.asarray(1e-12),
+            epsrel=jnp.asarray(1e-12),
             max_ninter=100,
             extrapolate=True,
         )

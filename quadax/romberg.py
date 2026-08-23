@@ -182,18 +182,7 @@ def romberg(
         ValueError,
         f"divmax must be a non-negative integer, got {divmax}",
     )
-    errorif(
-        divmin > divmax,
-        ValueError,
-        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
-    )
-    # The starting sweep places `2**divmin - 1` interior points and no later level
-    # places more than `2**(divmax - 1)`, so a larger batch would only ever be padding.
-    batch_size = min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
-    if callable(norm):
-        _norm: Callable[[jax.Array], jax.Array] = norm
-    else:
-        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+    batch_size = _validate_levels(divmin, divmax, batch_size)
 
     return _romberg(
         fun,
@@ -203,7 +192,7 @@ def romberg(
         epsabs,
         epsrel,
         divmax,
-        _norm,
+        norm,
         adjoint,
         build_integrand,
         dtypes.xtype,
@@ -221,7 +210,7 @@ def _romberg(
     epsabs,
     epsrel,
     divmax,
-    _norm,
+    norm,
     adjoint,
     build,
     xtype,
@@ -240,19 +229,21 @@ def _romberg(
     # once a transformed integrand crosses a filter_jit boundary its leaves become
     # tracers that closure_convert cannot hoist.
     f_conv, consts = closure_convert(fun, args, xtype)
+    # The options an adjoint may run its own solve with.
+    opts = {
+        "epsabs": epsabs,
+        "epsrel": epsrel,
+        "divmax": divmax,
+        "divmin": divmin,
+        "norm": norm,
+        "extrapolate": extrapolate,
+        "batch_size": batch_size,
+    }
     # Romberg has no subdivision to reuse, so `rebuild`/`on_mesh` are left unset and
     # DirectAdjoint falls back to differentiating through the loop.
     ops = QuadratureOps(
         build=partial(build, f_conv=f_conv),
-        solve=partial(
-            _romberg_solve,
-            divmax=divmax,
-            _norm=_norm,
-            extrapolate=extrapolate,
-            batch_size=batch_size,
-            divmin=divmin,
-            truncation=truncation,
-        ),
+        solve=partial(_romberg_solve, truncation=truncation),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
         # the integrand, which is what DirectAdjoint needs to differentiate in either
@@ -268,7 +259,7 @@ def _romberg(
             divmin=divmin,
         ),
     )
-    y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
+    y, state = adjoint.quadrature(ops, interval, args, consts, {}, opts)
     info = state["table"] if full_output else None
     out = QuadratureInfo(state["err_sum"], state["neval"], state["status"], info)
     return y, out
@@ -600,16 +591,36 @@ def _tanhsinh_truncation(edges, outer, rtype, _norm):
     return _norm(term[0] + term[1])
 
 
+def _as_norm(norm: int | float | Callable) -> Callable[[jax.Array], jax.Array]:
+    """Resolve a ``norm`` argument, an order or a callable, to a callable."""
+    return norm if callable(norm) else partial(_pnorm, p=norm)
+
+
+def _validate_levels(divmin, divmax, batch_size):
+    """Validate a refinement schedule and size the largest useful batch for it.
+
+    The starting sweep places ``2**divmin - 1`` interior points and no later level
+    places more than ``2**(divmax - 1)``, so a larger batch would only ever be padding.
+    Clamping is idempotent, so the routines may apply it eagerly and the solve may
+    apply it again to a schedule an adjoint has since changed.
+    """
+    errorif(
+        divmin > divmax,
+        ValueError,
+        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
+    )
+    return min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
+
+
 def _romberg_solve(
-    rule,
     vfunc,
     interval,
-    epsabs,
-    epsrel,
     kwargs,
     *,
+    epsabs,
+    epsrel,
     divmax,
-    _norm,
+    norm,
     extrapolate=True,
     batch_size=1,
     divmin=4,
@@ -620,8 +631,13 @@ def _romberg_solve(
     Without it this is plain adaptive bisection of the trapezoidal rule (or of the
     tanh-sinh rule, for ``rombergts``): the same nodes and the same halving schedule,
     reading column 0 of the table rather than choosing among its extrapolations.
+
+    The schedule is reconciled here rather than taken on trust, because an adjoint may
+    have moved ``divmin`` or ``divmax`` without knowing what batch they imply.
     """
-    del rule, kwargs
+    del kwargs
+    batch_size = _validate_levels(divmin, divmax, batch_size)
+    _norm = _as_norm(norm)
     a, b = interval
     # Vectorize whatever we were handed The primal integrand arrives vectorized already,
     # but the adjoints solve against one they build per point (the tangent or the
@@ -945,18 +961,7 @@ def rombergts(
         ValueError,
         f"divmin must be a non-negative integer, got {divmin}",
     )
-    errorif(
-        divmin > divmax,
-        ValueError,
-        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
-    )
-    # The starting sweep places `2**divmin - 1` interior points and no later level
-    # places more than `2**(divmax - 1)`, so a larger batch would only ever be padding.
-    batch_size = min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
-    if callable(norm):
-        _norm: Callable[[jax.Array], jax.Array] = norm
-    else:
-        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+    batch_size = _validate_levels(divmin, divmax, batch_size)
 
     return _romberg(
         fun,
@@ -966,7 +971,7 @@ def rombergts(
         epsabs,
         epsrel,
         divmax,
-        _norm,
+        norm,
         adjoint,
         _build_tanhsinh,
         dtypes.xtype,
