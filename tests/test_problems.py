@@ -19,9 +19,12 @@ from .problems import (
     TAGS,
     TOLS,
     problem_id,
+    quadcc_open,
 )
 
-METHODS = {m.__name__ for m in (quadgk, quadcc, quadts, romberg, rombergts)}
+METHODS = {
+    m.__name__ for m in (quadgk, quadcc, quadcc_open, quadts, romberg, rombergts)
+}
 
 
 @pytest.mark.parametrize("i", ALL, ids=problem_id)

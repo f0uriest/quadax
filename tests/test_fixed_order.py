@@ -6,7 +6,9 @@ Each rule has a defining property, and these tests pin it down:
   an ``order // 2`` point Gauss rule, exactly integrating all polynomials up to degree
   ``3 * (order // 2) + 1`` (22, 31, 46, 61, 76, 91 for the six QUADPACK orders, i.e.
   ``~3/2 the order``).
-- ``ClenshawCurtisRule`` exactly integrates all polynomials up to degree ``order``.
+- ``ClenshawCurtisRule`` exactly integrates all polynomials up to degree
+  ``order``, or ``order - 1`` for the open (``closed=False``) variant, whose
+  defining property is that no node lands on an interval endpoint.
 - ``TanhSinhRule`` is a doubly-exponential trapezoidal rule: for analytic integrands
   each doubling of the order raises the error to a power near two once inside the
   asymptotic tail, which is far faster than any algebraic convergence rate.
@@ -26,6 +28,9 @@ The rules are a public entry point in their own right rather than only the insid
 adaptive loop, so the last section here checks that they honour the dtype of the limits
 on their own, without a solver around them.
 """
+
+import functools
+import re
 
 import jax.numpy as jnp
 import numpy as np
@@ -51,6 +56,11 @@ NOT_EXACT = 1e-3
 # not centered on the origin so that the even/odd symmetry of the node tables (which
 # would integrate odd integrands to zero for free) cannot hide anything.
 INTERVALS = [(-1.0, 1.0), (1.7, 3.9), (-1.0, 2.0)]
+
+# ``closed=False`` is a different quadrature rule sharing a class with the default one,
+# so it is bound here as its own callable and threaded through every test that sweeps
+# the rules, rather than being covered only where it is named explicitly.
+OpenClenshawCurtisRule = functools.partial(ClenshawCurtisRule, closed=False)
 
 
 def chebyshev(degree, x):
@@ -155,6 +165,95 @@ class TestClenshawCurtisPolynomialExactness:
         """The first even degree past ``order`` is not integrated exactly."""
         k = order + 2
         assert_not_exact(ClenshawCurtisRule(order=order), interval, k, NOT_EXACT)
+
+
+# Three widely separated orders rather than the closed rule's full list: the open
+# table is built by the same construction at every order, and what a sweep buys here
+# is the low, middle and high end of it.
+OPEN_ORDERS = [16, 64, 256]
+
+
+@pytest.mark.parametrize("order", OPEN_ORDERS)
+class TestOpenClenshawCurtis:
+    """``closed=False`` swaps in the Fejer-2 rule: the same nodes, minus the endpoints.
+
+    Two points are given up relative to the closed rule, so the degree of exactness
+    drops from ``order`` to ``order - 1``, but nothing else about the rule changes: it
+    is still an interpolatory rule on Chebyshev nodes with an embedded ``order // 2``
+    rule on every second node.
+    """
+
+    @pytest.mark.parametrize("interval", INTERVALS)
+    def test_exactness_is_one_degree_below_the_closed_rule(self, order, interval):
+        """Exact to degree ``order - 1``, and not to the even degree past it."""
+        rule = OpenClenshawCurtisRule(order=order)
+        for k in range(order):
+            assert_exact(rule, interval, k, MACHINE_PRECISION)
+        assert_not_exact(rule, interval, order, NOT_EXACT)
+
+
+# ---------------------------------------------------------------------------
+# Order validity
+# ---------------------------------------------------------------------------
+
+# Every order, odd ones included, over a range wide enough for the pattern to repeat
+# several times, taken well below 4 so the too-small end is covered as well. Swept
+# inside the tests rather than parametrized over, since what is under test is the
+# accepted set as a whole and not any one order.
+CANDIDATE_ORDERS = list(range(-2, 40))
+
+
+@pytest.mark.parametrize("closed", [True, False], ids=["closed", "open"])
+def test_exactly_the_workable_orders_are_accepted(closed):
+    """Nothing accepted is malformed, and nothing rejected would have worked."""
+    accepted = []
+    for order in CANDIDATE_ORDERS:
+        try:
+            rule = ClenshawCurtisRule(order=order, closed=closed)
+        except ValueError:
+            continue
+        accepted.append(order)
+        for name, w in (("wh", rule._wh), ("wl", rule._wl)):
+            np.testing.assert_allclose(
+                float(jnp.sum(w)),
+                2.0,
+                atol=1e-14,
+                err_msg=f"order {order} accepted with a malformed {name}",
+            )
+    step = 4 if closed else 2
+    assert accepted == [o for o in CANDIDATE_ORDERS if o >= 4 and o % step == 0]
+
+
+# One rejected order per cause, per variant. The two causes that leave a rule short of
+# a node - an odd order, and for the closed rule an even one whose half is odd, which
+# the open rule accepts - are both a failure to step by the variant's multiple, so they
+# share a message; they are still listed apart because they break different halves of
+# the nested pair.
+REJECTED = [
+    pytest.param(True, 2, "at least 4", id="closed-too-small"),
+    pytest.param(True, 9, "multiple of 4", id="closed-odd"),
+    pytest.param(True, 10, "multiple of 4", id="closed-odd-half"),
+    pytest.param(False, 2, "at least 4", id="open-too-small"),
+    pytest.param(False, 7, "multiple of 2", id="open-odd"),
+]
+
+
+@pytest.mark.parametrize("closed, order, reason", REJECTED)
+def test_the_error_names_the_reason_and_offers_an_order_that_works(
+    closed, order, reason
+):
+    """Each rejection says which requirement was missed and how to satisfy it.
+
+    The orders an error offers have to be ones the caller can actually use, which is
+    not the same as merely even: the two variants step by different amounts, so an
+    alternative suggested to a caller of the closed rule must clear its multiple-of-4
+    requirement rather than only being even. Below order 4 there is no larger
+    requirement to point at and no alternative is offered.
+    """
+    with pytest.raises(ValueError, match=reason) as excinfo:
+        ClenshawCurtisRule(order=order, closed=closed)
+    for alternative in re.findall(r"order=(\d+)", str(excinfo.value))[1:]:
+        ClenshawCurtisRule(order=int(alternative), closed=closed)
 
 
 def _exp_fun(x):
@@ -307,6 +406,7 @@ ERROR_CASES = {
 RULE_ORDERS = {
     "gk": (GaussKronrodRule, [15, 31, 61]),
     "cc": (ClenshawCurtisRule, [8, 32, 128]),
+    "cc-open": (OpenClenshawCurtisRule, [8, 32, 128]),
     "ts": (TanhSinhRule, [21, 61, 101]),
 }
 RULE_ORDER_PARAMS = [
@@ -319,13 +419,16 @@ RULE_ORDER_IDS = [
 # ``(rule, case) -> {orders}`` where the reported error comes out below the true one.
 # Kept as a table rather than folded into a tolerance so that the exceptions stay
 # countable, and so that one which starts passing shows up as an XPASS instead of
-# disappearing into the slack. The single entry is the endpoint singularity caveat in
+# disappearing into the slack. Both entries are the endpoint singularity caveat in
 # `ClenshawCurtisRule`'s own documentation: its nodes cluster at the endpoints, so the
 # two rules of the nested pair agree closely there while neither has resolved anything,
-# and the difference between them understates what is left. It clears as the order
-# rises, being 2.3x at order 8 and honest from order 32 on.
+# and the difference between them understates what is left. The clustering belongs to
+# the node family rather than to the endpoints themselves, so dropping them does not
+# help and the open variant is listed at the same order. It clears as the order rises,
+# being ~2x at order 8 and honest from order 32 on for both.
 RULE_KNOWN_DISHONEST: dict[tuple[str, str], set[int]] = {
     ("cc", "pow-0.9"): {8},
+    ("cc-open", "pow-0.9"): {8},
 }
 
 
@@ -336,13 +439,12 @@ def _rule_name(rule):
 
 def xfail_if_rule_dishonest(request, rule, order, case):
     """Mark the running test xfail if `RULE_KNOWN_DISHONEST` lists this case."""
-    orders = RULE_KNOWN_DISHONEST.get((_rule_name(rule), case))
+    name = _rule_name(rule)
+    orders = RULE_KNOWN_DISHONEST.get((name, case))
     if orders is not None and order in orders:
         request.applymarker(
             pytest.mark.xfail(
-                reason=(
-                    f"{rule.__name__} order {order} understates its error on {case}"
-                ),
+                reason=f"{name} order {order} understates its error on {case}",
                 strict=False,
             )
         )
@@ -499,14 +601,22 @@ class TestTanhSinhTruncation:
 # rules are a public entry point in their own right rather than only the inside of the
 # adaptive loop, so they have to honour it on their own.
 
-RULES = [GaussKronrodRule, ClenshawCurtisRule, TanhSinhRule]
+RULES = [
+    GaussKronrodRule,
+    ClenshawCurtisRule,
+    OpenClenshawCurtisRule,
+    TanhSinhRule,
+]
+# Given explicitly because the open rule is bound with `functools.partial`, which pytest
+# would otherwise number rather than name.
+RULE_IDS = ["gk", "cc", "cc-open", "ts"]
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
 class TestFixedOrderRuleDTypes:
     """The fixed order rules are a public entry point in their own right."""
 
-    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
     @pytest.mark.parametrize("dtype", real_dtypes)
     def test_integrate(self, rule, dtype):
         """All four outputs of ``integrate`` come back at the abscissa dtype."""
@@ -517,7 +627,7 @@ class TestFixedOrderRuleDTypes:
         tol = SLOP * np.sqrt(float(jnp.finfo(dtype).eps))
         np.testing.assert_allclose(float(y), 1 - np.exp(-1), atol=tol)
 
-    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
     @pytest.mark.parametrize("dtype", real_dtypes)
     def test_degenerate_interval(self, rule, dtype):
         """``a == b`` takes the other branch of a ``cond``, which has to agree.
@@ -531,7 +641,7 @@ class TestFixedOrderRuleDTypes:
             assert v.dtype == dtype
             np.testing.assert_array_equal(np.asarray(v), 0.0)
 
-    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
     @pytest.mark.parametrize("dtype", real_dtypes)
     def test_apply(self, rule, dtype):
         """The low level ``_apply`` keeps the dtype too."""
@@ -539,7 +649,7 @@ class TestFixedOrderRuleDTypes:
         y = rule()._apply(exp_neg, a, b, ())
         assert y.dtype == dtype
 
-    @pytest.mark.parametrize("rule", RULES)
+    @pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
     def test_weights_sum_to_two(self, rule):
         """Both the high and low order rules integrate 1 over [-1, 1] exactly."""
         r = rule()
@@ -579,7 +689,7 @@ BATCH_IDS = ["1", "4", "5", "n-1", "n", "n+7"]
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
-@pytest.mark.parametrize("rule", RULES)
+@pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES, ids=BATCH_IDS)
 class TestBatchSize:
     """Splitting the node evaluation into batches must not change the answer.
@@ -634,7 +744,7 @@ class TestBatchSize:
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
-@pytest.mark.parametrize("rule", RULES)
+@pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
 @pytest.mark.parametrize("batch_size", [0, -1, 2.5], ids=["zero", "negative", "float"])
 def test_bad_batch_size_rejected(rule, batch_size):
     """A batch size that is not a positive integer is a mistake, not a default."""

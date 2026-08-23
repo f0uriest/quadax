@@ -82,6 +82,19 @@ v0.3.0
     was built from says nothing about it. Runs that cannot reach the requested tolerance
     because of it now say so rather than reporting success, and stop once refining can
     no longer help instead of spending the rest of ``divmax`` budget.
+- Added an open variant of the Clenshaw-Curtis rule. ``ClenshawCurtisRule`` and
+  ``quadcc`` take a new ``closed`` argument, defaulting to ``True``, which keeps the
+  existing closed rule. With ``closed=False`` the rule uses the Fejer-2 nodes: the same
+  ``cos(k*pi/order)`` family with the two endpoints dropped, ``order - 1`` points exact
+  to degree ``order - 1``, and the same 2:1 nesting against an embedded ``order // 2``
+  rule.
+  - The open variant is much cheaper on infinite intervals whose integrand decays
+  algebraically or for integrands that are singular at an endpoint.
+  - The closed rule remains the default and is the cheaper of the two on smooth, peaked
+    and oscillatory integrands, by up to about a factor of two in evaluations.
+- ``ClenshawCurtisRule``, ``TanhSinhRule``, ``quadcc``, and ``quadts`` now raise an
+  error on an order that would build a malformed rule, rather than silently changing
+  the order.
 - **Breaking**: removed ``fixed_quadgk``, ``fixed_quadcc``, and ``fixed_quadts``,
   deprecated since v0.2.2. Use ``GaussKronrodRule``, ``ClenshawCurtisRule``, and
   ``TanhSinhRule`` instead, eg

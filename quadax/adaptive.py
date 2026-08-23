@@ -204,6 +204,7 @@ def quadcc(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = True,
     batch_size: int | None = None,
+    closed: bool = True,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -240,8 +241,9 @@ def quadcc(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    order : {8, 16, 32, 64, 128, 256}
-        Order of local integration rule.
+    order : int
+        Order of local integration rule. Must be a multiple of 4, or with
+        ``closed=False`` any even order of at least 4; see ``ClenshawCurtisRule``.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -267,6 +269,13 @@ def quadcc(
         Values larger than the number of nodes are clipped to it. In a gradient the
         adjoint evaluates several sub-intervals together, so the width there is
         ``batch_size`` times the adjoint's own ``chunk_size``.
+    closed : bool, optional
+        Whether the interval endpoints are among the nodes of the local rule. The
+        default closed rule is cheaper on smooth, peaked and oscillatory integrands. The
+        open (Fejer-2) rule never evaluates the integrand at an interval endpoint, which
+        is what to use for integrands that are singular or undefined there; it is
+        markedly cheaper on infinite intervals whose integrand decays algebraically,
+        and on endpoint singularities. See ``ClenshawCurtisRule``.
 
     Returns
     -------
@@ -305,7 +314,7 @@ def quadcc(
     needs is the binding constraint instead.
 
     """
-    rule = ClenshawCurtisRule(order, norm, batch_size)
+    rule = ClenshawCurtisRule(order, norm, batch_size, closed)
     y, info = adaptive_quadrature(
         rule,
         fun,
@@ -373,8 +382,8 @@ def quadts(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    order : {41, 61, 81, 101}
-        Order of local integration rule.
+    order : int
+        Order of local integration rule. Must be odd.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
