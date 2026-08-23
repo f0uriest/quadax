@@ -706,14 +706,14 @@ class ErrorModel(NamedTuple):
 # `50*eps*integral_abs`, which makes the reported value a bound rather than an estimate:
 # on a converged run it is never optimistic, measured worst case 0.9999x, on quadcc at
 # `vector-mixed`. Once the routine has given up that guarantee lapses, but the result
-# must still be in the right league; measured worst case 10.5x, on quadgk at
-# `loglog-right`, over the cases the suite enforces rather than those in
+# must still be in the right league; measured worst case 15.9x, on quadts at
+# `interior-marked`, over the cases the suite enforces rather than those in
 # `KNOWN_DISHONEST`. The slack figure sits so close to its measurement that
 # `vector-mixed` is effectively the case defining it: the two components share one mesh
 # and one estimate, which stretches the bound to its limit, and a change that loosened
 # the estimator at all would fail there first.
 #
-# The honesty figure is not held that tight, and is deliberately left at more than twice
+# The honesty figure is not held that tight, and is deliberately left half again above
 # its worst measurement. What it bounds is the estimate on runs that reported failure,
 # where there is no bound to appeal to and the number is a heuristic layered on a
 # heuristic; pinning it to the measurement would turn ordinary variation between
@@ -874,13 +874,11 @@ def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
 # `scipy.integrate.quad` misses 1e-4 on both members of the pair with its default
 # `limit`, and only clears it given ten times as many sub-intervals.
 #
-# The third is the Romberg pair reporting success on an answer it never sampled: the
-# level 0 and level 1 estimates can agree by accident - because the integrand is NaN at
-# an endpoint, or because a narrow feature falls between the three points those levels
-# use - and nothing requires a minimum depth before that agreement is believed. These
-# are the most serious entries in the table, being wrong answers returned with a status
-# of 0 rather than shortfalls in accuracy, and they appear in `KNOWN_DISHONEST` as well
-# for that reason.
+# The third is marked `# unaccelerated`, and is the price of running `quadts` without
+# the convergence acceleration; see `accelerates` in `tests/test_adaptive.py` for why it
+# is run that way. They would come back if the mass the tanh-sinh map leaves outside its
+# range were carried through to the extrapolated estimate, which would let the
+# acceleration stay on without costing the error bound.
 #
 # `# scipy too` marks the entries where the nearest scipy routine does not deliver the
 # tolerance either, measured against scipy 1.17.1: `scipy.integrate.tanhsinh` for
@@ -891,8 +889,8 @@ def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
 # allowed the same number of sub-intervals as the default `max_ninter` the quadax runs
 # use. Where the note names tolerances, scipy fails at those and delivers at the others.
 #
-# 35 of the 40 convergence entries carry the note at one tolerance or more, and 8 of
-# the 21 dishonesty entries. That is the useful part of the annotation. An unmarked
+# 35 of the 44 convergence entries carry the note at one tolerance or more, and 2 of
+# the 5 dishonesty entries. That is the useful part of the annotation. An unmarked
 # entry is one where a widely used routine does solve the problem, so the shortfall is
 # quadax's; a marked one says the integrand is hard for the method rather than badly
 # implemented here, and `scipy.integrate.tanhsinh` failing on much the same set as
@@ -918,15 +916,19 @@ KNOWN_FAILURES = {
     ("quadts", "beta-both-ends"): {1e-8},  # scipy too
     ("quadts", "decay-1.01"): {1e-4, 1e-8},  # scipy too
     ("quadts", "decay-1.1"): {1e-4, 1e-8},
-    ("quadts", "log-over-sqrt"): {1e-8},
+    ("quadts", "interior-marked"): {1e-8},  # unaccelerated
+    ("quadts", "interior-unmarked"): {1e-8},  # unaccelerated
     ("quadts", "loglog"): {1e-4, 1e-8},  # scipy too
-    ("quadts", "loglog-cube"): {1e-8},  # scipy too
+    ("quadts", "loglog-cube"): {1e-4, 1e-8},  # 1e-4 unaccelerated, scipy too
     ("quadts", "loglog-right"): {1e-4, 1e-8},  # scipy too
     ("quadts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
     ("quadts", "osc-tail"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "pow-0.9"): {1e-4, 1e-8},  # unaccelerated
     ("quadts", "pow-0.9-right"): {1e-4, 1e-8},  # scipy too
     ("quadts", "pow-0.99"): {1e-4, 1e-8},  # scipy too
     ("quadts", "sin-inverse"): {1e-4, 1e-8},  # scipy too
+    ("quadts", "sqrt-over-semicircle"): {1e-8},  # unaccelerated
+    ("quadts", "two-interior"): {1e-8},  # unaccelerated
     ("rombergts", "beta-both-ends"): {1e-8},  # scipy too
     ("rombergts", "decay-1.01"): {1e-4},  # scipy too
     ("rombergts", "jump"): {1e-8, 1e-12},  # scipy too
@@ -955,28 +957,16 @@ KNOWN_FAILURES = {
 # `# host dependent` marks the entries that only reach the dishonest branch on some
 # machines. Where the acceleration cannot fit a problem's asymptotics the reported error
 # is ULP-chaotic.
+#
+# The one `quadts` entry left is dishonest by 1.07x, the estimate of the mass its map
+# leaves outside the range it integrates over being sharp enough to leave nothing over
+# for the rest of the error.
 KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadcc", "loglog-cube"): {1e-4},  # scipy too
     ("quadcc", "sqrt-tan"): {1e-12},
     ("quadgk", "loglog"): {1e-4},  # host dependent
     ("quadgk", "loglog-cube"): {1e-4},  # scipy too
-    ("quadts", "beta-both-ends"): {1e-4, 1e-8, 1e-12},  # scipy too at 1e-8, 1e-12
-    ("quadts", "decay-1.01"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("quadts", "decay-1.1"): {1e-4, 1e-8, 1e-12},
-    ("quadts", "decay-1.5"): {1e-4, 1e-8},
-    ("quadts", "decay-1.5-from-0"): {1e-4, 1e-8},
-    ("quadts", "decay-1.5-mirrored"): {1e-4, 1e-8},
-    ("quadts", "decay-line"): {1e-4, 1e-8},  # scipy too at 1e-8
-    ("quadts", "exp-over-sqrt"): {1e-8},
-    ("quadts", "interior-marked"): {1e-4, 1e-8},  # scipy too
-    ("quadts", "log-over-sqrt"): {1e-4, 1e-8},
-    ("quadts", "loglog"): {1e-4},  # host dependent
-    ("quadts", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("quadts", "pow-0.5"): {1e-4, 1e-8},
-    ("quadts", "pow-0.9-right"): {1e-4, 1e-8, 1e-12},  # scipy too
-    ("quadts", "sqrt-over-semicircle"): {1e-4, 1e-8},
-    ("quadts", "sqrt-tan"): {1e-4, 1e-8},
-    ("quadts", "vector-mixed"): {1e-4, 1e-8},
+    ("quadts", "decay-line"): {1e-8},  # 1.07x, the tail estimate has no margin
 }
 
 

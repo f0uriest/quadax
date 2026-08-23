@@ -68,6 +68,14 @@ v0.3.0
     integrals over ``[a, b]`` that their docstrings describe; they were previously
     scaled by a factor of ``2 / (b - a)``. Relevant when calling a rule directly or
     implementing a custom one.
+  - ``quadts`` and ``TanhSinhRule`` now account for the mass lying beyond their
+    outermost node. A tanh-sinh rule is the trapezoidal rule for an integral over the
+    whole real line in the mapped variable, cut off at a finite range, and the terms
+    past that cutoff carry mass no other weight compensates for. On a bounded integrand
+    the omitted mass is at the level of roundoff and nothing changes; on one singular
+    at an endpoint it can be the whole of the error. Reported ``err`` values and
+    sub-interval counts change on such integrands, and runs that used to report
+    success while missing the requested tolerance now report a non-zero status.
   - ``rombergts``'s reported ``err`` now accounts for the mass its tanh-sinh map leaves
     outside the range it integrates over. That mass is fixed by the map rather than by
     the mesh, so refining converges onto it and the level-to-level movement the estimate
