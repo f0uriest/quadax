@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
+from ._status import STATUS, escalate
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -45,6 +46,7 @@ def romberg(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
     divmin: int = 4,
+    throw: bool = False,
 ):
     """Romberg integration of a callable function or method.
 
@@ -123,6 +125,11 @@ def romberg(
         each, which is where the default schedule wastes time on GPU/TPU. What is paid
         is a floor of ``2**divmin + 1`` evaluations even on an integrand that needed
         fewer.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -136,9 +143,10 @@ def romberg(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -182,18 +190,7 @@ def romberg(
         ValueError,
         f"divmax must be a non-negative integer, got {divmax}",
     )
-    errorif(
-        divmin > divmax,
-        ValueError,
-        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
-    )
-    # The starting sweep places `2**divmin - 1` interior points and no later level
-    # places more than `2**(divmax - 1)`, so a larger batch would only ever be padding.
-    batch_size = min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
-    if callable(norm):
-        _norm: Callable[[jax.Array], jax.Array] = norm
-    else:
-        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+    batch_size = _validate_levels(divmin, divmax, batch_size)
 
     return _romberg(
         fun,
@@ -203,13 +200,14 @@ def romberg(
         epsabs,
         epsrel,
         divmax,
-        _norm,
+        norm,
         adjoint,
         build_integrand,
         dtypes.xtype,
         extrapolate,
         batch_size,
         divmin,
+        throw,
     )
 
 
@@ -221,13 +219,14 @@ def _romberg(
     epsabs,
     epsrel,
     divmax,
-    _norm,
+    norm,
     adjoint,
     build,
     xtype,
     extrapolate,
     batch_size,
     divmin,
+    throw,
     truncation=None,
 ):
     """Shared driver for ``romberg`` and ``rombergts``.
@@ -240,19 +239,21 @@ def _romberg(
     # once a transformed integrand crosses a filter_jit boundary its leaves become
     # tracers that closure_convert cannot hoist.
     f_conv, consts = closure_convert(fun, args, xtype)
+    # The options an adjoint may run its own solve with.
+    opts = {
+        "epsabs": epsabs,
+        "epsrel": epsrel,
+        "divmax": divmax,
+        "divmin": divmin,
+        "norm": norm,
+        "extrapolate": extrapolate,
+        "batch_size": batch_size,
+    }
     # Romberg has no subdivision to reuse, so `rebuild`/`on_mesh` are left unset and
     # DirectAdjoint falls back to differentiating through the loop.
     ops = QuadratureOps(
         build=partial(build, f_conv=f_conv),
-        solve=partial(
-            _romberg_solve,
-            divmax=divmax,
-            _norm=_norm,
-            extrapolate=extrapolate,
-            batch_size=batch_size,
-            divmin=divmin,
-            truncation=truncation,
-        ),
+        solve=partial(_romberg_solve, truncation=truncation),
         # Romberg has no subdivision to reuse, but it does settle on a number of
         # Richardson levels. Freezing that makes the result a fixed linear functional of
         # the integrand, which is what DirectAdjoint needs to differentiate in either
@@ -268,9 +269,12 @@ def _romberg(
             divmin=divmin,
         ),
     )
-    y, state = adjoint.quadrature(ops, None, interval, args, consts, epsabs, epsrel, {})
+    y, state = adjoint.quadrature(ops, interval, args, consts, {}, opts)
     info = state["table"] if full_output else None
-    out = QuadratureInfo(state["err_sum"], state["neval"], state["status"], info)
+    status = state["status"]
+    out = QuadratureInfo(state["err_sum"], state["neval"], status, info)
+    if throw:
+        y = status.error_if(y, status != STATUS.normal)
     return y, out
 
 
@@ -600,16 +604,36 @@ def _tanhsinh_truncation(edges, outer, rtype, _norm):
     return _norm(term[0] + term[1])
 
 
+def _as_norm(norm: int | float | Callable) -> Callable[[jax.Array], jax.Array]:
+    """Resolve a ``norm`` argument, an order or a callable, to a callable."""
+    return norm if callable(norm) else partial(_pnorm, p=norm)
+
+
+def _validate_levels(divmin, divmax, batch_size):
+    """Validate a refinement schedule and size the largest useful batch for it.
+
+    The starting sweep places ``2**divmin - 1`` interior points and no later level
+    places more than ``2**(divmax - 1)``, so a larger batch would only ever be padding.
+    Clamping is idempotent, so the routines may apply it eagerly and the solve may
+    apply it again to a schedule an adjoint has since changed.
+    """
+    errorif(
+        divmin > divmax,
+        ValueError,
+        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
+    )
+    return min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
+
+
 def _romberg_solve(
-    rule,
     vfunc,
     interval,
-    epsabs,
-    epsrel,
     kwargs,
     *,
+    epsabs,
+    epsrel,
     divmax,
-    _norm,
+    norm,
     extrapolate=True,
     batch_size=1,
     divmin=4,
@@ -620,8 +644,13 @@ def _romberg_solve(
     Without it this is plain adaptive bisection of the trapezoidal rule (or of the
     tanh-sinh rule, for ``rombergts``): the same nodes and the same halving schedule,
     reading column 0 of the table rather than choosing among its extrapolations.
+
+    The schedule is reconciled here rather than taken on trust, because an adjoint may
+    have moved ``divmin`` or ``divmax`` without knowing what batch they imply.
     """
-    del rule, kwargs
+    del kwargs
+    batch_size = _validate_levels(divmin, divmax, batch_size)
+    _norm = _as_norm(norm)
     a, b = interval
     # Vectorize whatever we were handed The primal integrand arrives vectorized already,
     # but the adjoints solve against one they build per point (the tangent or the
@@ -706,30 +735,69 @@ def _romberg_solve(
     if divmin < 1:
         err = jnp.array(jnp.inf, rtype)
 
-    state = (result, divmin + 1, neval, err, y, resabs, d, dprev, outer)
+    def flag(status, y, err, resabs, outer, nlevels):
+        """Which of the run's stopping conditions the state after ``nlevels`` meets.
+
+        The conditions are not exclusive, and the most severe of those that hold is the
+        one carried forward.
+        """
+        missed = unconverged(y, err, nlevels)
+        # There is no row `nlevels + 1` to compute, so this is the schedule's last word.
+        last = nlevels >= divmax
+        status = escalate(status, STATUS.max_divisions, missed & last)
+
+        # Neither floor below can be read off an estimate with too little history to
+        # mean anything: under `_MIN_LEVELS`, `missed` is reporting the levels still
+        # owed rather than a shortfall in the answer, and the estimate is small because
+        # nothing has moved yet, not because it has bottomed out.
+        rested = nlevels >= _MIN_LEVELS
+
+        tol = jnp.maximum(epsabs, epsrel * _norm(y))
+        # A zero tolerance is not a threshold that can be missed, it is a request to
+        # refine as far as `divmax` allows. Neither floor is read as unreachable then,
+        # since nothing was asked that the run could fall short of, and the schedule is
+        # left to spend its budget.
+        asked = tol > 0
+
+        trunc = trunc_of(outer)
+        # A floor the map itself holds above the tolerance, which no number of levels
+        # crosses.
+        above_floor = asked & (trunc > tol)
+        # Refining is only abandoned once the mesh's own share has fallen to that floor:
+        # every further level then doubles the evaluations while the reported error
+        # stays where it is. Since the two shares are added, `err <= 2 * trunc` is the
+        # mesh share having reached it. Until then the levels still buy accuracy, just
+        # never the tolerance, so the diagnosis waits unless there is nothing left to
+        # spend anyway.
+        settled = (err <= 2 * trunc) & rested
+        status = escalate(
+            status, STATUS.truncation, missed & above_floor & (settled | last)
+        )
+
+        # `_romberg_err` floors the estimate at the precision the integrand can be
+        # summed to, so a run sitting on that floor is asking for more than the
+        # arithmetic can deliver, however many levels remain.
+        floor = 50.0 * eps * _norm(resabs)
+        status = escalate(
+            status, STATUS.roundoff, missed & rested & asked & (err <= floor)
+        )
+        return status
+
+    # The starting sweep can already have met one of them, on a run whose loop never
+    # executes because `divmin` reaches `divmax`.
+    status = flag(STATUS.normal, y, err, resabs, outer, divmin)
+    state = (result, divmin + 1, neval, err, y, resabs, d, dprev, outer, status)
 
     def ncond(state):
-        result, n, neval, err, y, resabs, dprev, dprev2, outer = state
+        result, n, neval, err, y, resabs, dprev, dprev2, outer, status = state
         # `n` is the row about to be computed, so `n - 1` rows are complete and `y` is
-        # the value read off the last of them.
-        tol = jnp.maximum(epsabs, epsrel * _norm(y))
-        trunc = trunc_of(outer)
-        # Refining is pointless once the mesh has converged onto a floor the map itself
-        # holds above the tolerance: every further level doubles the evaluations while
-        # the reported error stays where it is. Since the two shares are added,
-        # `err <= 2 * trunc` is the mesh's own share having fallen to that floor. The
-        # run still ends unconverged, which is the honest outcome; this only declines to
-        # spend the rest of `divmax` reaching it.
-        # A zero tolerance is not a threshold that can be missed, it is a request to
-        # refine as far as `divmax` allows, so it is never read as unreachable.
-        hopeless = (
-            (tol > 0) & (trunc > tol) & (err <= 2 * trunc) & (n - 1 >= _MIN_LEVELS)
-        )
-        return (n < divmax + 1) & unconverged(y, err, n - 1) & ~hopeless
+        # the value read off the last of them. Reaching the tolerance is its own exit,
+        # since that leaves no flag to stop on.
+        return (n < divmax + 1) & unconverged(y, err, n - 1) & (status == STATUS.normal)
 
     def nloop(state):
         # loop over outer number of subdivisions
-        result, n, neval, err, yprev, resabs, dprev, dprev2, outer = state
+        result, n, neval, err, yprev, resabs, dprev, dprev2, outer, status = state
         h = (b - a) / 2**n
         s, sabs, ends, nbatch = _level_sum(
             vfunc, a, h, 2 ** (n - 1), batch_size, f.shape, f.dtype
@@ -742,13 +810,12 @@ def _romberg_solve(
         neval += nbatch * batch_size
         result, y, d = advance(result, n, yprev)
         err = total_err(d, dprev, dprev2, resabs, outer)
-        return result, n + 1, neval, err, y, resabs, d, dprev, outer
+        status = flag(status, y, err, resabs, outer, n)
+        return result, n + 1, neval, err, y, resabs, d, dprev, outer, status
 
-    result, n, neval, err, y, resabs, dprev, dprev2, outer = bounded_while_loop(
+    result, n, neval, err, y, resabs, dprev, dprev2, outer, status = bounded_while_loop(
         ncond, nloop, state, max(divmax - divmin, 0) + 1
     )
-
-    status = 2 * unconverged(y, err, n - 1)
     state = {
         "table": result,
         "err_sum": err,
@@ -813,6 +880,7 @@ def rombergts(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
     divmin: int = 4,
+    throw: bool = False,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -891,6 +959,11 @@ def rombergts(
         each, which is where the default schedule wastes time on GPU/TPU. What is paid
         is a floor of ``2**divmin + 1`` evaluations even on an integrand that needed
         fewer.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -904,9 +977,10 @@ def rombergts(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -945,18 +1019,7 @@ def rombergts(
         ValueError,
         f"divmin must be a non-negative integer, got {divmin}",
     )
-    errorif(
-        divmin > divmax,
-        ValueError,
-        f"divmin must not exceed divmax, got divmin={divmin}, divmax={divmax}",
-    )
-    # The starting sweep places `2**divmin - 1` interior points and no later level
-    # places more than `2**(divmax - 1)`, so a larger batch would only ever be padding.
-    batch_size = min(batch_size or 2**divmin, max(2**divmin, 2 ** max(divmax - 1, 0)))
-    if callable(norm):
-        _norm: Callable[[jax.Array], jax.Array] = norm
-    else:
-        _norm: Callable[[jax.Array], jax.Array] = partial(_pnorm, p=norm)
+    batch_size = _validate_levels(divmin, divmax, batch_size)
 
     return _romberg(
         fun,
@@ -966,12 +1029,13 @@ def rombergts(
         epsabs,
         epsrel,
         divmax,
-        _norm,
+        norm,
         adjoint,
         _build_tanhsinh,
         dtypes.xtype,
         extrapolate,
         batch_size,
         divmin,
+        throw,
         truncation=_tanhsinh_truncation,
     )

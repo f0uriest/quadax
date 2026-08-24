@@ -38,7 +38,12 @@ import pytest
 import scipy.special
 from jax import config
 
-from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule
+from quadax import (
+    AbstractQuadratureRule,
+    ClenshawCurtisRule,
+    GaussKronrodRule,
+    TanhSinhRule,
+)
 
 from .problems import SLOP, ULP_ATOL, ULP_RTOL, exp_neg, real_dtypes
 
@@ -751,3 +756,41 @@ def test_bad_batch_size_rejected(rule, batch_size):
     """A batch size that is not a positive integer is a mistake, not a default."""
     with pytest.raises(ValueError, match="batch_size"):
         rule(batch_size=batch_size)
+
+
+@pytest.mark.usefixtures("quiet_tanhsinh")
+@pytest.mark.parametrize("rule", RULES, ids=RULE_IDS)
+class TestWithNorm:
+    """A rule can be rebuilt to measure vector valued error with a different norm.
+
+    This is how an adjoint running an error controlled solve of its own measures a
+    vector that is not the integrand's output, see ``LeibnizAdjoint``.
+    """
+
+    x = jnp.array([3.0, -4.0])
+
+    def test_order_or_callable(self, rule):
+        """An int asks for that p-norm, a callable is used as given, as in __init__."""
+        assert float(rule()._with_norm(2).norm(self.x)) == 5.0
+        assert float(rule()._with_norm(1).norm(self.x)) == 7.0
+        assert float(rule()._with_norm(lambda x: jnp.sum(x**2)).norm(self.x)) == 25.0
+
+    def test_rebuilds_rather_than_mutates(self, rule):
+        """The original keeps its own norm, and the quadrature itself is unchanged."""
+        original = rule()
+        assert float(original._with_norm(1).norm(self.x)) == 7.0
+        assert float(original.norm(self.x)) == 4.0
+        np.testing.assert_array_equal(
+            np.asarray(original._with_norm(1)._xh), np.asarray(original._xh)
+        )
+
+
+def test_with_norm_needs_a_norm_to_replace():
+    """A rule that does not measure error from a norm says so rather than guessing."""
+
+    class NoNorm(AbstractQuadratureRule):
+        def integrate(self, fun, a, b, args):
+            raise NotImplementedError
+
+    with pytest.raises(NotImplementedError, match="not built from a norm"):
+        NoNorm()._with_norm(2)

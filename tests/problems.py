@@ -784,7 +784,7 @@ def assert_honest(y, info, prob, tol, model=QUADPACK_MODEL):
     true_err = float(np.max(np.abs(value - exact)))
     reported = float(np.max(np.asarray(info.err)))
 
-    if int(info.status) == 0:
+    if info.status == STATUS.normal:
         assert true_err <= model.slack * reported, (
             f"{prob['name']} at tol={tol:g}: reported {reported:.3e} "
             f"< true {true_err:.3e}"
@@ -807,8 +807,8 @@ def assert_converged(y, info, prob, tol):
     """
     exact = np.asarray(prob["val"])
     value = np.asarray(y)
-    assert int(info.status) == 0, (
-        f"{prob['name']} at tol={tol:g}: {STATUS[int(info.status)]}"
+    assert info.status == STATUS.normal, (
+        f"{prob['name']} at tol={tol:g}: {STATUS[info.status]}"
     )
     reported = float(np.max(np.asarray(info.err)))
     assert reported <= max(tol, tol * float(np.max(np.abs(value)))), (
