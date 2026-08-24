@@ -1,10 +1,12 @@
 """Tests for adaptive quadrature routines."""
 
 import os
+import re
 import subprocess
 import sys
 import warnings
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -164,7 +166,8 @@ class TestAdaptive:
         # The tightest tolerance sits below the roundoff floor of the near-divergent
         # problems, where declining to converge is the right answer rather than a
         # failure, and the smooth-only sweep is there to show it does not regress.
-        if not (main and tol in CONVERGENT_TOLS) and int(info.status) != 0:
+        unflagged = info.status == quadax.STATUS.normal
+        if not (main and tol in CONVERGENT_TOLS) and not unflagged:
             pytest.skip("convergence is not required of this case")
         assert_converged(y, info, prob, tol)
 
@@ -211,8 +214,8 @@ class TestRuleOrders:
                 order=order,
                 extrapolate=accelerates(method),
             )
-            assert int(info.status) == 0, (
-                f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
+            assert info.status == quadax.STATUS.normal, (
+                f"{prob['name']} at order {order}: {quadax.STATUS[info.status]}"
             )
             assert_honest(y, info, prob, self.TOL)
             assert_converged(y, info, prob, self.TOL)
@@ -240,8 +243,8 @@ class TestRuleOrders:
                 order=order,
                 full_output=True,
             )
-            assert int(info.status) == 0, (
-                f"{prob['name']} at order {order}: {quadax.STATUS[int(info.status)]}"
+            assert info.status == quadax.STATUS.normal, (
+                f"{prob['name']} at order {order}: {quadax.STATUS[info.status]}"
             )
             ninter.append(int(info.info["ninter"]))
         assert all(hi <= lo for lo, hi in zip(ninter, ninter[1:])), (
@@ -290,9 +293,9 @@ class TestExtrapolation:
             extrapolate=True,
         )
         np.testing.assert_allclose(float(y), finite_part, rtol=1e-6)
-        assert int(info.status) & 2**quadax.adaptive.DIVERGENT
-        # the docstrings tell users to look the code up in STATUS, so it has to be there
-        assert quadax.STATUS[int(info.status)].strip()
+        assert info.status == quadax.STATUS.divergent
+        # the docstrings tell users to print the flag, so it has to carry a message
+        assert quadax.STATUS[info.status].strip()
 
     def test_no_asymptotic_structure_falls_back(self):
         """``sin(1/x)`` has no trend to extrapolate, so the table must not win.
@@ -322,7 +325,7 @@ class TestExtrapolation:
         )
         # Either it is right, or it says it is not; what it must not do is both be
         # wrong and report success.
-        if int(info.status) == 0:
+        if info.status == quadax.STATUS.normal:
             np.testing.assert_allclose(float(y), ref, rtol=1e-8, atol=1e-10)
 
     @pytest.mark.parametrize("i", ALL, ids=problem_id)
@@ -538,7 +541,9 @@ def test_converged_iteration_exits_clean(max_ninter):
     )
     err = float(info.err)
     if 0 <= err <= max(tol, tol * abs(float(y))):
-        assert int(info.status) == 0, f"reported failure at err={err:.3e} <= {tol:.0e}"
+        assert info.status == quadax.STATUS.normal, (
+            f"reported failure at err={err:.3e} <= {tol:.0e}"
+        )
 
 
 # A tall narrow peak: 1e8 at its top, integral 3.1e4, so the error estimates the loop
@@ -560,7 +565,7 @@ def test_no_spurious_roundoff_on_unresolved_integrand():
     reporting ROUNDOFF with an error five orders of magnitude worse than achievable.
     """
     y, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-12, epsrel=1e-12)
-    assert int(info.status) == 0, quadax.STATUS[int(info.status)]
+    assert info.status == quadax.STATUS.normal, quadax.STATUS[info.status]
     np.testing.assert_allclose(float(y), _PEAK_VAL, rtol=1e-13, atol=0)
 
 
@@ -575,7 +580,7 @@ def test_tolerance_below_roundoff_floor_reports_roundoff():
     true, but not the reason; quadax tests it every iteration instead.
     """
     _, info = quadgk(_PEAK, jnp.array([0.0, 1.0]), epsabs=1e-14, epsrel=1e-14)
-    assert int(info.status) & 2**2, quadax.STATUS[int(info.status)]
+    assert info.status == quadax.STATUS.roundoff, quadax.STATUS[info.status]
     # and the error it stopped at really is the accumulated floor
     np.testing.assert_allclose(
         float(info.err), 50 * np.finfo(np.float64).eps * _PEAK_VAL, rtol=1e-3
@@ -613,7 +618,7 @@ class TestIntervalScaling:
             epsabs=jnp.asarray(0.0),
             epsrel=jnp.asarray(1e-10),
         )
-        assert int(info.status) == 0, quadax.STATUS[int(info.status)]
+        assert info.status == quadax.STATUS.normal, quadax.STATUS[info.status]
         np.testing.assert_allclose(float(y) / s, 0.8862073482595214, rtol=1e-10)
 
     @pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
@@ -935,7 +940,7 @@ def _assert_same_run(got, want):
     np.testing.assert_allclose(
         np.asarray(info_b.err), np.asarray(info.err), rtol=ULP_RTOL, atol=ULP_ATOL
     )
-    assert int(info_b.status) == int(info.status)
+    assert info_b.status == info.status
     assert int(info_b.info["ninter"]) == int(info.info["ninter"])
 
 
@@ -1016,3 +1021,38 @@ def test_bad_batch_size_rejected(method, batch_size):
     """A batch size that is not a positive integer is a mistake, not a default."""
     with pytest.raises(ValueError, match="batch_size"):
         method(exp_neg, jnp.array([0.0, 1.0]), batch_size=batch_size)
+
+
+@pytest.mark.parametrize(
+    "method, budget",
+    [
+        (quadgk, {"max_ninter": 8}),
+        (quadcc, {"max_ninter": 8}),
+        (quadts, {"max_ninter": 8}),
+        (romberg, {"divmax": 6}),
+        (rombergts, {"divmax": 6}),
+    ],
+    ids=["gk", "cc", "ts", "romberg", "rombergts"],
+)
+def test_throw_raises_with_the_status_it_would_have_reported(method, budget):
+    """``throw`` turns the reported status into an exception carrying its own message.
+
+    A zero tolerance is a request no run can meet, so every routine spends its budget
+    and flags; which flag it settles on differs between them, and the message raised has
+    to be that flag's rather than a generic one. The default leaves the status on
+    ``info`` and raises nothing, so switching ``throw`` on is the only difference.
+    """
+    fun = lambda t: t * jnp.log(1 + t)  # noqa: E731
+    interval = jnp.array([0.0, 1.0])
+    unreachable = dict(epsabs=0.0, epsrel=0.0, **budget)
+
+    _, info = method(fun, interval, **unreachable)
+    assert info.status != quadax.STATUS.normal
+    expected = re.escape(quadax.STATUS[info.status][:40])
+    with pytest.raises(eqx.EquinoxRuntimeError, match=expected):
+        method(fun, interval, throw=True, **unreachable)
+
+    # A run that reaches the tolerance is unaffected by asking.
+    y, info = method(fun, interval, epsabs=1e-8, epsrel=1e-8, throw=True)
+    assert info.status == quadax.STATUS.normal
+    np.testing.assert_allclose(float(y), 0.25, rtol=1e-8)

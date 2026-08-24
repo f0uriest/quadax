@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
+from ._status import STATUS, escalate
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -45,6 +46,7 @@ def romberg(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
     divmin: int = 4,
+    throw: bool = False,
 ):
     """Romberg integration of a callable function or method.
 
@@ -123,6 +125,11 @@ def romberg(
         each, which is where the default schedule wastes time on GPU/TPU. What is paid
         is a floor of ``2**divmin + 1`` evaluations even on an integrand that needed
         fewer.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -136,9 +143,10 @@ def romberg(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -199,6 +207,7 @@ def romberg(
         extrapolate,
         batch_size,
         divmin,
+        throw,
     )
 
 
@@ -217,6 +226,7 @@ def _romberg(
     extrapolate,
     batch_size,
     divmin,
+    throw,
     truncation=None,
 ):
     """Shared driver for ``romberg`` and ``rombergts``.
@@ -261,7 +271,10 @@ def _romberg(
     )
     y, state = adjoint.quadrature(ops, interval, args, consts, {}, opts)
     info = state["table"] if full_output else None
-    out = QuadratureInfo(state["err_sum"], state["neval"], state["status"], info)
+    status = state["status"]
+    out = QuadratureInfo(state["err_sum"], state["neval"], status, info)
+    if throw:
+        y = status.error_if(y, status != STATUS.normal)
     return y, out
 
 
@@ -722,30 +735,69 @@ def _romberg_solve(
     if divmin < 1:
         err = jnp.array(jnp.inf, rtype)
 
-    state = (result, divmin + 1, neval, err, y, resabs, d, dprev, outer)
+    def flag(status, y, err, resabs, outer, nlevels):
+        """Which of the run's stopping conditions the state after ``nlevels`` meets.
+
+        The conditions are not exclusive, and the most severe of those that hold is the
+        one carried forward.
+        """
+        missed = unconverged(y, err, nlevels)
+        # There is no row `nlevels + 1` to compute, so this is the schedule's last word.
+        last = nlevels >= divmax
+        status = escalate(status, STATUS.max_divisions, missed & last)
+
+        # Neither floor below can be read off an estimate with too little history to
+        # mean anything: under `_MIN_LEVELS`, `missed` is reporting the levels still
+        # owed rather than a shortfall in the answer, and the estimate is small because
+        # nothing has moved yet, not because it has bottomed out.
+        rested = nlevels >= _MIN_LEVELS
+
+        tol = jnp.maximum(epsabs, epsrel * _norm(y))
+        # A zero tolerance is not a threshold that can be missed, it is a request to
+        # refine as far as `divmax` allows. Neither floor is read as unreachable then,
+        # since nothing was asked that the run could fall short of, and the schedule is
+        # left to spend its budget.
+        asked = tol > 0
+
+        trunc = trunc_of(outer)
+        # A floor the map itself holds above the tolerance, which no number of levels
+        # crosses.
+        above_floor = asked & (trunc > tol)
+        # Refining is only abandoned once the mesh's own share has fallen to that floor:
+        # every further level then doubles the evaluations while the reported error
+        # stays where it is. Since the two shares are added, `err <= 2 * trunc` is the
+        # mesh share having reached it. Until then the levels still buy accuracy, just
+        # never the tolerance, so the diagnosis waits unless there is nothing left to
+        # spend anyway.
+        settled = (err <= 2 * trunc) & rested
+        status = escalate(
+            status, STATUS.truncation, missed & above_floor & (settled | last)
+        )
+
+        # `_romberg_err` floors the estimate at the precision the integrand can be
+        # summed to, so a run sitting on that floor is asking for more than the
+        # arithmetic can deliver, however many levels remain.
+        floor = 50.0 * eps * _norm(resabs)
+        status = escalate(
+            status, STATUS.roundoff, missed & rested & asked & (err <= floor)
+        )
+        return status
+
+    # The starting sweep can already have met one of them, on a run whose loop never
+    # executes because `divmin` reaches `divmax`.
+    status = flag(STATUS.normal, y, err, resabs, outer, divmin)
+    state = (result, divmin + 1, neval, err, y, resabs, d, dprev, outer, status)
 
     def ncond(state):
-        result, n, neval, err, y, resabs, dprev, dprev2, outer = state
+        result, n, neval, err, y, resabs, dprev, dprev2, outer, status = state
         # `n` is the row about to be computed, so `n - 1` rows are complete and `y` is
-        # the value read off the last of them.
-        tol = jnp.maximum(epsabs, epsrel * _norm(y))
-        trunc = trunc_of(outer)
-        # Refining is pointless once the mesh has converged onto a floor the map itself
-        # holds above the tolerance: every further level doubles the evaluations while
-        # the reported error stays where it is. Since the two shares are added,
-        # `err <= 2 * trunc` is the mesh's own share having fallen to that floor. The
-        # run still ends unconverged, which is the honest outcome; this only declines to
-        # spend the rest of `divmax` reaching it.
-        # A zero tolerance is not a threshold that can be missed, it is a request to
-        # refine as far as `divmax` allows, so it is never read as unreachable.
-        hopeless = (
-            (tol > 0) & (trunc > tol) & (err <= 2 * trunc) & (n - 1 >= _MIN_LEVELS)
-        )
-        return (n < divmax + 1) & unconverged(y, err, n - 1) & ~hopeless
+        # the value read off the last of them. Reaching the tolerance is its own exit,
+        # since that leaves no flag to stop on.
+        return (n < divmax + 1) & unconverged(y, err, n - 1) & (status == STATUS.normal)
 
     def nloop(state):
         # loop over outer number of subdivisions
-        result, n, neval, err, yprev, resabs, dprev, dprev2, outer = state
+        result, n, neval, err, yprev, resabs, dprev, dprev2, outer, status = state
         h = (b - a) / 2**n
         s, sabs, ends, nbatch = _level_sum(
             vfunc, a, h, 2 ** (n - 1), batch_size, f.shape, f.dtype
@@ -758,13 +810,12 @@ def _romberg_solve(
         neval += nbatch * batch_size
         result, y, d = advance(result, n, yprev)
         err = total_err(d, dprev, dprev2, resabs, outer)
-        return result, n + 1, neval, err, y, resabs, d, dprev, outer
+        status = flag(status, y, err, resabs, outer, n)
+        return result, n + 1, neval, err, y, resabs, d, dprev, outer, status
 
-    result, n, neval, err, y, resabs, dprev, dprev2, outer = bounded_while_loop(
+    result, n, neval, err, y, resabs, dprev, dprev2, outer, status = bounded_while_loop(
         ncond, nloop, state, max(divmax - divmin, 0) + 1
     )
-
-    status = 2 * unconverged(y, err, n - 1)
     state = {
         "table": result,
         "err_sum": err,
@@ -829,6 +880,7 @@ def rombergts(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     batch_size: int | None = None,
     divmin: int = 4,
+    throw: bool = False,
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
@@ -907,6 +959,11 @@ def rombergts(
         each, which is where the default schedule wastes time on GPU/TPU. What is paid
         is a floor of ``2**divmin + 1`` evaluations even on an integrand that needed
         fewer.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -920,9 +977,10 @@ def rombergts(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -978,5 +1036,6 @@ def rombergts(
         extrapolate,
         batch_size,
         divmin,
+        throw,
         truncation=_tanhsinh_truncation,
     )

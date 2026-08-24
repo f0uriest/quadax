@@ -24,7 +24,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath("."))
-sys.path.append(os.path.abspath("../"))
+# Ahead of site-packages, so a build documents the source tree it sits in rather than
+# an installed copy of quadax that happens to shadow it.
+sys.path.insert(0, os.path.abspath("../"))
 import quadax
 
 project = "quadax"
@@ -403,3 +405,42 @@ latex_documents = [
 ]
 
 latex_toplevel_sectioning = "chapter"
+
+
+# -- Enumeration members -----------------------------------------------------------
+# `quadax.STATUS` is an `equinox.Enumeration`, whose members the metaclass keeps out of
+# the class namespace and serves through `__getattr__`. Neither `dir` nor `vars` sees
+# them, so autodoc documents such a class as though it were empty. equinox builds a
+# listing of its own, but only for a class carrying no docstring, and writes it in the
+# markdown its own docs are built from, which does not survive being read as reST.
+# This generates the same listing from the same source, in reST.
+import textwrap  # noqa: E402
+
+import equinox  # noqa: E402
+
+
+def _enumeration_members(cls):
+    """Name and message of each member, in declaration order.
+
+    ``_name_to_item`` is equinox's own record of them, and the only way to enumerate
+    them.
+    """
+    return [(name, cls[item]) for name, item in cls._name_to_item.items()]
+
+
+def _document_enumeration_members(app, what, name, obj, options, lines):
+    """Append the members of an Enumeration to its class page."""
+    if what != "class" or not isinstance(obj, type):
+        return
+    if not issubclass(obj, equinox.Enumeration) or obj is equinox.Enumeration:
+        return
+    lines += ["", ".. rubric:: Members", ""]
+    for member, message in _enumeration_members(obj):
+        lines.append(f"``{member}``")
+        lines += textwrap.wrap(message, 84, initial_indent="   ", subsequent_indent="   ")
+        lines.append("")
+
+
+def setup(app):
+    """Register the quadax-specific autodoc handling."""
+    app.connect("autodoc-process-docstring", _document_enumeration_members)

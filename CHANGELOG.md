@@ -4,6 +4,21 @@ Changelog
 
 v0.3.0
 ------
+- Reworked how a routine reports why it stopped.
+  - `QuadratureInfo.status` is now a `quadax.STATUS` naming the termination condition,
+    where it was previously an integer bitmask. `STATUS.normal` means the requested
+    tolerances were reached; every other member prints as the message explaining the
+    difficulty. This is a breaking change: `int(info.status)` and the old
+    `quadax.STATUS` lookup table are both gone, replaced by comparing against members,
+    eg `info.status == quadax.STATUS.divergent`.
+  - All six quadrature routines take a new `throw` option, default False. With
+    `throw=True` a run that stops for any reason other than reaching the requested
+    tolerance raises, with the message its status carries; the default reports the
+    status on `info` and leaves it to the caller.
+  - A run meeting more than one condition now reports the most severe rather than a
+    bitmask of all of them, ordered by what a reader should do about it: spend more
+    budget, distrust the error estimate, distrust the answer. Where the conditions
+    combined before, the reported one is the actionable one.
 - Added convergence acceleration to the adaptive integrators. The sequence of running
   totals is accelerated using Wynn's epsilon algorithm, which can greatly reduce the
   work needed for integrands with algebraic singularities or on infinite intervals.

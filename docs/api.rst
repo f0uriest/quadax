@@ -141,6 +141,31 @@ handed a tangent instead, which the two vectors being the same length by coincid
 would otherwise hide.
 
 
+Termination status
+------------------
+
+Every iterative routine returns an info object whose ``status`` says why it stopped.
+``STATUS.normal`` means the requested tolerances were reached; every other member
+names a difficulty and prints as the message explaining it::
+
+    y, info = quadgk(fun, interval, epsabs=1e-10)
+    if info.status != quadax.STATUS.normal:
+        print(info.status)
+
+Pass ``throw=True`` to have the routine raise that message itself rather than report
+it, for code that should not carry on with an unconverged answer::
+
+    y, info = quadgk(fun, interval, epsabs=1e-10, throw=True)
+
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+    :template: enum.rst
+
+    STATUS -- Reason a quadrature terminated
+
+
 Integrating function from sampled values
 ----------------------------------------
 
