@@ -56,7 +56,7 @@ docs = [
 ]
 lint = [
   # keep this pin in sync with .pre-commit-config.yaml and .github/workflows/ruff.yml
-  "ruff == 0.15.14",
+  "ruff == 0.16.4",
   "pre-commit < 4.7",
   "pyright < 1.2",
 ]
