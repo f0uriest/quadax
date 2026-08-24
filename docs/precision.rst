@@ -53,7 +53,7 @@ it saturates and reports the total variation of the integrand over the sub-inter
 That is a genuine upper bound on the error, and never an under-estimate, but it is a
 loose one, and it will make the adaptive methods subdivide more than they need to.
 
-:func:`~quadax.quadts` and :func:`~quadax.rombergts` lose most of what makes them
+:func:`~quadax.quadts` and :func:`~quadax.tanhsinh` lose most of what makes them
 special, and say so with a :exc:`UserWarning`. Their double exponential clustering can
 only place a node about ``eps`` of the half width away from an endpoint -- 2.2e-16 at
 float64, but 7.8e-3 at bfloat16 -- so at half precision there is no longer any real

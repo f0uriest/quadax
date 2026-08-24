@@ -72,8 +72,13 @@ def quadgk(
     difficulty may occur.
 
     Basically the same algorithm as ``scipy.integrate.quad``, including the convergence
-    acceleration. A good general purpose integrator for most reasonably well behaved
-    functions over finite or infinite intervals.
+    acceleration. The general purpose integrator to reach for first, over finite or
+    infinite intervals. It is generally the most robust and often also the most
+    efficient, on smooth and non-smooth integrands alike.
+
+    Where an integrand has a jump or a singularity at a known interior point, passing
+    that point as a breakpoint in `interval` is worth more than any change of method,
+    since the subdivision no longer has to find it.
 
     Parameters
     ----------
@@ -213,7 +218,14 @@ def quadcc(
     difficulty may occur.
 
     A good general purpose integrator for most reasonably well behaved functions over
-    finite or infinite intervals.
+    finite or infinite intervals, and a reasonable alternative to
+    :func:`~quadax.quadgk`. It's main advantage is in allowing arbitrary high orders,
+    which can be useful for smooth but highly oscillatory integrands in the absence of a
+    specialized solver, in which case choosing order to have ~7-8 points per period
+    is often the most efficient.
+
+    As with :func:`~quadax.quadgk`, an interior jump or singularity is best passed as a
+    breakpoint in `interval` rather than left for the subdivision to find.
 
     Parameters
     ----------
@@ -360,7 +372,12 @@ def quadts(
     error estimate. Breakpoints can be specified in `interval` where integration
     difficulty may occur.
 
-    Especially good for integrands with singular behavior at an endpoint.
+    This can often be the most efficient method for smooth integrands or weak endpoint
+    singularities (up to around ``x**-0.5``, including those induced by an algebraically
+    decaying integrand on an infinite interval). Beyond that the truncation floor
+    in the map (limited by working precision) dominates and no amount of refinement can
+    do better. In those cases the extrapolating method :func:`~quadax.quadgk` is
+    the more reliable choice.
 
     Parameters
     ----------

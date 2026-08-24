@@ -22,7 +22,7 @@ from quadax import (
     quadgk,
     quadts,
     romberg,
-    rombergts,
+    tanhsinh,
 )
 
 from .problems import (
@@ -475,7 +475,7 @@ def test_escaped_tracers():
 
     @jax.jit
     def integral_rombergts(interval):
-        return rombergts(jnp.square, interval)
+        return tanhsinh(jnp.square, interval)
 
     with jax.checking_leaks():
         jax.block_until_ready(integral_rombergts([0.0, 1.0]))
@@ -672,7 +672,7 @@ class TestErrors:
 # estimate, and the default tolerances.
 
 adaptive_methods = [quadgk, quadcc, quadts]
-all_methods = adaptive_methods + [romberg, rombergts]
+all_methods = adaptive_methods + [romberg, tanhsinh]
 
 
 @pytest.mark.usefixtures("quiet_tanhsinh")
@@ -848,14 +848,14 @@ class TestTanhSinhPrecision:
     """Half precision costs the tanh-sinh rules their double exponential clustering."""
 
     @pytest.mark.parametrize("dtype", [jnp.float16, jnp.bfloat16])
-    @pytest.mark.parametrize("method", [quadts, rombergts])
+    @pytest.mark.parametrize("method", [quadts, tanhsinh])
     def test_warns_in_half_precision(self, dtype, method):
         """The user is told when the rule cannot deliver what it usually does."""
         with pytest.warns(UserWarning, match="tanh-sinh quadrature in"):
             method(fresh_exp_neg(), jnp.array([0.0, 1.0], dtype=dtype))
 
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
-    @pytest.mark.parametrize("method", [quadts, rombergts])
+    @pytest.mark.parametrize("method", [quadts, tanhsinh])
     def test_silent_at_float32_and_above(self, dtype, method):
         """No warning where the clustering is fine."""
         with warnings.catch_warnings():
@@ -879,9 +879,9 @@ def test_x64_disabled():
     script = """
 import jax.numpy as jnp
 import numpy as np
-from quadax import quadgk, quadcc, quadts, romberg, rombergts
+from quadax import quadgk, quadcc, quadts, romberg, tanhsinh
 
-for method in [quadgk, quadcc, quadts, romberg, rombergts]:
+for method in [quadgk, quadcc, quadts, romberg, tanhsinh]:
     seen = []
     def fun(x):
         seen.append(x.dtype)
@@ -1030,9 +1030,9 @@ def test_bad_batch_size_rejected(method, batch_size):
         (quadcc, {"max_ninter": 8}),
         (quadts, {"max_ninter": 8}),
         (romberg, {"divmax": 6}),
-        (rombergts, {"divmax": 6}),
+        (tanhsinh, {"divmax": 6}),
     ],
-    ids=["gk", "cc", "ts", "romberg", "rombergts"],
+    ids=["gk", "cc", "ts", "romberg", "tanhsinh"],
 )
 def test_throw_raises_with_the_status_it_would_have_reported(method, budget):
     """``throw`` turns the reported status into an exception carrying its own message.

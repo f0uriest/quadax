@@ -15,7 +15,7 @@ Adaptive integration of a callable function or method
     quadcc
     quadts
     romberg
-    rombergts
+    tanhsinh
     adaptive_quadrature
 
 

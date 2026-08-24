@@ -40,7 +40,9 @@ def smart_warn(message, category=None, stacklevel=1, source=None):
         # get just the package names, don't care about specific modules
         call_chain = [c.split(".")[0] for c in call_chain]
 
-        if call_chain:
+        if call_chain and call_chain[0] != "quadax":
+            # quadax's own deprecations are always for the caller to act on, whoever
+            # that is. Everything below is about a warning some other library raised.
             emitter = call_chain[0]
             for caller in call_chain[1:]:
                 if caller == emitter:

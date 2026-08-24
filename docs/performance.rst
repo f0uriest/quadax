@@ -8,7 +8,7 @@ all the local nodes at once, so higher order methods tend to be more efficient o
 GPU/TPU. However, if the integrand is not sufficiently smooth, a higher order method
 can be less efficient, but often still wins on wall time on accelerators.
 
-:func:`~quadax.romberg` and :func:`~quadax.rombergts` are sequential by default. The
+:func:`~quadax.romberg` and :func:`~quadax.tanhsinh` are sequential by default. The
 number of new points a refinement level places is only known at run time, so there is no
 single shape for JAX to vectorize over. Setting ``batch_size`` will vectorize over the
 points on each level, but will pad the coarser levels, so the total number of function

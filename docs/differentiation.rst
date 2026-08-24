@@ -46,7 +46,7 @@ Both pick up the jump term from differentiating with respect to a breakpoint tha
 on a discontinuity. Neither can see a discontinuity that has no breakpoint at it, so be
 sure to declare a breakpoint, see :ref:`derivative-sharp-edges` below.
 
-:func:`~quadax.romberg` and :func:`~quadax.rombergts` have no subdivision to reuse -
+:func:`~quadax.romberg` and :func:`~quadax.tanhsinh` have no subdivision to reuse -
 :class:`~quadax.DirectAdjoint` freezes the number of Richardson levels instead - and
 there the two cost about the same, so the choice is about accuracy alone.
 

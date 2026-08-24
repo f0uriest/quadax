@@ -4,6 +4,13 @@ Changelog
 
 v0.3.0
 ------
+- Added `quadax.tanhsinh`, tanh-sinh quadrature on a uniformly refined mesh, and
+  deprecated `quadax.rombergts` in favour of it. The extrapolation done by `rombergts`
+  was counterproductive on a tanh-sinh mesh - the substitution already makes the
+  trapezoidal rule converge exponentially, so there is no expansion in powers of the
+  step for the table to fit, and extrapolating anyway returned a value worse than the
+  un-extrapolated sum it was built from while taking more levels to reach a given
+  tolerance.
 - Reworked how a routine reports why it stopped.
   - `QuadratureInfo.status` is now a `quadax.STATUS` naming the termination condition,
     where it was previously an integer bitmask. `STATUS.normal` means the requested
