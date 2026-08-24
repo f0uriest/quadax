@@ -1,6 +1,7 @@
 """quadax : numerical quadrature with JAX."""
 
 from . import _version
+from ._status import STATUS
 from .adaptive import adaptive_quadrature, quadcc, quadgk, quadts
 from .adjoint import AbstractAdjoint, DirectAdjoint, LeibnizAdjoint
 from .fixed_order import (
@@ -12,7 +13,6 @@ from .fixed_order import (
 )
 from .romberg import romberg, rombergts
 from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid
-from .utils import STATUS
 
 __all__ = [
     "adaptive_quadrature",

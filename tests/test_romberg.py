@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from jax import config
 
-from quadax import romberg, rombergts
+from quadax import STATUS, romberg, rombergts
 
 from .problems import (
     NO_BREAKPOINTS,
@@ -70,7 +70,7 @@ class TestRomberg:
         y, info = solve_once(method, i, tol, interval_as_array=True)
         # Convergence is required only of the problems the method is for; the rest are
         # swept to check they fail honestly, which `test_error_is_honest` covers.
-        if i not in EXPECTED_TO_CONVERGE[method] and int(info.status) != 0:
+        if i not in EXPECTED_TO_CONVERGE[method] and info.status != STATUS.normal:
             pytest.skip("convergence is not required of this case")
         assert_converged(y, info, prob, tol)
 
@@ -108,7 +108,7 @@ class TestRichardsonFlag:
         # error rather than dividing by it.
         scale = max(np.max(np.abs(exact)), 1.0)
         err = float(np.max(np.abs(np.asarray(y) - exact)) / scale)
-        return y, err, int(info.status), int(info.neval)
+        return y, err, info.status, int(info.neval)
 
     def test_richardson_is_what_makes_romberg_work(self):
         """Without it the trapezoidal rule cannot keep up on a smooth integrand.
@@ -418,7 +418,7 @@ class TestDivmin:
             divmax=12,
             divmin=divmin,
         )
-        assert int(info.status) == 0
+        assert info.status == STATUS.normal
         np.testing.assert_allclose(
             np.asarray(y), np.asarray(prob["val"]), rtol=self.TOL, atol=self.TOL
         )
@@ -494,7 +494,7 @@ class TestDivmin:
             divmax=12,
             divmin=5,
         )
-        assert int(info.status) == 0
+        assert info.status == STATUS.normal
         np.testing.assert_allclose(
             np.asarray(y), np.asarray(prob["val"]), rtol=1e-9, atol=1e-9
         )
@@ -551,3 +551,28 @@ def test_divmin_above_divmax_rejected(method):
     """Starting below the floor the run is allowed to reach is a contradiction."""
     with pytest.raises(ValueError, match="divmin"):
         method(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]), divmin=6, divmax=4)
+
+
+@pytest.mark.parametrize(
+    "method, fun, tol, divmax, expect",
+    [
+        # Nowhere near resolving an endpoint singularity in six uniform halvings.
+        (romberg, lambda t: t**-0.5, 1e-8, 6, "max_divisions"),
+        # Below what the arithmetic can deliver, however many levels remain.
+        (romberg, jnp.exp, 1e-17, 20, "roundoff"),
+        # Below what the map's own tail leaves outside the abscissae.
+        (rombergts, lambda t: t**-0.5, 1e-16, 20, "truncation"),
+    ],
+    ids=["out-of-levels", "below-roundoff-floor", "below-truncation-floor"],
+)
+def test_romberg_names_its_own_exit_condition(method, fun, tol, divmax, expect):
+    """The three ways a Romberg schedule can stop short are reported apart.
+
+    They call for different things - more levels, a looser tolerance, a different map -
+    and collapsing them into one "did not converge" tells the reader none of that. The
+    two floors are what distinguish them from running out of budget: neither can be
+    crossed by refining, so more levels would only spend evaluations reaching the same
+    answer.
+    """
+    _, info = method(fun, jnp.array([0.0, 1.0]), epsabs=tol, epsrel=tol, divmax=divmax)
+    assert info.status == getattr(STATUS, expect), STATUS[info.status]

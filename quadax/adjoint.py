@@ -16,7 +16,6 @@ from jax.flatten_util import ravel_pytree
 from jax.interpreters import ad, batching, mlir
 
 from . import _acceleration
-from .fixed_order import AbstractQuadratureRule
 from .utils import (
     _real_dtype,
     check_size,
@@ -83,8 +82,10 @@ class QuadratureOps(NamedTuple):
         ``safe`` asks for an inf/nan mask that survives reverse mode, which the
         adjoints request for the evaluations they differentiate.
     solve : callable
-        ``solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs) -> (y, state)``. Runs
-        the full (adaptive) quadrature.
+        ``solve(vfunc, interval_t, kwargs, **opts) -> (y, state)``. Runs the full
+        (adaptive) quadrature. Everything the solve is configured by, the local rule
+        and the tolerances included, arrives in ``opts`` rather than closed over, so
+        that an adjoint running a solve of its own can override it by merging.
     rebuild : callable or None
         ``rebuild(interval_t, state) -> (a_arr, b_arr)``. Rebuilds the subdivision from
         ``interval_t`` using the owner/fraction bookkeeping recorded in ``state``, so
@@ -117,6 +118,38 @@ class QuadratureOps(NamedTuple):
     frozen: Callable | None = None
     frozen_solve: Callable | None = None
     mesh_is_primal: bool = True
+
+
+def _items(opts):
+    """A solve's options in a form the derivative rule can carry them in.
+
+    They ride as operands so that an array valued option stays traced, which means
+    their static half ends up in a primitive parameter, and a parameter has to be
+    hashable. Sorted pairs are; a dict is not. Sorting compares keys alone, they being
+    unique, so a callable among the values never has to be ordered. ``kwargs`` crosses
+    the same boundary the same way, see the bind in ``_leibniz_jvp``.
+    """
+    return tuple(sorted(opts.items()))
+
+
+def _merge(opts, *overrides):
+    """``opts`` with ``overrides`` applied in turn, later ones winning.
+
+    An override of an array valued option is cast to the dtype the routine resolved for
+    that name, so that a tolerance handed in as a bare python float, or at a wider
+    precision than the integral is being worked at, cannot widen the working precision.
+    Names the routine does not have are passed through untouched, and rejected by the
+    solve itself when it is called.
+    """
+    merged = dict(opts)
+    for override in overrides:
+        merged.update(override)
+    return {
+        k: jnp.asarray(v, jnp.result_type(opts[k]))
+        if k in opts and eqx.is_inexact_array(opts[k])
+        else v
+        for k, v in merged.items()
+    }
 
 
 def _with_options(ops, checkpoint, chunk_size):
@@ -470,13 +503,11 @@ class AbstractAdjoint(eqx.Module):
     def quadrature(
         self,
         ops: QuadratureOps,
-        rule: AbstractQuadratureRule | None,
         interval: jax.Array,
         args: tuple,
         consts: tuple,
-        epsabs: jax.Array,
-        epsrel: jax.Array,
         kwargs: dict,
+        opts: dict,
     ) -> tuple[jax.Array, dict]:
         """Evaluate the quadrature and define how it is differentiated.
 
@@ -484,8 +515,6 @@ class AbstractAdjoint(eqx.Module):
         ----------
         ops : QuadratureOps
             Primitive operations for this quadrature method.
-        rule : AbstractQuadratureRule
-            Local quadrature rule. Ignored by methods that do not use one.
         interval : jax.Array
             Limits of integration with possible breakpoints, in the original
             (unmapped) coordinates.
@@ -494,10 +523,10 @@ class AbstractAdjoint(eqx.Module):
         consts : tuple
             Values closed over by the integrand, hoisted out by
             ``jax.closure_convert`` so that they are visible to AD.
-        epsabs, epsrel : jax.Array
-            Absolute and relative error tolerances.
         kwargs : dict
             Additional keyword arguments passed to ``rule``.
+        opts : dict
+            Options for ``ops.solve``, including the local rule and the tolerances.
 
         Returns
         -------
@@ -517,10 +546,10 @@ class _UnrolledDirectAdjoint(AbstractAdjoint):
     loop, including iterations that did no work.
     """
 
-    def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
+    def quadrature(self, ops, interval, args, consts, kwargs, opts):
         """Evaluate the quadrature, differentiating straight through the loop."""
         vfunc, interval_t = ops.build(interval, args, consts, safe=True)
-        return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
+        return ops.solve(vfunc, interval_t, kwargs, **opts)
 
 
 class DirectAdjoint(AbstractAdjoint):
@@ -624,33 +653,35 @@ class DirectAdjoint(AbstractAdjoint):
     def __post_init__(self):
         check_size(self.chunk_size, "chunk_size")
 
-    def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
+    def quadrature(self, ops, interval, args, consts, kwargs, opts):
         """Evaluate the quadrature and differentiate it on the converged subdivision."""
         ops = _with_options(ops, self.checkpoint, self.chunk_size)
         if ops.rebuild is None:
             if ops.frozen_solve is not None:
                 # No subdivision, but a discretization we can freeze (Romberg). Route
-                # through the primitive so that both modes work.
+                # through the primitive so that both modes work. The derivative is
+                # taken on that frozen discretization, so it runs no solve of its own
+                # and the same options serve all three slots.
                 return _leibniz(
-                    rule,
                     interval,
                     args,
                     consts,
-                    epsabs,
-                    epsrel,
+                    _items(opts),
+                    _items(opts),
+                    _items(opts),
                     kwargs,
                     ops=ops,
                     freeze=True,
                 )
             vfunc, interval_t = ops.build(interval, args, consts, safe=True)
-            return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
-        return _direct(rule, interval, args, consts, epsabs, epsrel, kwargs, ops=ops)
+            return ops.solve(vfunc, interval_t, kwargs, **opts)
+        return _direct(interval, args, consts, opts, kwargs, ops=ops)
 
 
 @eqx.filter_custom_jvp
-def _direct(rule, interval, args, consts, epsabs, epsrel, kwargs, *, ops):
+def _direct(interval, args, consts, opts, kwargs, *, ops):
     vfunc, interval_t = ops.build(interval, args, consts)
-    return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
+    return ops.solve(vfunc, interval_t, kwargs, **opts)
 
 
 @_direct.def_jvp
@@ -667,10 +698,11 @@ def _direct_jvp(primals, tangents, *, ops):
     # When the limits are not being differentiated the converged subdivision can be used
     # as-is. filter_custom_jvp gives a `None` tangent for anything not being
     # differentiated, so this is known at trace time.
-    interval_perturbed = any(t is not None for t in jax.tree.leaves(tangents[1]))
+    interval_perturbed = any(t is not None for t in jax.tree.leaves(tangents[0]))
 
     def fixed_mesh(dyn_):
-        rule_, interval_, args_, consts_, _, _, kwargs_ = eqx.combine(dyn_, static)
+        interval_, args_, consts_, opts_, kwargs_ = eqx.combine(dyn_, static)
+        rule_ = opts_["rule"]
         vfunc, interval_t = ops.build(interval_, args_, consts_, safe=True)
         if not ops.mesh_is_primal:
             # Convergence acceleration may have returned an extrapolated value instead
@@ -732,11 +764,18 @@ def _leibniz_unpack(flat, n, treedef, static, frozen_treedef):
     return tangent, dyn, eqx.combine(dyn, static), frozen
 
 
-def _run_solve(ops, rule, integrand, interval_t, epsabs, epsrel, kwargs, frozen):
-    """Adaptive solve, or evaluation on a frozen discretization if there is one."""
+def _run_solve(ops, integrand, interval_t, kwargs, opts, frozen):
+    """Adaptive solve, or evaluation on a frozen discretization if there is one.
+
+    ``opts`` is the one this direction of the derivative uses, which is the primal's
+    unless the adjoint was given options of its own. A frozen discretization is not
+    error controlled, so it takes none of them beyond the rule to evaluate with, which
+    is absent for a quadrature that has no local rule.
+    """
+    opts = dict(opts)
     if frozen is None:
-        return ops.solve(rule, integrand, interval_t, epsabs, epsrel, kwargs)[0]
-    return ops.frozen_solve(rule, integrand, interval_t, frozen, kwargs)
+        return ops.solve(integrand, interval_t, kwargs, **opts)[0]
+    return ops.frozen_solve(opts.get("rule"), integrand, interval_t, frozen, kwargs)
 
 
 # The ratio between successive probe offsets used to read a breakpoint's one-sided
@@ -886,7 +925,7 @@ def _endpoint_term(vfunc, interval_t, *, ops, static):
     jumps = _breakpoint_jumps(vfunc, interval_t)
 
     def term(dyn_):
-        _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
+        interval, args, consts, _, _, _ = eqx.combine(dyn_, static)
         _, limits = ops.build(interval, args, consts)
         out = hi * limits[-1] - lo * limits[0]
         if jumps is not None:
@@ -904,7 +943,7 @@ def _integrand_at(dyn_, *, t, ops, static):
     differentiate this: forward mode pushes a tangent through it, reverse mode pulls a
     cotangent back.
     """
-    _, interval, args, consts, _, _ = eqx.combine(dyn_, static)
+    interval, args, consts, _, _, _ = eqx.combine(dyn_, static)
     vf, _ = ops.build(interval, args, consts, safe=True)
     return vf(t)
 
@@ -919,13 +958,41 @@ def _tangent_integrand(dyn, dyn_t, *, ops, static):
     return dvfunc
 
 
-def _without_interval(tree):
-    """Zero out the limits' component of a tangent or cotangent, keeping the rest.
+def _live_leaves(dyn, tangents):
+    """Which of ``dyn``'s leaves are being differentiated, in flattened order.
 
-    The limits sit at position 1 of the primal tuple. Zeroing rather than dropping keeps
-    the pytree structure the solve and ``ravel_pytree`` expect.
+    ``eqx.filter_custom_jvp`` hands us a ``None`` tangent for every leaf that is not
+    differentiated, and a non-``None`` tangent for every leaf that is. Reverse mode
+    integrates the cotangent of the live leaves alone: the rest are asked for by nobody,
+    and integrating them is both wasteful and potentially harmful, since the error
+    control couples every component of the vector it measures through ``norm``.
     """
-    return (tree[0], jax.tree.map(jnp.zeros_like, tree[1]), *tree[2:])
+    is_none = lambda x: x is None
+    dyn_leaves = jax.tree.flatten(dyn, is_leaf=is_none)[0]
+    tan_leaves = jax.tree.flatten(tangents, is_leaf=is_none)[0]
+    return tuple(t is not None for d, t in zip(dyn_leaves, tan_leaves) if d is not None)
+
+
+def _keep_live(tree, live, treedef):
+    """Drop the leaves that are not being differentiated, keeping the tree's shape.
+
+    The dropped leaves become ``None``, which is an empty pytree node rather than a
+    leaf, so ``ravel_pytree`` skips them and the vector the solve carries holds the live
+    components alone. Unravelling puts the ``None`` back, which is what tells the
+    transpose rule to report a symbolic zero cotangent there.
+    """
+    leaves = jax.tree.flatten(tree)[0]
+    return jax.tree.unflatten(treedef, [x if k else None for x, k in zip(leaves, live)])
+
+
+def _add_live(tree, other):
+    """Add ``other`` into the live leaves of ``tree``, leaving dropped ones alone."""
+    is_none = lambda x: x is None
+    leaves, treedef = jax.tree.flatten(tree, is_leaf=is_none)
+    others = jax.tree.flatten(other, is_leaf=is_none)[0]
+    return jax.tree.unflatten(
+        treedef, [a if a is None else a + b for a, b in zip(leaves, others)]
+    )
 
 
 def _leibniz_impl(
@@ -937,26 +1004,26 @@ def _leibniz_impl(
     kwargs_items,
     frozen_treedef,
     freeze,
+    live,
     interval_from_solve,
     out_sds,
 ):
     """Forward direction: integrate the tangent of the mapped integrand."""
+    del live  # only used on backward pass
     dyn_t, dyn, primals, frozen = _leibniz_unpack(
         flat, n, treedef, static, frozen_treedef
     )
-    rule, interval, args, consts, epsabs, epsrel = primals
+    interval, args, consts, _, opts_fwd, _ = primals
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
 
     del out_sds
     y_dot = _run_solve(
         ops,
-        rule,
         _tangent_integrand(dyn, dyn_t, ops=ops, static=static),
         interval_t,
-        epsabs,
-        epsrel,
         kwargs,
+        opts_fwd,
         frozen if freeze else None,
     )
     if interval_from_solve:
@@ -978,6 +1045,7 @@ def _leibniz_transpose(
     kwargs_items,
     frozen_treedef,
     freeze,
+    live,
     interval_from_solve,
     out_sds,
 ):
@@ -990,37 +1058,30 @@ def _leibniz_transpose(
         # fed to `jax.vjp` below, which requires an array and rejects the symbolic form.
         return (None,) * len(flat)
     _, dyn, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
-    rule, interval, args, consts, epsabs, epsrel = primals
+    interval, args, consts, _, _, opts_rev = primals
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
-    _, unravel = ravel_pytree(dyn)
+    # Only the arguments actually being differentiated reach the solve. Integrating the
+    # rest buys nothing, since nobody asked for them, and it costs: the error control is
+    # driven by `rule.norm` over the whole raveled vector, so a component that
+    # misbehaves sets the mesh for every component, and the limits are exactly such a
+    # component: differentiating an integral whose integrand is unbounded at a limit
+    # gives an unbounded adjoint integrand. Convergence acceleration couples them harder
+    # still, since the epsilon table's structural decisions are made on the norm as
+    # well.
+    _, unravel = ravel_pytree(_keep_live(dyn, live, treedef))
 
     def adjoint_integrand(t):
         at_t = partial(_integrand_at, t=t, ops=ops, static=static)
         _, vjp = jax.vjp(at_t, dyn)
-        ct_dyn = vjp(ct)[0]
-        if not interval_from_solve:
-            # Drop the limits' components before they reach the solve. Nobody asked for
-            # them, so integrating them buys nothing, and it costs, because they are the
-            # components that misbehave: differentiating an integral whose integrand is
-            # unbounded at a limit gives an unbounded adjoint integrand, and the error
-            # control is driven by `rule.norm` over the whole raveled vector, so one
-            # divergent component sets the mesh for every component. Convergence
-            # acceleration couples them harder still, since the epsilon table's
-            # structural decisions are made on the norm as well. Forward mode zeroes the
-            # tangent's limits the same way, see `_leibniz_impl`; without this the two
-            # modes are not solving the same problem.
-            ct_dyn = _without_interval(ct_dyn)
-        return ravel_pytree(ct_dyn)[0]
+        return ravel_pytree(_keep_live(vjp(ct)[0], live, treedef))[0]
 
     flat_ct = _run_solve(
         ops,
-        rule,
         adjoint_integrand,
         interval_t,
-        epsabs,
-        epsrel,
         kwargs,
+        opts_rev,
         frozen if freeze else None,
     )
     ct_tree = unravel(flat_ct)
@@ -1028,8 +1089,12 @@ def _leibniz_transpose(
         # The adjoint integrand carries the limits' cotangent only through the
         # integrand, so the boundary term is added here, as in forward mode.
         term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
-        ct_tree = jax.tree.map(jnp.add, ct_tree, jax.vjp(term, dyn)[1](ct)[0])
-    ct_leaves = jax.tree.flatten(ct_tree)[0]
+        ct_tree = _add_live(ct_tree, jax.vjp(term, dyn)[1](ct)[0])
+    # One cotangent per linear operand, in the order they were bound: the solved ones
+    # in tree order, and `None` (the symbolic zero JAX expects for an operand that was
+    # not differentiated) for the leaves dropped above.
+    solved = iter(jax.tree.flatten(ct_tree)[0])
+    ct_leaves = [next(solved) if k else None for k in live]
     # cotangents for the linear operands, then None for every residual operand
     n_res = len(flat) - n
     return tuple(ct_leaves) + (None,) * n_res
@@ -1060,8 +1125,37 @@ class LeibnizAdjoint(AbstractAdjoint):
     Because each mode picks its own subdivision, forward and reverse results agree to
     quadrature accuracy rather than exactly.
 
+    Parameters
+    ----------
+    options : dict, optional
+        Options for the derivative's own solve, replacing the ones the quadrature
+        routine was called with. Default is to solve for the derivative with the same
+        options as the integral.
+    options_fwd, options_rev : dict, optional
+        The same, for one direction alone, taking precedence over ``options``. Which
+        vector is being measured differs between the two directions, so ``norm`` is the
+        option most likely to want this; see the note below.
+
     Notes
     -----
+    The two directions of the derivative do not integrate the same vector, which is
+    what ``options_fwd`` and ``options_rev`` are for.
+
+    Forward mode integrates the tangent of the integrand, a vector of the integrand's
+    own shape. Reverse mode integrates the cotangent of the arguments being
+    differentiated, raveled into a single flat vector. Its length is the total number
+    of differentiated parameter components, which has nothing to do with the
+    integrand's shape, and its entries are parameters rather than components of the
+    integral. They appear in the order the quadrature's own arguments do: the limits,
+    ``args``, and whatever the integrand closes over. Each contributing ``size`` entries
+    if it is being differentiated and none at all if it is not. Differentiating a two
+    point ``interval`` and a length three ``args[0]`` gives a vector of five with the
+    limits first; differentiating ``args[0]`` alone gives a vector of three.
+
+    A ``norm`` weighted per parameter is written against that layout, and belongs in
+    ``options_rev`` so that it is never handed a tangent instead, which the two vectors
+    being the same length by coincidence would otherwise hide.
+
     When differentiating a moving jump or singularity, mark the jump or singularity
     with a breakpoint, and build that breakpoint from the same parameter that positions
     the feature. Marking a feature that is genuinely there is never worse than leaving
@@ -1108,20 +1202,32 @@ class LeibnizAdjoint(AbstractAdjoint):
     to the derivative since the integrand has the same limit from both sides of it.
     """
 
-    def quadrature(self, ops, rule, interval, args, consts, epsabs, epsrel, kwargs):
+    options: dict = eqx.field(default_factory=dict)
+    options_fwd: dict = eqx.field(default_factory=dict)
+    options_rev: dict = eqx.field(default_factory=dict)
+
+    def quadrature(self, ops, interval, args, consts, kwargs, opts):
         """Evaluate the quadrature, differentiating it by the Leibniz rule."""
         return _leibniz(
-            rule, interval, args, consts, epsabs, epsrel, kwargs, ops=ops, freeze=False
+            interval,
+            args,
+            consts,
+            _items(opts),
+            _items(_merge(opts, self.options, self.options_fwd)),
+            _items(_merge(opts, self.options, self.options_rev)),
+            kwargs,
+            ops=ops,
+            freeze=False,
         )
 
 
 @eqx.filter_custom_jvp
 def _leibniz(
-    rule, interval, args, consts, epsabs, epsrel, kwargs, *, ops, freeze=False
+    interval, args, consts, opts, opts_fwd, opts_rev, kwargs, *, ops, freeze=False
 ):
-    del freeze
+    del freeze, opts_fwd, opts_rev
     vfunc, interval_t = ops.build(interval, args, consts)
-    return ops.solve(rule, vfunc, interval_t, epsabs, epsrel, kwargs)
+    return ops.solve(vfunc, interval_t, kwargs, **dict(opts))
 
 
 @_leibniz.def_jvp
@@ -1138,7 +1244,11 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
     # Whether the solve is the thing that has to produce the limits' cotangent, which it
     # is whenever they are being differentiated at all. `filter_custom_jvp` tells us at
     # trace time by handing us a `None` tangent for anything that is not.
-    interval_from_solve = any(t is not None for t in jax.tree.leaves(tangents[1]))
+    interval_from_solve = any(t is not None for t in jax.tree.leaves(tangents[0]))
+    # The same statement for every argument rather than for the limits alone: which
+    # cotangents the reverse solve has to carry, and so what the vector its `norm`
+    # measures is made of.
+    live = _live_leaves(dyn, tangents[:-1])
     if freeze:
         frozen_leaves, frozen_treedef = jax.tree.flatten(
             jax.lax.stop_gradient(ops.frozen(state))
@@ -1156,6 +1266,7 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
         kwargs_items=tuple(sorted(kwargs.items())),
         frozen_treedef=frozen_treedef,
         freeze=freeze,
+        live=live,
         interval_from_solve=interval_from_solve,
         out_sds=jax.ShapeDtypeStruct(jnp.shape(y), jnp.result_type(y)),
     )

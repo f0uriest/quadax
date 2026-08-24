@@ -111,8 +111,18 @@ The two multiply: a gradient evaluates the integrand at up to ``chunk_size`` tim
 
 ``LeibnizAdjoint`` takes no ``chunk_size``, and no ``checkpoint`` either. It evaluates
 no frozen subdivision, its backward pass is an error-controlled solve, and the
-derivative with respect to the limits is a boundary term, so ``batch_size`` is the
-only knob that applies to it.
+derivative with respect to the limits is a boundary term, so ``batch_size`` is the only
+knob of the routine's that applies to it. What it does take is ``options``, which
+configure that solve separately from the integral's with its own tolerances, its own
+``max_ninter``, even its own local rule::
+
+    quadgk(fun, interval, args, epsabs=1e-6,
+           adjoint=LeibnizAdjoint(options={"epsabs": 1e-10, "max_ninter": 200}))
+
+``options_fwd`` and ``options_rev`` configure one direction alone. The norm is the one
+to be careful with: in reverse mode it measures the cotangent of the parameters rather
+than anything shaped like the integral. See the Adjoints section of the API
+documentation.
 
 
 

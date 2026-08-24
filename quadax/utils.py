@@ -12,6 +12,8 @@ import numpy as np
 from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
+from ._status import STATUS
+
 
 def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str = ""):
     """Raise an error if condition is met.
@@ -530,57 +532,6 @@ class _TanhSinhTransformedFunction(eqx.Module):
         return self.sgn * w * self.fun(x, *args)
 
 
-messages = {
-    # NORMAL_EXIT
-    0: "Algorithm terminated normally, desired tolerances assumed reached",
-    # MAX_NINTER
-    1: (
-        "Maximum number of subdivisions allowed has been achieved. One can allow more "
-        + "subdivisions by increasing the value of max_ninter. However,if this yields "
-        + "no improvement it is advised to analyze the integrand in order to determine "
-        + "the integration difficulties. If the position of a local difficulty can be "
-        + "determined (e.g. singularity, discontinuity within the interval) one will "
-        + "probably gain from splitting up the interval at this point and calling the "
-        + "integrator on the sub-ranges. If possible, an appropriate special-purpose "
-        + "integrator should be used, which is designed for handling the type of "
-        + "difficulty involved."
-    ),
-    # ROUNDOFF
-    2: (
-        "The occurrence of roundoff error is detected, which prevents the requested "
-        + "tolerance from being achieved. The error may be under-estimated."
-    ),
-    # BAD_INTEGRAND
-    3: (
-        "Extremely bad integrand behavior occurs at some points of the integration "
-        + "interval."
-    ),
-    # NO_CONVERGE
-    4: (
-        "The algorithm does not converge. Roundoff error is detected in the "
-        + "extrapolation table. It is assumed that the requested tolerance cannot be "
-        + "achieved, and that the returned result is the best which can be obtained."
-    ),
-    # DIVERGENT
-    5: "The integral is probably divergent, or slowly convergent.",
-}
-
-
-def _decode_status(status):
-    if status == 0:
-        msg = messages[0]
-    else:
-        status = f"{status:06b}"[::-1]
-        msg = ""
-        for s, m in zip(status, messages.values()):
-            if int(s):
-                msg += m + "\n\n"
-    return msg
-
-
-STATUS = {i: _decode_status(i) for i in range(int(2**6))}
-
-
 def wrap_func(
     fun: Callable[..., jax.Array],
     args: tuple[Any, ...],
@@ -745,10 +696,11 @@ class QuadratureInfo(NamedTuple):
         Estimate of the error in the quadrature result.
     neval : int
         Number of evaluations of the integrand.
-    status : int
-        Flag indicating reason for termination. status of 0 means normal termination,
-        any other value indicates a possible error. A human readable message can be
-        obtained by ``print(quadax.STATUS[status])``
+    status : STATUS
+        Why the routine terminated. ``STATUS.normal`` means the requested tolerances
+        were reached; every other member names a difficulty, and prints as the message
+        explaining it. Where a run meets several conditions the most severe is
+        reported.
     info : dict or None
         Other information returned by the algorithm. See specific algorithm for
         details. Only present if ``full_output`` is True.
@@ -756,7 +708,7 @@ class QuadratureInfo(NamedTuple):
 
     err: float | jax.Array
     neval: int | jax.Array
-    status: int | jax.Array
+    status: STATUS
     info: Any
 
 

@@ -19,6 +19,7 @@ from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 from . import _acceleration
+from ._status import STATUS, escalate, withdraw
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -47,13 +48,6 @@ from .utils import (
     tree_where,
 )
 
-NORMAL_EXIT = 0
-MAX_NINTER = 1
-ROUNDOFF = 2
-BAD_INTEGRAND = 3
-NO_CONVERGE = 4
-DIVERGENT = 5
-
 
 @eqx.filter_jit
 def quadgk(
@@ -69,6 +63,7 @@ def quadgk(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = True,
     batch_size: int | None = None,
+    throw: bool = False,
 ):
     """Global adaptive quadrature using Gauss-Kronrod rule.
 
@@ -133,6 +128,11 @@ def quadgk(
         Values larger than the number of nodes are clipped to it. In a gradient the
         adjoint evaluates several sub-intervals together, so the width there is
         ``batch_size`` times the adjoint's own ``chunk_size``.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -143,9 +143,10 @@ def quadgk(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -183,6 +184,7 @@ def quadgk(
         max_ninter,
         adjoint=adjoint,
         extrapolate=extrapolate,
+        throw=throw,
     )
     info = QuadratureInfo(
         info.err, info.neval * rule.nodes_per_call, info.status, info.info
@@ -205,6 +207,7 @@ def quadcc(
     extrapolate: bool = True,
     batch_size: int | None = None,
     closed: bool = True,
+    throw: bool = False,
 ):
     """Global adaptive quadrature using Clenshaw-Curtis rule.
 
@@ -276,6 +279,11 @@ def quadcc(
         is what to use for integrands that are singular or undefined there; it is
         markedly cheaper on infinite intervals whose integrand decays algebraically,
         and on endpoint singularities. See ``ClenshawCurtisRule``.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -286,9 +294,10 @@ def quadcc(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -326,6 +335,7 @@ def quadcc(
         max_ninter,
         adjoint=adjoint,
         extrapolate=extrapolate,
+        throw=throw,
     )
     info = QuadratureInfo(
         info.err, info.neval * rule.nodes_per_call, info.status, info.info
@@ -347,6 +357,7 @@ def quadts(
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = False,
     batch_size: int | None = None,
+    throw: bool = False,
 ):
     """Global adaptive quadrature using trapezoidal tanh-sinh rule.
 
@@ -411,6 +422,11 @@ def quadts(
         Values larger than the number of nodes are clipped to it. In a gradient the
         adjoint evaluates several sub-intervals together, so the width there is
         ``batch_size`` times the adjoint's own ``chunk_size``.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
 
     Returns
     -------
@@ -421,9 +437,10 @@ def quadts(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -461,6 +478,7 @@ def quadts(
         max_ninter,
         adjoint=adjoint,
         extrapolate=extrapolate,
+        throw=throw,
     )
     info = QuadratureInfo(
         info.err, info.neval * rule.nodes_per_call, info.status, info.info
@@ -480,6 +498,7 @@ def adaptive_quadrature(
     max_ninter: int = 50,
     adjoint: AbstractAdjoint = DirectAdjoint(),
     extrapolate: bool = True,
+    throw: bool = False,
     **kwargs,
 ):
     """Global adaptive quadrature.
@@ -530,6 +549,11 @@ def adaptive_quadrature(
         derivative), and is faster when the integrand is expensive or ``max_ninter``
         is generous; see the Adjoints section of the API documentation for when that
         is worth paying for.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
     kwargs : dict
         Additional keyword arguments passed to ``rule``.
 
@@ -542,9 +566,10 @@ def adaptive_quadrature(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of rule evaluations.
-        * status : (int) Flag indicating reason for termination. status of 0 means
-          normal termination, any other value indicates a possible error. A human
-          readable message can be obtained by ``print(quadax.STATUS[status])``
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -588,9 +613,17 @@ def adaptive_quadrature(
 
     f_conv, consts = closure_convert(fun, args, dtypes.xtype)
 
+    # The options an adjoint may run its own solve with.
+    opts = {
+        "rule": rule,
+        "epsabs": epsabs,
+        "epsrel": epsrel,
+        "max_ninter": max_ninter,
+        "extrapolate": extrapolate,
+    }
     ops = QuadratureOps(
         build=partial(build_integrand, f_conv=f_conv),
-        solve=partial(_adaptive_solve, max_ninter=max_ninter, extrapolate=extrapolate),
+        solve=_adaptive_solve,
         rebuild=_rebuild_mesh,
         on_mesh=_quad_on_mesh,
         # An accelerated solve may return an extrapolated value rather than the sum over
@@ -600,15 +633,15 @@ def adaptive_quadrature(
         frozen_solve=_replay_solve if extrapolate else _mesh_solve,
         mesh_is_primal=not extrapolate,
     )
-    y, state = adjoint.quadrature(
-        ops, rule, interval, args, consts, epsabs, epsrel, kwargs
-    )
+    y, state = adjoint.quadrature(ops, interval, args, consts, kwargs, opts)
 
     err = state["err_sum"]
     neval = state["neval"]
     status = state["status"]
     info = state if full_output else None
     out = QuadratureInfo(err, neval, status, info)
+    if throw:
+        y = status.error_if(y, status != STATUS.normal)
     return y, out
 
 
@@ -665,7 +698,7 @@ def _accelerate(
     # `proceed` says this iteration still has something to record. A run that reached
     # the tolerance or raised a flag is over and reports the state it finished with, so
     # every update below is gated on it.
-    proceed = ~converged & (state["status"] == 0)
+    proceed = ~converged & (state["status"] == STATUS.normal)
     # Depth of the two halves the bisection just created. Both were recorded before this
     # is called, so slot `i` carries it.
     levcur = state["level"][i]
@@ -793,7 +826,7 @@ def _accelerate_full(
     # flag: in both cases the run is over and the mesh result is the one that will be
     # reported. It is skipped for good once `no_accel` is set, which abandons the
     # acceleration and lets the run finish as an ordinary subdivision.
-    proceed = ~converged & (state["status"] == 0)
+    proceed = ~converged & (state["status"] == STATUS.normal)
     active = proceed & ~state["no_accel"]
 
     # The error still sitting in sub-intervals that are not yet localized, ie those the
@@ -962,7 +995,7 @@ def _accelerate_full(
     }
     for key, value in updates.items():
         state[key] = tree_where(proceed, value, state[key])
-    state["status"] += 2**NO_CONVERGE * stalled
+    state["status"] = escalate(state["status"], STATUS.no_converge, stalled)
     return state
 
 
@@ -994,7 +1027,7 @@ def _accept_extrapolation(state, mesh_y, norm):
         state["accel_err"],
     )
     # Whether anything was flagged at all, by the subdivision or by the table.
-    flagged = (state["status"] != 0) | state["roundoff_in_table"]
+    flagged = (state["status"] != STATUS.normal) | state["roundoff_in_table"]
 
     scale_accel = norm(accel_y)
     scale_mesh = norm(mesh_y)
@@ -1030,10 +1063,12 @@ def _accept_extrapolation(state, mesh_y, norm):
     divergent = have_accel & ~use_mesh & ~untestable & testable & diverging
 
     # Roundoff detected inside the table, where the subdivision itself reported nothing.
-    state["status"] += (
-        2**ROUNDOFF * have_accel * flagged * (state["status"] == 0) * ~use_mesh
+    state["status"] = escalate(
+        state["status"],
+        STATUS.roundoff,
+        have_accel & flagged & (state["status"] == STATUS.normal) & ~use_mesh,
     )
-    state["status"] += 2**DIVERGENT * divergent
+    state["status"] = escalate(state["status"], STATUS.divergent, divergent)
     state["used_accel"] = have_accel & ~use_mesh
     state["err_sum"] = jnp.where(use_mesh, mesh_err, accel_err)
     # QUADPACK never clears a flag once raised, which costs it nothing because its
@@ -1046,8 +1081,7 @@ def _accept_extrapolation(state, mesh_y, norm):
     # then the request was met, whichever of the two supplied it. Only this flag is
     # cleared, since the others describe the returned value and stand on their own.
     reached = state["err_sum"] <= state["err_bnd"]
-    stall_bit = (state["status"] & 2**NO_CONVERGE) != 0
-    state["status"] -= jnp.where(reached & stall_bit, 2**NO_CONVERGE, 0)
+    state["status"] = withdraw(state["status"], STATUS.no_converge, reached)
     return state, jnp.where(use_mesh, mesh_y, accel_y)
 
 
@@ -1080,7 +1114,7 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
     state["roundoff1"] = 0  # for keeping track of roundoff errors
     state["roundoff2"] = 0  # for keeping track of roundoff errors
-    state["status"] = 0  # error flag
+    state["status"] = STATUS.normal  # why the run stopped
     # Explicitly typed rather than left as weak python floats: these are `scan` carries,
     # so their dtype has to match what the loop body writes back into them.
     state["err_bnd"] = jnp.zeros((), etype)  # error bound we're trying to reach
@@ -1162,7 +1196,16 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
 
 
 def _adaptive_solve(
-    rule, vfunc, interval, epsabs, epsrel, kwargs, *, max_ninter, extrapolate=False
+    vfunc,
+    interval,
+    kwargs,
+    *,
+    rule,
+    epsabs,
+    epsrel,
+    max_ninter,
+    extrapolate=False,
+    norm=None,
 ):
     """Run the globally adaptive subdivision loop.
 
@@ -1178,7 +1221,13 @@ def _adaptive_solve(
     a term each time it does. See ``_acceleration`` for the table itself,
     ``_accelerate_full`` for the control flow that decides all this, and
     ``_accept_extrapolation`` for the choice between the two answers at the end.
+
+    ``norm`` replaces the one the rule was built with, for a caller that measures a
+    vector other than the integrand's output. ``None``, the primal's case, keeps the
+    rule's own.
     """
+    if norm is not None:
+        rule = rule._with_norm(norm)
     intfun = partial(rule.integrate, **kwargs) if kwargs else rule.integrate
     _norm = rule.norm
     f = jax.eval_shape(vfunc, (interval[0] + interval[-1]) / 2)
@@ -1234,10 +1283,14 @@ def _adaptive_solve(
 
     state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
     # check for roundoff error - error too big but relative error is small
-    state["status"] += 2**ROUNDOFF * _at_roundoff_floor(state, epmach, _norm)
+    state["status"] = escalate(
+        state["status"], STATUS.roundoff, _at_roundoff_floor(state, epmach, _norm)
+    )
 
     # check for max intervals exceeded
-    state["status"] += 2**MAX_NINTER * (state["ninter"] >= max_ninter)
+    state["status"] = escalate(
+        state["status"], STATUS.max_ninter, state["ninter"] >= max_ninter
+    )
 
     if extrapolate:
         # Give the saturated sub-intervals the whole error estimate, which puts them at
@@ -1270,7 +1323,7 @@ def _adaptive_solve(
 
     def condfun(state):
         keep_going = (
-            (state["status"] == 0)
+            (state["status"] == STATUS.normal)
             & (0 <= state["err_sum"])
             & (state["err_bnd"] <= state["err_sum"])
         )
@@ -1412,29 +1465,35 @@ def _adaptive_solve(
         # Roundoff is reported either because the error has bottomed out at the floor
         # the arithmetic imposes, or because the two counters say subdivision has
         # stopped buying anything.
-        state["status"] += (
-            2**ROUNDOFF
-            * ~converged
-            * (
+        state["status"] = escalate(
+            state["status"],
+            STATUS.roundoff,
+            ~converged
+            & (
                 _at_roundoff_floor(state, epmach, _norm)
                 | (state["roundoff1"] >= 10)
                 | (state["roundoff2"] >= 20)
-            )
+            ),
         )
 
         # test for max number of intervals
-        state["status"] += 2**MAX_NINTER * ~converged * (state["ninter"] >= max_ninter)
+        state["status"] = escalate(
+            state["status"],
+            STATUS.max_ninter,
+            ~converged & (state["ninter"] >= max_ninter),
+        )
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
         # This one is about the *mesh*, not the values, so it scales with the precision
         # the abscissae are carried at rather than the precision of the sums.
-        state["status"] += (
-            2**BAD_INTEGRAND
-            * ~converged
-            * (
+        state["status"] = escalate(
+            state["status"],
+            STATUS.bad_integrand,
+            ~converged
+            & (
                 jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2))
                 <= (100.0 * epmach_x * halfspan)
-            )
+            ),
         )
 
         # update the arrays of interval starts/ends etc

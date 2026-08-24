@@ -14,7 +14,7 @@ from .quad_weights import (
     get_tanhsinh_table,
     gk_weights,
 )
-from .utils import _real_dtype, check_size, tanhsinh_tmax, wrap_func
+from .utils import _real_dtype, check_size, errorif, tanhsinh_tmax, wrap_func
 
 
 def _dot(w, f):
@@ -135,6 +135,25 @@ class AbstractQuadratureRule(eqx.Module):
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
         return jnp.linalg.norm(jnp.asarray(x).flatten(), ord=jnp.inf)
+
+    def _with_norm(
+        self, norm: float | int | Callable[[jax.Array], jax.Array]
+    ) -> "AbstractQuadratureRule":
+        """A copy of this rule that measures vector valued error with ``norm``.
+
+        Internal: used by the adjoints, which may run an error controlled solve whose
+        vector is not the integrand's output, and so needs a norm of its own. Users
+        writing a custom rule only need this if they want that to work; the default
+        below is correct for any rule built from a norm, and a rule that measures error
+        some other way should override it or let it raise.
+        """
+        errorif(
+            not hasattr(self, "_norm"),
+            NotImplementedError,
+            f"{type(self).__name__} was not built from a norm, so it cannot be rebuilt "
+            "with a different one.",
+        )
+        return eqx.tree_at(lambda rule: rule._norm, self, norm)
 
 
 class NestedRule(AbstractQuadratureRule):
