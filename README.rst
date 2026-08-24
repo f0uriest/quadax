@@ -1,7 +1,8 @@
 
-########
-quadax
-########
+.. image:: https://raw.githubusercontent.com/f0uriest/quadax/main/docs/_static/images/logo.png
+    :alt: quadax
+    :width: 420
+
 |License| |DOI| |Issues| |Pypi|
 
 |Docs| |UnitTests| |Codecov|

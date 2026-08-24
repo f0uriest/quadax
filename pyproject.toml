@@ -117,7 +117,7 @@ ignore_errors = true
 
 [tool.pyright]
 include = ["quadax/*.py", "tests/*.py"]
-exclude = ["quadax/_version.py", "docs/conf.py", "build/*", "setup.py"]
+exclude = ["quadax/_version.py", "docs/*", "build/*", "setup.py"]
 
 [tool.ruff]
 line-length = 88
