@@ -1,8 +1,11 @@
 .wy-nav-side {
     background: #4b006e
 }
+/* The theme's 800px puts prose at roughly the 88 columns the sources wrap to. Widen
+   it enough for the two column API tables, but not so far that a paragraph runs much
+   longer than the tables and headings beside it. */
 .wy-nav-content {
-    max-width: 1200px !important;
+    max-width: 900px !important;
 }
 
 /* override table width restrictions */

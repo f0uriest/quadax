@@ -96,12 +96,11 @@ def romberg(
         can amplify rather than cancel, and the honest estimate is the better one.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``divmax`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel.
         Defaults to ``2**divmin``, which is one batch for the whole starting grid and
@@ -150,7 +149,7 @@ def romberg(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
+          * table : (ndarray, size(divmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation. With
             ``extrapolate=False`` only the first column is filled.
 
@@ -887,8 +886,8 @@ def rombergts(
     Returns the integral of `fun` (a function of one variable) over `interval`.
 
     Performs well for functions with singularities at the endpoints or integration
-    over infinite intervals. May be slightly less efficient than ``quadgk`` or
-    ``quadcc`` for smooth integrands.
+    over infinite intervals. May be slightly less efficient than :func:`~quadax.quadgk`
+    or :func:`~quadax.quadcc` for smooth integrands.
 
     Parameters
     ----------
@@ -930,12 +929,11 @@ def rombergts(
         can amplify rather than cancel, and the honest estimate is the better one.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``divmax`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel.
         Defaults to ``2**divmin``, which is one batch for the whole starting grid and
@@ -984,7 +982,7 @@ def rombergts(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
+          * table : (ndarray, size(divmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation. With
             ``extrapolate=False`` only the first column is filled.
 

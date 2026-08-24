@@ -13,6 +13,7 @@ from .fixed_order import (
 )
 from .romberg import romberg, rombergts
 from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid
+from .utils import QuadratureInfo
 
 __all__ = [
     "adaptive_quadrature",
@@ -34,6 +35,7 @@ __all__ = [
     "simpson",
     "trapezoid",
     "STATUS",
+    "QuadratureInfo",
 ]
 
 __version__ = _version.get_versions()["version"]

@@ -63,6 +63,7 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "numpy": ("https://numpy.org/doc/stable", None),
     "jax": ("https://docs.jax.dev/en/latest", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy", None),
 }
 
 # Single backticks mark parameter names and short expressions throughout the
@@ -168,6 +169,8 @@ napoleon_use_admonition_for_references = False
 napoleon_use_ivar = False
 napoleon_use_param = True
 napoleon_use_rtype = False
+# Cross-reference the types named in Returns, not only those in Parameters.
+napoleon_preprocess_types = True
 
 autodoc_default_options = {
     "member-order": "bysource",

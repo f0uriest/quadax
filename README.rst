@@ -6,6 +6,8 @@ quadax
 
 |Docs| |UnitTests| |Codecov|
 
+.. docs-include-start
+
 quadax is a library for numerical quadrature and integration using JAX.
 
 - ``vmap``-able, ``jit``-able, differentiable in both forward and reverse mode.
@@ -51,6 +53,8 @@ Usage
     assert info.err < max(epsabs, epsrel*abs(y))
     np.testing.assert_allclose(y, 1/4, rtol=epsrel, atol=epsabs)
 
+
+.. docs-include-end
 
 For full details of various options see the `API documentation <https://quadax.readthedocs.io/en/latest/api.html>`__
 
