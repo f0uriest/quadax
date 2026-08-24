@@ -64,8 +64,8 @@ def romberg(
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
         Its dtype sets the working precision: the integrand is called with an ``x`` of
-        this dtype, and the result follows it unless the integrand upcasts. A integer
-        types or python floats falls back to the JAX default. Must be real; complex
+        this dtype, and the result follows it unless the integrand upcasts. Integer
+        types or python floats fall back to the JAX default. Must be real; complex
         integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun
@@ -898,8 +898,8 @@ def rombergts(
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
         Its dtype sets the working precision: the integrand is called with an ``x`` of
-        this dtype, and the result follows it unless the integrand upcasts. A integer
-        types or python floats falls back to the JAX default. Must be real; complex
+        this dtype, and the result follows it unless the integrand upcasts. Integer
+        types or python floats fall back to the JAX default. Must be real; complex
         integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun

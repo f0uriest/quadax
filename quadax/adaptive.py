@@ -84,7 +84,7 @@ def quadgk(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -227,7 +227,7 @@ def quadcc(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -376,7 +376,7 @@ def quadts(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -518,7 +518,7 @@ def adaptive_quadrature(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.

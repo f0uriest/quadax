@@ -3,8 +3,8 @@
 
 Which method should I choose?
 =============================
-Can you evaluate the integrand at an arbitary point?
-----------------------------------------------------
+Can you evaluate the integrand at an arbitrary point?
+-----------------------------------------------------
 
 To start, ``quadgk`` or ``quadcc`` are probably your best options, and are similar to
 methods in QUADPACK (or ``scipy.integrate.quad``). ``quadgk`` is usually the most efficient
@@ -12,12 +12,12 @@ for very smooth integrands (well approximated by a high degree polynomial), ``qu
 tends to be slightly more efficient for less smooth integrands. If both of those don't
 perform well, you should think about your integrand a bit more:
 
-- Does your integrand have badly behaved singularites at the endpoints? Use ``quadts`` or ``rombergts``
+- Does your integrand have badly behaved singularities at the endpoints? Use ``quadts`` or ``rombergts``
 - Is your integrand only piecewise smooth or piecewise continuous? Use ``romberg`` or ``rombergts``
 
 Do you only know your integrand at discrete points?
 ---------------------------------------------------
-- Use ``trapezoid`` or ``simspson``
+- Use ``trapezoid`` or ``simpson``
 
 
 Precision and dtypes

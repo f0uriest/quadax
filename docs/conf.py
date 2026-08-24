@@ -59,6 +59,16 @@ linkcode_blob = "head"
 linkcode_url = r"https://github.com/f0uriest/quadax/"
 linkcode_link_text = "Source"
 
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "jax": ("https://docs.jax.dev/en/latest", None),
+}
+
+# Single backticks mark parameter names and short expressions throughout the
+# docstrings, which the default renders as emphasis rather than as code.
+default_role = "code"
+
 
 def linkcode_resolve(domain, info):
     """Returns a link to the source code on GitHub, with appropriate lines highlighted"""
@@ -169,11 +179,7 @@ templates_path = ["_templates"]
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 #
-source_suffix = [".rst", ".md"]
-# source_suffix = {
-#     '.rst': 'restructuredtext',
-#     '.md': 'markdown',
-# }
+source_suffix = [".rst"]
 # The master toctree document.
 master_doc = "index"
 
@@ -204,14 +210,13 @@ html_theme = "sphinx_rtd_theme"
 html_theme_options = {
     #    'canonical_url': '',
     #    'analytics_id': 'UA-XXXXXXX-1',  #  Provided by Google in your dashboard
-    "logo_only": True,
     "prev_next_buttons_location": "both",
     "style_external_links": False,
     "style_nav_header_background": "#3c4142",
     # Toc options
-    "collapse_navigation": True,
+    "collapse_navigation": False,
     "sticky_navigation": True,
-    "navigation_depth": 2,
+    "navigation_depth": 3,
     "includehidden": True,
     "titles_only": False,
 }
