@@ -500,7 +500,8 @@ class TestErrorEstimates:
         estimate that reduced over the components too early, rather than being formed
         component by component and normed once at the end, would come out below this.
         """
-        funs = [_exp_fun, lambda x: 1 / (1 + 25 * x**2), jnp.sqrt]
+        step = lambda x: jnp.where(x < 0.3, 0.0, 1.0)
+        funs = [_exp_fun, jnp.sqrt, step]
         together = lambda x: jnp.stack([f(x) for f in funs], axis=-1)
         r = rule(order)
         combined = float(r.integrate(together, 0.0, 1.0, ())[1])

@@ -40,15 +40,14 @@ jobs:
         run: |
           pwd
           lscpu
-          python -m pytest -v --durations=0 --cov-report xml:cov.xml --cov-config=pyproject.toml --cov=quadax/ --db ./prof.db
-      - name: save coverage file and plot comparison results
+          python -m pytest -v --durations=0 --cov-report xml:cov.xml --cov-config=pyproject.toml --cov=quadax/
+      - name: save coverage file
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: unit_test_artifact_${{ matrix.python-version }}
           path: |
             ./cov.xml
-            ./prof.db
       - name: Upload coverage
         id : codecov
         uses: codecov/codecov-action@v7
