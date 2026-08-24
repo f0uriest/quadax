@@ -1197,13 +1197,19 @@ def _adaptive_solve(
         result, abserr, intabs, intmmn = intfun(vfunc, a, b, ())
 
         if extrapolate:
-            # An original sub-interval whose error estimate came back at the saturation
+            # An original sub-interval whose error estimate reached the saturation
             # value (the whole variation of the integrand over it) told the rule
             # nothing about it at all. Those are promoted to the head of the error
             # ordering below, so that the pieces the caller flagged as difficult by
-            # putting a breakpoint at them are the first ones bisected.
+            # putting a breakpoint at them are the first ones bisected. The test is
+            # ``>=`` and not equality because a rule may add to the saturated value,
+            # as a tanh-sinh one does with the mass beyond its outermost node. An
+            # integrand with no variation to saturate against is excluded rather than
+            # counted as unresolved, the estimate then being a roundoff floor sitting
+            # above a variation of zero.
+            variation = _norm(intmmn)
             state["ndin"] = (
-                state["ndin"].at[i].set((abserr == _norm(intmmn)) & (abserr != 0))
+                state["ndin"].at[i].set((abserr >= variation) & (variation != 0))
             )
 
         state["neval"] += 1

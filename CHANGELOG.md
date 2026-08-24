@@ -68,6 +68,20 @@ v0.3.0
     integrals over ``[a, b]`` that their docstrings describe; they were previously
     scaled by a factor of ``2 / (b - a)``. Relevant when calling a rule directly or
     implementing a custom one.
+  - ``quadts`` and ``TanhSinhRule`` now account for the mass lying beyond their
+    outermost node. A tanh-sinh rule is the trapezoidal rule for an integral over the
+    whole real line in the mapped variable, cut off at a finite range, and the terms
+    past that cutoff carry mass no other weight compensates for. On a bounded integrand
+    the omitted mass is at the level of roundoff and nothing changes; on one singular
+    at an endpoint it can be the whole of the error. Reported ``err`` values and
+    sub-interval counts change on such integrands, and runs that used to report
+    success while missing the requested tolerance now report a non-zero status.
+  - ``rombergts``'s reported ``err`` now accounts for the mass its tanh-sinh map leaves
+    outside the range it integrates over. That mass is fixed by the map rather than by
+    the mesh, so refining converges onto it and the level-to-level movement the estimate
+    was built from says nothing about it. Runs that cannot reach the requested tolerance
+    because of it now say so rather than reporting success, and stop once refining can
+    no longer help instead of spending the rest of ``divmax`` budget.
 - **Breaking**: removed ``fixed_quadgk``, ``fixed_quadcc``, and ``fixed_quadts``,
   deprecated since v0.2.2. Use ``GaussKronrodRule``, ``ClenshawCurtisRule``, and
   ``TanhSinhRule`` instead, eg
@@ -114,6 +128,11 @@ v0.3.0
   where it amplifies the error rather than cancelling it. The convergence check and the
   reported ``err`` follow whichever estimate is in use, and the ``table`` returned by
   ``full_output`` then has only its first column filled.
+- ``romberg`` and ``rombergts`` take a new ``divmin`` argument, default 4. It sets what
+  refinement level the solver starts at (number of initial intervals = ``2**divmin``),
+  with the old behavior corresponding to ``divmin=0``. The new default is more efficient
+  on accelerators, and is generally more robust against false early termination, with a
+  small increase in cost on extremely simple integrands.
 - Packaging metadata moved from ``setup.py``/``setup.cfg`` into ``pyproject.toml``.
   Development dependencies are now declared as extras rather than in requirements
   files, so use ``pip install -e ".[dev]"`` (or the narrower ``test``, ``docs``, and

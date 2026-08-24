@@ -16,6 +16,40 @@ def _dot(w, f):
     return jnp.sum(w * f.T, axis=-1).T
 
 
+def _endpoint_mass(d0, d1, f0, f1):
+    """Mass of an integrand between an endpoint and the nearest node to it.
+
+    Models ``|f|`` as ``C * d**-p`` in the distance ``d`` from the endpoint, fits ``p``
+    to the two nodes nearest it, and integrates that model over the gap those nodes
+    leave, giving ``f0 * d0 / (1 - p)``.
+
+    An algebraic endpoint singularity is exactly this model, so the fit is the truth
+    there whatever ``p`` is, while the terms of the sum itself have not necessarily
+    started to fall by the time the nodes run out. A singularity mild enough to be
+    integrable always has an integrable model, and one that is not reports an unbounded
+    gap, which is the honest answer for an integrand with no finite integral.
+
+    On a singularity that is not a power of the distance the fitted exponent picks up
+    the local log-log slope, which for the logarithmic case comes out on the
+    conservative side.
+    """
+    ok = (f0 > 0) & (f1 > 0) & (d0 > 0) & (d1 > d0)
+    # The arguments are substituted rather than the result masked afterwards: outside
+    # ``ok`` they are zero or infinite, and the logarithm of either is a nan or carries
+    # an infinite derivative, both of which ``where`` propagates back through the good
+    # branch. The stand-ins are any pair giving an exponent safely below one.
+    #
+    # Taken as a difference of logarithms rather than the logarithm of a ratio, which
+    # is the same quantity but does not overflow when the second node happens to fall
+    # near a zero of the integrand and the ratio of the two is enormous.
+    lf0, lf1 = jnp.log(jnp.where(ok, f0, 2.0)), jnp.log(jnp.where(ok, f1, 1.0))
+    ld0, ld1 = jnp.log(jnp.where(ok, d0, 1.0)), jnp.log(jnp.where(ok, d1, 8.0))
+    exponent = (lf0 - lf1) / (ld1 - ld0)
+    integrable = ok & (exponent < 1)
+    safe = jnp.where(integrable, exponent, 0.0)
+    return jnp.where(integrable, f0 * d0 / (1 - safe), jnp.where(ok, jnp.inf, 0.0))
+
+
 class AbstractQuadratureRule(eqx.Module):
     """Abstract base class for 1D quadrature rules.
 
@@ -196,7 +230,8 @@ class NestedRule(AbstractQuadratureRule):
 
             halflength = (b - a) / 2
             center = (b + a) / 2
-            f: jax.Array = vfun(center + halflength * xh)
+            x = center + halflength * xh
+            f: jax.Array = vfun(x)
             # An integrand that upcasts internally is respected, so the accumulation
             # follows both the limits and the integrand. The weights are cast to the
             # *real* counterpart, which lets a complex integrand promote on its own.
@@ -293,6 +328,12 @@ class NestedRule(AbstractQuadratureRule):
                 jnp.maximum((eps * 50.0) * integral_abs, abserr),
                 abserr,
             )
+            # The nested pair only sees what the nodes span. A rule whose outermost
+            # node stops short of the endpoint has a second, independent shortfall
+            # that no comparison of the two rules can reveal, since both truncate at
+            # the same place, so it is summed rather than max of the two.
+            abserr = abserr + self._truncation(x, f, a, b)
+
             return result, self.norm(abserr), integral_abs, integral_mmn
 
         def truefun():
@@ -323,6 +364,33 @@ class NestedRule(AbstractQuadratureRule):
         f: jax.Array = vfun(center + halflength * xh)
         etype = _real_dtype(jnp.result_type(xtype, f.dtype))
         return _dot(wh_table.astype(etype), f) * halflength
+
+    def _truncation(self, x: jax.Array, f: jax.Array, a: float, b: float) -> jax.Array:
+        """Bound on the mass lying outside the span the rule's nodes cover.
+
+        Internal: the error estimate adds this to the one it gets from the nested
+        pair. Zero here, which is right for an interpolatory rule, whose weights
+        integrate the whole of ``[a, b]`` however its nodes are placed within it.
+        Subclasses that truncate an infinite sum instead override it; see
+        ``TanhSinhRule``.
+
+        Parameters
+        ----------
+        x : jax.Array
+            Abscissae of the high order rule, ordered from ``a`` to ``b``.
+        f : jax.Array
+            Integrand values at those abscissae, leading axis over the nodes.
+        a, b : float
+            Lower and upper limits of integration.
+
+        Returns
+        -------
+        trunc : jax.Array
+            Bound on the omitted mass, shaped like one value of the integrand.
+
+        """
+        del x, a, b
+        return jnp.zeros(f.shape[1:], _real_dtype(f.dtype))
 
     def norm(self, x: jax.Array) -> jax.Array:
         """Norm to use for measuring error for vector valued integrands."""
@@ -452,6 +520,12 @@ class TanhSinhRule(NestedRule):
     trusted on any integrand with structure, including peaked and endpoint-singular ones
     that the other rules handle at much lower order; halving the points of a
     doubly-exponential rule costs far more accuracy than halving a polynomial one.
+
+    The nodes stop short of the endpoints, leaving a sliver of the interval unsampled at
+    each end, and the reported error includes a bound on the mass out there. Comparing
+    the two rules cannot supply it, both of them stopping at the same place. The term is
+    at the level of roundoff on a bounded integrand and can be the whole of the error on
+    one singular at an endpoint.
     """
 
     _order: int
@@ -473,6 +547,55 @@ class TanhSinhRule(NestedRule):
         check_size(batch_size)
         self._batch_size = (
             None if batch_size is None else min(batch_size, len(self._xh))
+        )
+
+    def _truncation(self, x: jax.Array, f: jax.Array, a: float, b: float) -> jax.Array:
+        """Mass beyond the outermost node, charged at both ends.
+
+        The nodes stop at the last one still distinct from the endpoint, so the rule
+        never sees the sliver past it. That shortfall belongs to the map and not to
+        the order: raising the order refines the mesh in ``t`` without extending its
+        range, and the nested pair truncates in both rules at the same place, so the
+        comparison between them says nothing about it. On a bounded integrand it is
+        at the level of roundoff, and on one singular at an endpoint it can be the
+        whole error.
+
+        The pair fitted is taken from the outermost node the rule really used, which
+        is not always the end of the table. On a sub-interval whose endpoints are
+        large relative to its own width the outermost nodes round onto the endpoint
+        itself, an integrand singular there returns a non-finite value, and the
+        wrapper masks it away. Reading that as "no tail" is exactly backwards, it
+        being the case where the tail is largest. Such a node covers no sliver of its
+        own, so the fit steps over it to the first one still distinct from the
+        endpoint.
+
+        Only that case is stepped over, and not every value that came out zero: an
+        integrand that simply vanishes over a stretch of the interval would otherwise
+        send the search into the bulk, where the samples say nothing about the
+        endpoint.
+
+        The node the fit is taken against is the nearest one at a *different*
+        abscissa, which on a narrow sub-interval is not the adjacent one. The
+        clustering is doubly exponential while the representable points near an
+        endpoint are only linearly spaced, so a sub-interval whose width approaches
+        the endpoint's own ulp has many nodes sharing each point. A pair sitting at
+        one distance carries no slope, and taking it would drop the whole tail rather
+        than measure it.
+        """
+        mag = jnp.abs(f)
+        gone = ~jnp.any(mag > 0, axis=tuple(range(1, mag.ndim)))
+        n = x.shape[0]
+        first = jnp.argmin(gone & (x == a))
+        second = jnp.minimum(jnp.sum(x <= x[first]), n - 1)
+        last = n - 1 - jnp.argmin((gone & (x == b))[::-1])
+        penultimate = jnp.maximum(jnp.sum(x < x[last]) - 1, 0)
+        return _endpoint_mass(
+            jnp.abs(x[first] - a), jnp.abs(x[second] - a), mag[first], mag[second]
+        ) + _endpoint_mass(
+            jnp.abs(b - x[last]),
+            jnp.abs(b - x[penultimate]),
+            mag[last],
+            mag[penultimate],
         )
 
     def _nodes_weights(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array]:
