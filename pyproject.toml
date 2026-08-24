@@ -47,7 +47,6 @@ test = [
   "scipy >= 1.10.0, <= 1.17",
   "pytest >= 5.0.0, < 9.2",
   "pytest-cov >= 2.6, < 7.2",
-  "pytest-monitor < 1.7",
 ]
 docs = [
   "sphinx >= 3.0.0, < 9.2",
