@@ -38,6 +38,7 @@ from .problems import (
     complex_dtypes,
     exp_neg,
     problem_id,
+    quadcc_open,
     real_dtypes,
     real_of,
     solve_once,
@@ -48,7 +49,7 @@ from .problems import (
 config.update("jax_enable_x64", True)
 
 
-METHODS = [(quadgk, "gk"), (quadcc, "cc"), (quadts, "ts")]
+METHODS = [(quadgk, "gk"), (quadcc, "cc"), (quadcc_open, "cc-open"), (quadts, "ts")]
 
 
 def accelerates(method):

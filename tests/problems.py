@@ -29,7 +29,7 @@ import pytest
 import scipy.special
 from jax import config
 
-from quadax import STATUS
+from quadax import STATUS, quadcc
 
 config.update("jax_enable_x64", True)
 
@@ -847,6 +847,18 @@ def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
     return _SOLVED[key]
 
 
+def quadcc_open(*args, **kwargs):
+    """``quadcc`` using the open (Fejer-2) local rule.
+
+    A named function rather than a ``functools.partial`` because the tables below key
+    on ``__name__``, and the two variants of the rule have to be distinguishable there.
+    They are separate quadratures with their own sets of problems they can and cannot
+    solve, so the open one is swept in its own right rather than assumed to inherit the
+    closed rule's entries.
+    """
+    return quadcc(*args, closed=False, **kwargs)
+
+
 # Problems the routines do not reach the requested tolerance on, as (routine, problem)
 # pointing at the tolerances that fail. An entry says only that `assert_converged` does
 # not hold: the run did not report success, or reported it without the accuracy to back
@@ -889,8 +901,8 @@ def solve_once(method, i, tol, *, interval_as_array=False, **kwargs):
 # allowed the same number of sub-intervals as the default `max_ninter` the quadax runs
 # use. Where the note names tolerances, scipy fails at those and delivers at the others.
 #
-# 35 of the 44 convergence entries carry the note at one tolerance or more, and 2 of
-# the 5 dishonesty entries. That is the useful part of the annotation. An unmarked
+# 41 of the 50 convergence entries carry the note at one tolerance or more, and 3 of
+# the 7 dishonesty entries. That is the useful part of the annotation. An unmarked
 # entry is one where a widely used routine does solve the problem, so the shortfall is
 # quadax's; a marked one says the integrand is hard for the method rather than badly
 # implemented here, and `scipy.integrate.tanhsinh` failing on much the same set as
@@ -907,6 +919,12 @@ KNOWN_FAILURES = {
     ("quadcc", "osc-tail"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "sin-inverse"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "sqrt-tan"): {1e-4, 1e-8, 1e-12},
+    ("quadcc_open", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("quadcc_open", "loglog-cube"): {1e-4, 1e-8},  # scipy too
+    ("quadcc_open", "loglog-right"): {1e-4, 1e-8},  # scipy too
+    ("quadcc_open", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
+    ("quadcc_open", "osc-tail"): {1e-4, 1e-8},  # scipy too
+    ("quadcc_open", "sin-inverse"): {1e-4, 1e-8},  # scipy too
     ("quadgk", "loglog"): {1e-4, 1e-8},  # scipy too
     ("quadgk", "loglog-cube"): {1e-4, 1e-8},  # scipy too
     ("quadgk", "loglog-right"): {1e-4, 1e-8},  # scipy too
@@ -961,9 +979,19 @@ KNOWN_FAILURES = {
 # The one `quadts` entry left is dishonest by 1.07x, the estimate of the mass its map
 # leaves outside the range it integrates over being sharp enough to leave nothing over
 # for the rest of the error.
+#
+# The `quadcc_open` `exp-over-sqrt` entry is the acceleration's estimate rather than the
+# rule's: with `extrapolate=False` the open rule is honest on that problem at every
+# tolerance. It understates by 3.5x, and only over a narrow band of requested
+# tolerances, the ones the subdivision happens to stop at that mesh for. Either side of
+# the band the loop takes another level and the estimate covers the error again, so
+# which tolerances are listed is a property of where the run stops and may differ by
+# host in the way the marked entries above do.
 KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadcc", "loglog-cube"): {1e-4},  # scipy too
     ("quadcc", "sqrt-tan"): {1e-12},
+    ("quadcc_open", "exp-over-sqrt"): {1e-8},  # 3.5x, the acceleration's estimate
+    ("quadcc_open", "loglog-cube"): {1e-4},  # scipy too
     ("quadgk", "loglog"): {1e-4},  # host dependent
     ("quadgk", "loglog-cube"): {1e-4},  # scipy too
     ("quadts", "decay-line"): {1e-8},  # 1.07x, the tail estimate has no margin

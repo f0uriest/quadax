@@ -85,7 +85,19 @@ def quiet_tanhsinh():
 # Freeing the caches is not sufficient on its own. glibc keeps the freed pages on its
 # own free lists instead of returning them, so RSS - which is what a runner's memory
 # limit measures - only falls once malloc_trim hands them back.
-SWEEP_RSS_MB = 1500
+#
+# The trigger is a fraction of the memory this process is allowed rather than a fixed
+# size, because a sweep can only ever free the caches: whatever the interpreter, the
+# JAX build and its loaded libraries hold is a floor that RSS cannot go below. That
+# floor differs several fold across the JAX versions the suite is tested against, and
+# a threshold set anywhere near it degenerates - every test sweeps, none of them frees
+# anything, and the run pays both the sweep and the recompilation that follows it for
+# no reduction in the working set. Sizing the trigger against the machine keeps it
+# clear of the floor on any build that fits in memory at all.
+SWEEP_RSS_FRACTION = 0.25
+
+# Used when the memory available to the process cannot be determined.
+SWEEP_RSS_MB_DEFAULT = 4000
 
 # Used only when RSS cannot be read, so that the sweep still happens on platforms
 # without procfs.
@@ -102,6 +114,47 @@ def _rss_mb():
             return int(f.read().split()[1]) * _PAGE_SIZE / 1e6
     except OSError:
         return None
+
+
+def _memory_limit_mb():
+    """Memory this process may use in MB, or None where it cannot be determined.
+
+    A cgroup limit takes precedence over the machine's total memory, since inside a
+    container it is the limit that kills the process rather than exhausting the host.
+    """
+    limits = []
+    for path in (
+        "/sys/fs/cgroup/memory.max",  # cgroup v2
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",  # cgroup v1
+    ):
+        try:
+            with open(path) as f:
+                limits.append(int(f.read().strip()) / 1e6)
+        except (OSError, ValueError):
+            # No cgroup, or v2 spelling its absence of a limit as "max".
+            continue
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    limits.append(int(line.split()[1]) / 1e3)
+                    break
+    except (OSError, IndexError, ValueError):
+        pass
+
+    # An unlimited cgroup v1 reports a sentinel near the top of the address space
+    # rather than omitting the value, so discard anything implausibly large and let
+    # the machine total stand instead.
+    limits = [limit for limit in limits if 0 < limit < 1e9]
+    return min(limits) if limits else None
+
+
+_MEMORY_LIMIT_MB = _memory_limit_mb()
+SWEEP_RSS_MB = (
+    SWEEP_RSS_MB_DEFAULT
+    if _MEMORY_LIMIT_MB is None
+    else SWEEP_RSS_FRACTION * _MEMORY_LIMIT_MB
+)
 
 
 def _release_memory():

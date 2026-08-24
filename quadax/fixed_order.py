@@ -8,7 +8,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .quad_weights import get_cc_table, get_tanhsinh_table, gk_weights
+from .quad_weights import (
+    get_cc_table,
+    get_fejer2_table,
+    get_tanhsinh_table,
+    gk_weights,
+)
 from .utils import _real_dtype, check_size, tanhsinh_tmax, wrap_func
 
 
@@ -455,7 +460,8 @@ class ClenshawCurtisRule(NestedRule):
     Parameters
     ----------
     n : int
-        Order of integration scheme. Must be even.
+        Order of integration scheme. Must be a multiple of 4 with ``closed=True``, or
+        any even order of at least 4 with ``closed=False``.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -467,13 +473,25 @@ class ClenshawCurtisRule(NestedRule):
         does not divide the number of nodes leaves a remainder, which is evaluated
         together in one smaller batch, so the integrand is traced twice but never
         evaluated at more points than the rule has nodes.
+    closed : bool, optional
+        Whether the interval endpoints are among the nodes. The default closed rule uses
+        ``order + 1`` points and is exact to degree ``order``. The open (Fejer-2) rule
+        uses the same node family with the endpoints dropped, giving ``order - 1``
+        points exact to degree ``order - 1``, and never evaluates the integrand at ``a``
+        or ``b``. Both nest 2:1 against an embedded ``order // 2`` rule.
 
     Notes
     -----
     On integrands with an endpoint singularity the error estimate can under-state the
     true error, increasingly so at higher order, because the endpoint-clustered nodes
     make the two rules agree while neither has converged. An adaptive integration may
-    then report success while missing the requested tolerance.
+    then report success while missing the requested tolerance. This applies to both
+    variants; the clustering is a property of the node family, not of the endpoints.
+
+    Which is cheaper depends on the integrand. The closed rule wins on smooth, peaked
+    and oscillatory ones, by up to about a factor of two in evaluations; the open rule
+    wins on endpoint singularities and by a wide margin on infinite intervals whose
+    integrand decays algebraically.
     """
 
     def __init__(
@@ -481,10 +499,10 @@ class ClenshawCurtisRule(NestedRule):
         order: int = 32,
         norm: Callable | float | int = jnp.inf,
         batch_size: int | None = None,
+        closed: bool = True,
     ):
         self._norm = norm
-        order = 2 * (order // 2)  # make sure its even
-        xh, wh, wl = get_cc_table(order)
+        xh, wh, wl = (get_cc_table if closed else get_fejer2_table)(order)
         self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
         check_size(batch_size)
         self._batch_size = (
@@ -537,7 +555,7 @@ class TanhSinhRule(NestedRule):
         batch_size: int | None = None,
     ):
         self._norm = norm
-        self._order = 2 * (order // 2) + 1  # make sure its odd
+        self._order = order
         # The stored table is the one for the default dtype; `_nodes_weights` rebuilds
         # it whenever the quadrature actually runs at a different precision.
         xh, wh, wl = get_tanhsinh_table(
