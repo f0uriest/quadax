@@ -538,11 +538,16 @@ def wrap_func(
     xtype,
     batch_size: int | None = None,
     safe: bool = False,
+    ndim: int | None = None,
 ):
     """Vectorize, jit, and mask out inf/nan.
 
     ``xtype`` is the dtype the integrand will be called at, and the integrand is probed
     at that dtype rather than at a weakly typed default. See the note on ``MAPFUNS``.
+
+    ``ndim`` says what one abscissa looks like. ``None`` is a scalar, the 1D case. An
+    int is the length of the vector a cubature rule hands the integrand, which becomes
+    a core dimension of the vectorization rather than one of the axes looped over.
 
     ``batch_size`` bounds how many points the returned function evaluates at once. The
     default evaluates however many it is given.
@@ -562,27 +567,33 @@ def wrap_func(
     # differentiability rather than a request about how to evaluate it.
     if isinstance(fun, _WrappedFunction) and not args:
         return _WrappedFunction(
-            fun.fun, fun.args, fun.outsig, batch_size, safe or fun.safe
+            fun.fun, fun.args, fun.outsig, batch_size, safe or fun.safe, fun.ndim
         )
 
-    f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
+    xprobe = jnp.zeros(() if ndim is None else (ndim,), xtype)
+    f = jax.eval_shape(fun, xprobe, *args)
     # need to make sure we get the correct shape for array valued integrands
     outsig = "(" + ",".join("n" + str(i) for i in range(len(f.shape))) + ")"
 
-    return _WrappedFunction(fun, args, outsig, batch_size, safe)
+    return _WrappedFunction(fun, args, outsig, batch_size, safe, ndim)
 
 
-def _bad_abscissae(bad, x):
+def _bad_abscissae(bad, x, ncore=0):
     """Which abscissae the integrand cannot be linearized at.
 
     ``bad`` flags individual non-finite *values*, and carries the integrand's own axes
-    after ``x``'s. Those are collapsed here because where to linearize is a choice per
-    abscissa, not per component: every component of a vector valued integrand is
-    evaluated at the same point and differentiated with respect to the same parameters,
-    so one component blowing up is enough to poison the derivatives of the others
-    through the parameters they share.
+    after the ones ``x`` is looped over. Those are collapsed here because where to
+    linearize is a choice per abscissa, not per component: every component of a vector
+    valued integrand is evaluated at the same point and differentiated with respect to
+    the same parameters, so one component blowing up is enough to poison the derivatives
+    of the others through the parameters they share.
+
+    ``ncore`` is the rank of a single abscissa, so the trailing ``ncore`` axes of ``x``
+    are part of one point rather than axes to loop over. The result is shaped like the
+    axes that are looped over.
     """
-    return jnp.any(jnp.reshape(bad, jnp.shape(x) + (-1,)), axis=-1)
+    loopshape = jnp.shape(x)[: jnp.ndim(x) - ncore]
+    return jnp.any(jnp.reshape(bad, loopshape + (-1,)), axis=-1)
 
 
 class _WrappedFunction(eqx.Module):
@@ -607,24 +618,36 @@ class _WrappedFunction(eqx.Module):
     outsig: str
     batch_size: int | None = None
     safe: bool = eqx.field(static=True, default=False)
+    ndim: int | None = eqx.field(static=True, default=None)
+
+    @property
+    def _ncore(self) -> int:
+        """Rank of a single abscissa: 0 for a scalar, 1 for a point in ``ndim`` axes."""
+        return 0 if self.ndim is None else 1
 
     def _vectorize(self, x: jax.Array) -> jax.Array:
         return jnp.vectorize(
             self.fun,
             excluded=tuple(range(1, len(self.args) + 1)),
-            signature="()->" + self.outsig,
+            signature=("()" if self.ndim is None else "(d)") + "->" + self.outsig,
         )(x, *self.args)
 
     def _evaluate(self, x: jax.Array) -> jax.Array:
         """The integrand at every point of ``x``, in batches, without any masking."""
         b = self.batch_size
-        # A scalar abscissa has nothing to batch: Romberg calls the integrand one point
-        # at a time, and every caller probes it with a scalar under eval_shape.
-        if b is None or x.ndim == 0 or x.shape[0] <= b:
+        # A single abscissa has nothing to batch: Romberg calls the integrand one point
+        # at a time, and every caller probes it with one point under eval_shape. That is
+        # ``x.ndim == 0`` for a scalar abscissa and ``x.ndim == 1`` for a vector one,
+        # which is what makes the test the core rank rather than zero.
+        if b is None or x.ndim == self._ncore or x.shape[0] <= b:
             return self._vectorize(x)
         n = x.shape[0]
         nfull = n // b
-        full = jax.lax.map(self._vectorize, x[: nfull * b].reshape(nfull, b))
+        # ``x.shape[1:]`` is empty for a scalar abscissa and ``(ndim,)`` for a vector
+        # one, so the split is along the looped axis either way.
+        full = jax.lax.map(
+            self._vectorize, x[: nfull * b].reshape(nfull, b, *x.shape[1:])
+        )
         parts = [full.reshape(-1, *full.shape[2:])]
         if n % b:
             parts.append(self._vectorize(x[nfull * b :]))
@@ -641,14 +664,18 @@ class _WrappedFunction(eqx.Module):
         # itself linearized.
         probe: jax.Array = jax.lax.stop_gradient(self._evaluate(x))
         bad = ~jnp.isfinite(probe)
-        bad_x = _bad_abscissae(bad, x)
+        bad_x = _bad_abscissae(bad, x, self._ncore)
         # Linearize at an abscissa the integrand was just seen to be finite at. Taking
         # one from the same set rather than some fixed point is what keeps this from
         # walking into the singularity: any fixed choice (the midpoint of the domain,
         # say) is itself the singularity for some integrand. Only finiteness matters,
         # since whatever it evaluates to there is masked back out.
         good = ~jnp.reshape(bad_x, (-1,))
-        substitute = jnp.reshape(x, (-1,))[jnp.argmax(good)]
+        # Flattened to one row per abscissa, so a row *is* a point: a scalar for a 1D
+        # rule, a length ``ndim`` vector for a cubature one.
+        substitute = jnp.reshape(x, (-1, *x.shape[x.ndim - self._ncore :]))[
+            jnp.argmax(good)
+        ]
         # With no finite abscissa there is nothing to borrow, and every value is masked
         # to zero regardless, so the second evaluation is skipped rather than made at a
         # substitute that is itself singular. Skipping it is the point: the derivative
@@ -661,7 +688,9 @@ class _WrappedFunction(eqx.Module):
             unvmap_any(jnp.any(good)),
             lambda x_: self._evaluate(x_),
             lambda _: jnp.zeros(probe.shape, probe.dtype),
-            jnp.where(bad_x, substitute, x),
+            jnp.where(
+                jnp.reshape(bad_x, bad_x.shape + (1,) * self._ncore), substitute, x
+            ),
         )
         # Where the integrand was finite this is the ordinary evaluation, unchanged. At
         # a bad abscissa the value comes from the probe, so a vector valued integrand
@@ -670,7 +699,9 @@ class _WrappedFunction(eqx.Module):
         # is what is given up: the probe is a constant, so those components contribute
         # nothing to the tangent. That trades one abscissa's contribution to the
         # derivative for a derivative that exists at all.
-        mask = jnp.reshape(bad_x, jnp.shape(bad_x) + (1,) * (jnp.ndim(f) - jnp.ndim(x)))
+        mask = jnp.reshape(
+            bad_x, jnp.shape(bad_x) + (1,) * (jnp.ndim(f) - jnp.ndim(bad_x))
+        )
         return jnp.where(bad, 0.0, jnp.where(mask, probe, f))
 
 

@@ -1,6 +1,8 @@
 """Quadrature nodes and weights."""
 
 import functools
+import itertools
+from fractions import Fraction
 
 import numpy as np
 
@@ -901,3 +903,365 @@ def get_tanhsinh_table(order: int, tmax: float):
     wh *= 2 / wh.sum()
     wl *= 2 / wl.sum()
     return xh, wh, wl
+
+
+def _even_classes(degree: int, ndim: int):
+    """Representative exponent vectors of the fully symmetric monomial classes.
+
+    A fully symmetric rule integrates every monomial with an odd exponent exactly,
+    both sides being zero by cancellation, so only the even ones constrain the weights.
+    Permuting a monomial's exponents does not give a new constraint either, the rule
+    being symmetric under exactly those permutations. What is left is the partitions of
+    each even total degree into at most ``ndim`` even parts, one representative apiece.
+    """
+    out = []
+
+    def rec(remaining, largest, current):
+        out.append(tuple(current))
+        for part in range(min(remaining, largest), 1, -2):
+            if len(current) < ndim:
+                rec(remaining - part, part, current + [part])
+
+    rec(degree - degree % 2, degree, [])
+    return sorted(set(out))
+
+
+def _distinct_permutations(padded):
+    """The distinct arrangements of a multiset.
+
+    Generated directly rather than by filtering all ``len(padded)!`` orderings, which
+    is what an orbit of a rule in more than a handful of dimensions would otherwise
+    cost: a pattern with few active coordinates has very few distinct arrangements but
+    factorially many orderings.
+    """
+    values = sorted(set(padded), key=repr)
+    counts = [padded.count(v) for v in values]
+    out = []
+
+    def rec(current):
+        if len(current) == len(padded):
+            out.append(tuple(current))
+            return
+        for i, value in enumerate(values):
+            if counts[i]:
+                counts[i] -= 1
+                rec(current + [value])
+                counts[i] += 1
+
+    rec([])
+    return out
+
+
+def _moment_system(orbits, ndim: int, degree: int):
+    """The equations a fully symmetric rule of the given degree has to satisfy.
+
+    One equation per monomial class and one unknown per orbit, since every node of an
+    orbit carries the same weight. Built over the rationals: the equations involve only
+    even powers of the coordinates, whose squares are exact, so the whole system is
+    exact and its solution is the weights with no rounding anywhere.
+    """
+    mat, rhs = [], []
+    for alpha in _even_classes(degree, ndim):
+        exponents = tuple(alpha) + (0,) * (ndim - len(alpha))
+        # Integral of the monomial over the cube, the product of 2/(k+1) over exponents.
+        value = Fraction(1)
+        for e in exponents:
+            value *= Fraction(2, e + 1)
+        rhs.append(value)
+        row = []
+        for orbit in orbits:
+            total = Fraction(0)
+            for point, count in orbit.items():
+                term = Fraction(count)
+                for v, e in zip(point, exponents):
+                    term *= v ** (e // 2)
+                total += term
+            row.append(total)
+        mat.append(row)
+    return mat, rhs
+
+
+def _orbit_weights(orbits, ndim: int, degree: int):
+    """Weights making a fully symmetric rule exact to ``degree``, and the residual.
+
+    The system is overdetermined, there being more monomial classes than orbits, and is
+    consistent only because the generators were chosen to make it so. So it is solved
+    rather than fitted: the weights come from as many equations as there are unknowns
+    and the rest are left over, and the residual reports how far those are from being
+    satisfied. Being exact arithmetic the residual is zero for the right generators and
+    nonzero for any others, which is what lets the caller check a table it has just
+    built rather than trust the constants behind it.
+    """
+    mat, rhs = _moment_system(orbits, ndim, degree)
+    nrow, ncol = len(mat), len(orbits)
+    aug = [list(row) + [b] for row, b in zip(mat, rhs)]
+    pivots: list[int] = []
+    # gaussian elimination using exact int/fractions to avoid roundoff due to ill
+    # conditioning. Still very fast (<0.2s for ndim=10)
+    for col in range(ncol):
+        sel = next((i for i in range(len(pivots), nrow) if aug[i][col]), None)
+        if sel is None:
+            continue
+        row = len(pivots)
+        aug[row], aug[sel] = aug[sel], aug[row]
+        aug[row] = [x / aug[row][col] for x in aug[row]]
+        for i in range(nrow):
+            if i != row and aug[i][col]:
+                factor = aug[i][col]
+                aug[i] = [x - factor * y for x, y in zip(aug[i], aug[row])]
+        pivots.append(col)
+    errorif(
+        len(pivots) < ncol,
+        RuntimeError,
+        f"The moment equations for ndim={ndim}, degree={degree} do not determine the "
+        f"weights: {len(pivots)} independent equations for {ncol} orbits. Two orbits "
+        "would have to coincide for that, so the generators are not distinct.",
+    )
+    weights = [Fraction(0)] * ncol
+    for r, col in enumerate(pivots):
+        weights[col] = aug[r][ncol]
+    residual = max(
+        (abs(aug[i][ncol]) for i in range(len(pivots), nrow)), default=Fraction(0)
+    )
+    return weights, residual
+
+
+def _fs_orbit(lam, ndim: int):
+    """Every point reachable from ``lam`` by permuting and flipping coordinates.
+
+    ``lam`` gives the generators carried by the active coordinates, shortest first, and
+    is padded with zeros out to ``ndim``. Zero coordinates take no sign, so the orbit is
+    the set of distinct points rather than a product of all sign choices.
+    """
+    padded = tuple(lam) + (0.0,) * (ndim - len(lam))
+    points = set()
+    for perm in _distinct_permutations(padded):
+        signs = itertools.product(*[(1.0, -1.0) if v else (1.0,) for v in perm])
+        points.update(tuple(s * v for s, v in zip(sign, perm)) for sign in signs)
+    return np.array(sorted(points), dtype=float).reshape(-1, ndim)
+
+
+def _fs_orbit_squares(lam2, ndim: int):
+    """The same orbit as squared coordinates, with the sign changes collapsed.
+
+    Only even powers of the coordinates appear in the moment equations, so a node and
+    its sign changes contribute alike and are carried as one point with a multiplicity.
+    """
+    padded = tuple(lam2) + (Fraction(0),) * (ndim - len(lam2))
+    return {
+        perm: 2 ** sum(1 for v in perm if v) for perm in _distinct_permutations(padded)
+    }
+
+
+def _fs_partitions(m: int, ndim: int):
+    """Partitions of the integers ``0`` through ``m`` into at most ``ndim`` parts.
+
+    One partition per orbit of the rule. Its parts index the generators the orbit's
+    active coordinates carry, so a partition and the generator sequence together name
+    an orbit. Written nonincreasing, since a partition and its rearrangements generate
+    the same fully symmetric orbit.
+    """
+    out = []
+
+    def rec(remaining, largest, current):
+        out.append(tuple(current))
+        for part in range(min(remaining, largest), 0, -1):
+            if len(current) < ndim:
+                rec(remaining - part, part, current + [part])
+
+    rec(m, m, [])
+    return sorted(set(out))
+
+
+def _esym(values, k: int):
+    """``k``-th elementary symmetric polynomial of ``values``."""
+    if k < 0 or k > len(values):
+        return Fraction(0)
+    return sum(
+        functools.reduce(lambda a, b: a * b, c, Fraction(1))
+        for c in itertools.combinations(values, k)
+    )
+
+
+def _fs_generators(nlam: int, delta2: Fraction):
+    """Squared generators of the imbedded fully symmetric family, ``delta`` aside.
+
+    The whole family follows from the single free generator ``delta``. Requiring the
+    rule to integrate exactly the polynomial vanishing at the first ``p`` generators
+    gives one equation per index, and that equation is linear in the newest squared
+    generator given the ones before it, so the sequence unrolls by substitution. Solved
+    over the rationals because the generators come out rational in ``delta**2`` and
+    rounding them would move nodes off the moment equations they are meant to satisfy.
+    """
+    lam2: list[Fraction] = []
+    for p in range(2, nlam + 2):
+        rhs = Fraction(1, 3**p)
+        for prev in lam2:
+            rhs *= 1 - prev / delta2
+        const = sum(
+            (-1) ** k * _esym(lam2, k) / (2 * (p - k) + 1) for k in range(p - 1)
+        )
+        coef = sum(
+            (-1) ** k * _esym(lam2, k - 1) / (2 * (p - k) + 1) for k in range(1, p)
+        )
+        lam2.append((rhs - const) / (coef + rhs / delta2))
+    return lam2
+
+
+# The free constant of the family, per degree. Every generator, and through it every
+# node and weight, follows from this one number, so it is the only constant here that
+# was chosen rather than derived.
+#
+# Each degree needs one more generator than the one below it, and the sequence a given
+# delta produces eventually leaves the cube, so no single value serves every degree.
+# 9/19 is the classical Genz-Malik choice, reproducing the rule of [1]_ exactly, and its
+# generators stay inside the cube through degree 11; at degree 13 the next one lands
+# outside, where the rule would sample beyond the region it is integrating over. Degree
+# 13 therefore takes the value tabulated in [2]_, whose sequence reaches one generator
+# further.
+#
+# The degrees are free to disagree because nothing passes between them. Each table is
+# built on its own, and the error estimate comes from an embedded rule sharing that
+# table's nodes rather than from the rule of any other degree.
+_FS_DELTA2 = {
+    7: Fraction(9, 19),
+    9: Fraction(9, 19),
+    11: Fraction(9, 19),
+    13: Fraction(4707, 10000),
+}
+
+GENZ_MALIK_DEGREES = tuple(sorted(_FS_DELTA2))
+
+
+@functools.lru_cache
+def get_genz_malik_table(ndim: int, degree: int = 7):
+    """Genz-Malik cubature nodes and weights, built in float64 on the host.
+
+    A fully symmetric rule on the reference cube ``[-1, 1]**ndim``, of the given
+    polynomial degree, with an embedded rule two degrees lower sharing its nodes. In
+    numpy rather than with ``jnp`` ops so that the table does not inherit whatever the
+    JAX default dtype happens to be.
+
+    The weights are solved for from the moment equations rather than transcribed, and
+    the residual of that solve is checked here. Only the generators are constants, so a
+    wrong one shows up as a residual far above machine epsilon and raises, rather than
+    quietly producing a rule of lower degree than it claims.
+
+    Parameters
+    ----------
+    ndim : int
+        Dimension of the cube. Must be at least 2.
+    degree : int
+        Polynomial degree of the rule, one of ``GENZ_MALIK_DEGREES``.
+
+    Returns
+    -------
+    xh : ndarray, shape(npts, ndim)
+        Nodes on the reference cube.
+    wh : ndarray, shape(npts,)
+        Weights of the degree ``degree`` rule.
+    wl : ndarray, shape(npts,)
+        Weights of the embedded degree ``degree - 2`` rule, zero on the nodes it does
+        not use.
+    wsplit : ndarray, shape(ndim, npts)
+        Row ``k`` combines the nodes along axis ``k`` into a fourth difference; see
+        Notes.
+
+    Notes
+    -----
+    The nodes fall into fully symmetric orbits: the center, one orbit per partition
+    of the degree into generators, and the corners. Degree 7 has five orbits and
+    ``2**ndim + 2*ndim**2 + 2*ndim + 1`` nodes; each higher degree adds orbits with
+    more coordinates active at once, and the count grows quickly with both degree and
+    dimension. The embedded rule uses every orbit but the corners.
+
+    The generators are not transcribed but solved for, from the one free parameter of
+    the family, following [2]_. That parameter is chosen per degree, as the generators
+    a given value produces stay inside the cube only so far.
+
+    Each row of ``wsplit`` is the second difference along one axis at the two scales the
+    axis orbits provide, combined so the two agree on any quadratic. What is left
+    corresponds to the fourth derivative along that axis, which is what makes it a
+    measure of where a region is worth cutting rather than of how large the integral is.
+    The rows sum to zero, so a constant registers as nothing at all.
+
+    References
+    ----------
+    .. [1] A. C. Genz, A. A. Malik. "An adaptive algorithm for numerical integration
+           over an N-dimensional rectangular region". Journal of Computational and
+           Applied Mathematics, vol. 6, no. 4, 1980, pp. 295-302.
+           doi:10.1016/0771-050X(80)90039-X
+    .. [2] A. C. Genz, A. A. Malik. "An imbedded family of fully symmetric numerical
+           integration rules". SIAM Journal on Numerical Analysis, vol. 20, no. 3,
+           1983, pp. 580-588. doi:10.1137/0720040
+
+    """
+    errorif(
+        ndim < 2,
+        ValueError,
+        f"Genz-Malik rules need ndim of at least 2, got ndim={ndim}. For one dimension "
+        "use a rule from quadax.fixed_order, such as GaussKronrodRule.",
+    )
+    errorif(
+        degree not in GENZ_MALIK_DEGREES,
+        NotImplementedError,
+        f"degree {degree} is not implemented, should be one of "
+        f"{list(GENZ_MALIK_DEGREES)}.",
+    )
+
+    # The orbits of the imbedded family: one per partition, plus the corner orbit at
+    # delta that raises the degree the last two. Only delta is chosen; the generators
+    # and then the weights are solved for below and checked against the moments.
+    m = (degree - 1) // 2
+    delta2 = _FS_DELTA2[degree]
+    squares = [Fraction(0)] + _fs_generators(m - 1, delta2)
+    patterns = _fs_partitions(m - 1, ndim)
+    lam = [float(v) ** 0.5 for v in squares]
+
+    # The same orbits twice over: as nodes, and as the squared coordinates the moment
+    # equations see. Both come from one generator list so the two cannot drift apart.
+    orbits = [_fs_orbit([lam[j] for j in p], ndim) for p in patterns]
+    orbits.append(_fs_orbit([float(delta2) ** 0.5] * ndim, ndim))
+    exact = [_fs_orbit_squares([squares[j] for j in p], ndim) for p in patterns]
+    exact.append(_fs_orbit_squares([delta2] * ndim, ndim))
+
+    wh_orbit, res_h = _orbit_weights(exact, ndim, degree)
+    # The embedded rule is the same node set minus the corners, so its weights solve the
+    # same equations two degrees lower over one orbit fewer.
+    wl_orbit, res_l = _orbit_weights(exact[:-1], ndim, degree - 2)
+    errorif(
+        max(res_h, res_l) != 0,
+        RuntimeError,
+        f"The Genz-Malik generators for ndim={ndim}, degree={degree} do not satisfy "
+        f"the moment equations, leaving residuals {res_h} and {res_l}. The arithmetic "
+        "here is exact, so a nonzero residual means the generators are wrong and the "
+        "rule would not have the degree it claims.",
+    )
+
+    sizes = [len(o) for o in orbits]
+    xh = np.concatenate(orbits)
+    wh = np.repeat([float(w) for w in wh_orbit], sizes)
+    wl = np.repeat([float(w) for w in wl_orbit] + [0.0], sizes)
+
+    # Fourth difference along each axis, as weights on the nodes it reads. The ratio is
+    # what makes the two scales cancel on a quadratic: the second difference at the
+    # first generator picks up its square, the one at the second picks up theirs, so
+    # scaling by their ratio makes the two agree there and leaves the quartic behind.
+    #
+    # The two generators used are the ones every member of the family shares, so the
+    # difference is the same operator whatever the degree. The nodes are located by
+    # value rather than by position, the orbits having no reason to be laid out in any
+    # particular order.
+    index = {tuple(map(float, x)): i for i, x in enumerate(xh)}
+    ratio = float(squares[2] / squares[1])
+    wsplit = np.zeros((ndim, len(xh)))
+    center = np.zeros(ndim)
+    for k in range(ndim):
+        wsplit[k, index[tuple(center)]] = -2.0 * (1.0 - ratio)
+        for sign in (1.0, -1.0):
+            for j, weight in ((2, 1.0), (1, -ratio)):
+                node = np.zeros(ndim)
+                node[k] = sign * lam[j]
+                wsplit[k, index[tuple(node)]] = weight
+
+    return xh, wh, wl, wsplit

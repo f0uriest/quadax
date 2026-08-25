@@ -18,7 +18,8 @@ from .utils import _real_dtype, check_size, errorif, tanhsinh_tmax, wrap_func
 
 
 def _dot(w, f):
-    return jnp.sum(w * f.T, axis=-1).T
+    """Contract the node axis of ``f`` against a weight per node."""
+    return jnp.einsum("n,n...->...", w, f)
 
 
 def _endpoint_mass(d0, d1, f0, f1):
