@@ -37,7 +37,7 @@ classifiers = [
 ]
 dependencies = [
   "equinox >= 0.11.0, < 0.14",
-  "jax >= 0.5.0, < 0.11",
+  "jax >= 0.5.0, < 0.12",
   "numpy >= 1.20.0, < 2.5",
 ]
 dynamic = ["version"]
