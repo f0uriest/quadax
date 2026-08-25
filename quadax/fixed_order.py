@@ -161,7 +161,7 @@ class NestedRule(AbstractQuadratureRule):
 
     Nested rules consist of a set of nodes (xh) and weights (wh) for a high order rule,
     along with an additional set of weights (wl) for a lower order rule that shares
-    nodes with the high order rule.
+    nodes with the high order rule [1]_.
 
     Notes
     -----
@@ -431,8 +431,8 @@ class GaussKronrodRule(NestedRule):
 
     Parameters
     ----------
-    order : {15, 21, 31, 41, 51, 61}
-        Order of integration scheme.
+    order : int
+        Order of integration scheme, one of 15, 21, 31, 41, 51, 61.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -478,7 +478,7 @@ class ClenshawCurtisRule(NestedRule):
 
     Parameters
     ----------
-    n : int
+    order : int
         Order of integration scheme. Must be a multiple of 4 with ``closed=True``, or
         any even order of at least 4 with ``closed=False``.
     norm : int, callable

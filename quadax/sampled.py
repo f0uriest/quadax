@@ -54,54 +54,6 @@ def trapezoid(
         then the result is a float. If `n` is greater than 1, then the result
         is an `n`-1 dimensional array.
 
-    Examples
-    --------
-    Use the trapezoidal rule on evenly spaced points:
-
-    >>> import jax.numpy as jnp
-    >>> from quadax import trapezoid
-    >>> trapezoid([1, 2, 3])
-    4.0
-
-    The spacing between sample points can be selected by either the
-    ``x`` or ``dx`` arguments:
-
-    >>> trapezoid([1, 2, 3], x=[4, 6, 8])
-    8.0
-    >>> trapezoid([1, 2, 3], dx=2)
-    8.0
-
-    Using a decreasing ``x`` corresponds to integrating in reverse:
-
-    >>> trapezoid([1, 2, 3], x=[8, 6, 4])
-    -8.0
-
-    More generally ``x`` is used to integrate along a parametric curve. We can
-    estimate the integral :math:`\int_0^1 x^2 = 1/3` using:
-
-    >>> x = jnp.linspace(0, 1, num=50)
-    >>> y = x**2
-    >>> trapezoid(y, x)
-    0.33340274885464394
-
-    Or estimate the area of a circle, noting we repeat the sample which closes
-    the curve:
-
-    >>> theta = jnp.linspace(0, 2 * np.pi, num=1000, endpoint=True)
-    >>> trapezoid(jnp.cos(theta), x=jnp.sin(theta))
-    3.141571941375841
-
-    ``trapezoid`` can be applied along a specified axis to do multiple
-    computations in one call:
-
-    >>> a = jnp.arange(6).reshape(2, 3)
-    >>> a
-    array([[0, 1, 2],
-           [3, 4, 5]])
-    >>> trapezoid(a, axis=0)
-    array([1.5, 2.5, 3.5])
-    >>> trapezoid(a, axis=1)
-    array([2.,  8.])
     """
     if x is None:
         y_arr, dx_array = jnp.asarray(y), jnp.asarray(dx)
@@ -150,18 +102,6 @@ def cumulative_trapezoid(
         If `initial` is None, the shape is such that the axis of integration
         has one less value than `y`. If `initial` is given, the shape is equal
         to that of `y`.
-
-    Examples
-    --------
-    >>> from quadax import cumulative_trapezoid
-    >>> import jax.numpy as jnp
-    >>> import matplotlib.pyplot as plt
-
-    >>> x = jnp.linspace(-2, 2, num=20)
-    >>> y = x
-    >>> y_int = cumulative_trapezoid(y, x, initial=0)
-    >>> plt.plot(x, y_int, 'ro', x, y[0] + 0.5 * x**2, 'b-')
-    >>> plt.show()
 
     """
     y = jnp.asarray(y)

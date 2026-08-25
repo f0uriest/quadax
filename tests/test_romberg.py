@@ -4,8 +4,10 @@ These live apart from the adaptive solvers because ``extrapolate`` means somethi
 different here. On ``romberg`` it selects Richardson extrapolation, and turning it off
 leaves plain trapezoidal quadrature rather than a tuned version of the same method; on
 the adaptive routines it is Wynn's epsilon algorithm over the running totals, layered
-on a rule that converges without it. Romberg also takes ``divmax`` where they take
-``max_ninter``, and rejects breakpoints outright.
+on a rule that converges without it. ``tanhsinh`` shares the same halving schedule but
+takes no such flag, the extrapolation having nothing to fit on a mesh that already
+converges exponentially. All three take ``divmax`` where the adaptive routines take
+``max_ninter``, and reject breakpoints outright.
 """
 
 import jax
@@ -14,15 +16,15 @@ import numpy as np
 import pytest
 from jax import config
 
-from quadax import STATUS, romberg, rombergts
+from quadax import STATUS, romberg, rombergts, tanhsinh
 
 from .problems import (
     NO_BREAKPOINTS,
     PROBLEMS,
     RICHARDSON_MODEL,
     ROMBERG_CONVERGES,
-    ROMBERGTS_CONVERGES,
     SMOOTH_FINITE,
+    TANHSINH_CONVERGES,
     TOLS,
     ULP_ATOL,
     ULP_RTOL,
@@ -36,13 +38,13 @@ from .problems import (
 
 config.update("jax_enable_x64", True)
 
-METHODS = [romberg, rombergts]
+METHODS = [romberg, tanhsinh]
 METHOD_IDS = ["romberg", "ts"]
 
 # Which problems each variant is expected to solve. Unlike the adaptive routines there
 # is no setting under which Romberg solves the whole suite, so the claim is made per
 # method rather than keyed off a flag.
-EXPECTED_TO_CONVERGE = {romberg: ROMBERG_CONVERGES, rombergts: ROMBERGTS_CONVERGES}
+EXPECTED_TO_CONVERGE = {romberg: ROMBERG_CONVERGES, tanhsinh: TANHSINH_CONVERGES}
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
@@ -80,8 +82,8 @@ class TestRichardsonFlag:
 
     Romberg's method *is* the trapezoidal rule plus Richardson, so this flag turns it
     into something else rather than merely tuning it: the same nodes and the same
-    halving schedule, reading the un-extrapolated column. The two methods want opposite
-    things from it, which is why it is a flag and not a fixed choice.
+    halving schedule, reading the un-extrapolated column. Only :func:`~quadax.romberg`
+    carries the flag.
 
     ``divmax`` is well below the default here so the plain mode is affordable to test.
     Without extrapolation the trapezoidal rule needs O(h**2) refinement, so its
@@ -132,25 +134,7 @@ class TestRichardsonFlag:
             assert err_on < err_off, f"problem {i}: {err_on:.2e} vs {err_off:.2e}"
             assert neval_on < neval_off, f"problem {i}"
 
-    def test_tanh_sinh_gains_nothing_from_richardson(self):
-        """On tanh-sinh it is at best neutral, and usually just costs evaluations.
-
-        The rule already converges doubly exponentially, so there is no expansion in
-        powers of the step for Richardson to cancel. Measured over the suite it helps
-        nothing, is slightly worse on a few problems, and reaches the same accuracy in
-        fewer evaluations on around half of them.
-        """
-        for i in NO_BREAKPOINTS:
-            _, err_on, _, _ = self._run(rombergts, i, True)
-            _, err_off, _, _ = self._run(rombergts, i, False)
-            floor = 1e-14 * max(np.max(np.abs(np.asarray(PROBLEMS[i]["val"]))), 1)
-            assert err_off <= max(10 * err_on, floor), (
-                f"problem {i}: turning extrapolation off made it worse, "
-                f"{err_off:.2e} vs {err_on:.2e}"
-            )
-
-    @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
-    def test_the_flag_does_not_change_the_table_shape(self, method):
+    def test_the_flag_does_not_change_the_table_shape(self):
         """``full_output`` keeps its contract either way, column 0 always filled.
 
         The two settings do not generally stop at the same level (they are comparing
@@ -162,7 +146,7 @@ class TestRichardsonFlag:
         prob = PROBLEMS[0]
         tables = {}
         for extrapolate in (False, True):
-            _, info = method(
+            _, info = romberg(
                 prob["fun"],
                 jnp.asarray(prob["interval"], float),
                 epsabs=self.TOL,
@@ -187,6 +171,63 @@ class TestRichardsonFlag:
         np.testing.assert_allclose(
             columns[0][:depth], columns[1][:depth], rtol=ULP_RTOL, atol=ULP_ATOL
         )
+
+
+class TestDeprecatedRombergts:
+    """The deprecated ``rombergts`` alias.
+
+    Kept only so existing callers keep working while they move to
+    :func:`~quadax.tanhsinh`, so what is checked is that it warns and that it is still
+    the same computation, not anything about the quadrature itself.
+    """
+
+    def test_it_warns(self):
+        """Calling it at all is what the warning is for."""
+        with pytest.warns(DeprecationWarning, match="tanhsinh"):
+            rombergts(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]))
+
+    def test_it_warns_every_time(self):
+        """The warning sits outside the jit, so a second call is not silent.
+
+        A warning raised while tracing would fire once per compilation and then never
+        again, which is exactly the caller who would miss it.
+        """
+        for _ in range(2):
+            with pytest.warns(DeprecationWarning, match="tanhsinh"):
+                rombergts(PROBLEMS[0]["fun"], jnp.array([0.0, 1.0]))
+
+    @pytest.mark.parametrize("i", [0, 4, 10], ids=problem_id)
+    def test_matches_tanhsinh_without_extrapolation(self, i):
+        """``tanhsinh`` is this routine with the extrapolation off, exactly."""
+        prob = PROBLEMS[i]
+        interval = jnp.asarray(prob["interval"], float)
+        y_new, info_new = tanhsinh(prob["fun"], interval)
+        with pytest.warns(DeprecationWarning):
+            y_old, info_old = rombergts(prob["fun"], interval, extrapolate=False)
+        np.testing.assert_array_equal(np.asarray(y_new), np.asarray(y_old))
+        np.testing.assert_array_equal(
+            np.asarray(info_new.err), np.asarray(info_old.err)
+        )
+        assert int(info_new.neval) == int(info_old.neval)
+
+    def test_full_output_drops_the_unused_columns(self):
+        """``tanhsinh`` hands back the levels, not the square table.
+
+        Without extrapolation every column but the first is zero, so the table is
+        mostly padding; the levels are the part a caller can use.
+        """
+        prob = PROBLEMS[0]
+        interval = jnp.asarray(prob["interval"], float)
+        _, info_new = tanhsinh(prob["fun"], interval, full_output=True, divmax=8)
+        with pytest.warns(DeprecationWarning):
+            _, info_old = rombergts(
+                prob["fun"], interval, full_output=True, divmax=8, extrapolate=False
+            )
+        table = np.asarray(info_old.info)
+        levels = np.asarray(info_new.info)
+        assert levels.shape == (9,)
+        assert table.shape == (9, 9)
+        np.testing.assert_array_equal(levels, table[:, 0])
 
 
 @pytest.mark.parametrize("method", METHODS, ids=METHOD_IDS)
@@ -249,6 +290,16 @@ class TestBatchSize:
             total += -(-(2**level) // b) * b
         raise AssertionError(f"neval={int(info.neval)} matches no depth at b={b}")
 
+    @staticmethod
+    def _levels(method, info):
+        """The trapezoidal estimate at each level, however the routine hands it back.
+
+        ``romberg`` returns the whole Richardson table, whose first column holds those
+        values; ``tanhsinh`` extrapolates nothing and returns the column itself.
+        """
+        table = np.asarray(info.info)
+        return table[:, 0] if method is romberg else table
+
     def _assert_matches_serial(self, method, i, batch_size):
         """At the same depth, batching changes only the rounding of the sums.
 
@@ -268,7 +319,7 @@ class TestBatchSize:
         np.testing.assert_allclose(
             np.asarray(got), np.asarray(want), rtol=1e-11, atol=1e-13
         )
-        columns = [np.asarray(o.info)[:, 0] for o in (got_info, want_info)]
+        columns = [self._levels(method, o) for o in (got_info, want_info)]
         depth = min(self._depth(got_info, batch_size), self._depth(want_info, None))
         assert depth > 1, "neither run filled the trapezoidal column"
         np.testing.assert_allclose(
@@ -561,7 +612,7 @@ def test_divmin_above_divmax_rejected(method):
         # Below what the arithmetic can deliver, however many levels remain.
         (romberg, jnp.exp, 1e-17, 20, "roundoff"),
         # Below what the map's own tail leaves outside the abscissae.
-        (rombergts, lambda t: t**-0.5, 1e-16, 20, "truncation"),
+        (tanhsinh, lambda t: t**-0.5, 1e-16, 20, "truncation"),
     ],
     ids=["out-of-levels", "below-roundoff-floor", "below-truncation-floor"],
 )

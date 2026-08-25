@@ -59,6 +59,17 @@ linkcode_blob = "head"
 linkcode_url = r"https://github.com/f0uriest/quadax/"
 linkcode_link_text = "Source"
 
+intersphinx_mapping = {
+    "python": ("https://docs.python.org/3", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "jax": ("https://docs.jax.dev/en/latest", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy", None),
+}
+
+# Single backticks mark parameter names and short expressions throughout the
+# docstrings, which the default renders as emphasis rather than as code.
+default_role = "code"
+
 
 def linkcode_resolve(domain, info):
     """Returns a link to the source code on GitHub, with appropriate lines highlighted"""
@@ -158,6 +169,8 @@ napoleon_use_admonition_for_references = False
 napoleon_use_ivar = False
 napoleon_use_param = True
 napoleon_use_rtype = False
+# Cross-reference the types named in Returns, not only those in Parameters.
+napoleon_preprocess_types = True
 
 autodoc_default_options = {
     "member-order": "bysource",
@@ -169,11 +182,7 @@ templates_path = ["_templates"]
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 #
-source_suffix = [".rst", ".md"]
-# source_suffix = {
-#     '.rst': 'restructuredtext',
-#     '.md': 'markdown',
-# }
+source_suffix = [".rst"]
 # The master toctree document.
 master_doc = "index"
 
@@ -204,14 +213,13 @@ html_theme = "sphinx_rtd_theme"
 html_theme_options = {
     #    'canonical_url': '',
     #    'analytics_id': 'UA-XXXXXXX-1',  #  Provided by Google in your dashboard
-    "logo_only": True,
     "prev_next_buttons_location": "both",
     "style_external_links": False,
     "style_nav_header_background": "#3c4142",
     # Toc options
-    "collapse_navigation": True,
+    "collapse_navigation": False,
     "sticky_navigation": True,
-    "navigation_depth": 2,
+    "navigation_depth": 3,
     "includehidden": True,
     "titles_only": False,
 }
@@ -224,12 +232,12 @@ html_css_files = ["custom.css"]
 
 # The name of an image file (relative to this directory) to place at the top
 # of the sidebar.
-# html_logo = "_static/images/logo_small_clear.png"
+html_logo = "_static/images/logo_small.png"
 
 # The name of an image file (within the static path) to use as favicon of the
 # docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
 # pixels large.
-# html_favicon = "_static/images/desc_icon.ico"
+html_favicon = "_static/images/favicon.ico"
 
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,

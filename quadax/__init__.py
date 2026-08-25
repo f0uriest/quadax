@@ -11,8 +11,9 @@ from .fixed_order import (
     NestedRule,
     TanhSinhRule,
 )
-from .romberg import romberg, rombergts
+from .romberg import romberg, rombergts, tanhsinh
 from .sampled import cumulative_simpson, cumulative_trapezoid, simpson, trapezoid
+from .utils import QuadratureInfo
 
 __all__ = [
     "adaptive_quadrature",
@@ -29,11 +30,13 @@ __all__ = [
     "LeibnizAdjoint",
     "romberg",
     "rombergts",
+    "tanhsinh",
     "cumulative_simpson",
     "cumulative_trapezoid",
     "simpson",
     "trapezoid",
     "STATUS",
+    "QuadratureInfo",
 ]
 
 __version__ = _version.get_versions()["version"]

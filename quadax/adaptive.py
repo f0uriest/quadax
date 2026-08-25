@@ -72,8 +72,13 @@ def quadgk(
     difficulty may occur.
 
     Basically the same algorithm as ``scipy.integrate.quad``, including the convergence
-    acceleration. A good general purpose integrator for most reasonably well behaved
-    functions over finite or infinite intervals.
+    acceleration. The general purpose integrator to reach for first, over finite or
+    infinite intervals. It is generally the most robust and often also the most
+    efficient, on smooth and non-smooth integrands alike.
+
+    Where an integrand has a jump or a singularity at a known interior point, passing
+    that point as a breakpoint in `interval` is worth more than any change of method,
+    since the subdivision no longer has to find it.
 
     Parameters
     ----------
@@ -84,7 +89,7 @@ def quadgk(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -101,8 +106,8 @@ def quadgk(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    order : {15, 21, 31, 41, 51, 61}
-        Order of local integration rule.
+    order : int
+        Order of local integration rule, one of 15, 21, 31, 41, 51, 61.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -115,19 +120,16 @@ def quadgk(
         worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
         scale with the order. Lower it to reduce memory on an expensive integrand.
-        Values larger than the number of nodes are clipped to it. In a gradient the
-        adjoint evaluates several sub-intervals together, so the width there is
-        ``batch_size`` times the adjoint's own ``chunk_size``.
+        Values larger than the number of nodes are clipped to it.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -216,7 +218,14 @@ def quadcc(
     difficulty may occur.
 
     A good general purpose integrator for most reasonably well behaved functions over
-    finite or infinite intervals.
+    finite or infinite intervals, and a reasonable alternative to
+    :func:`~quadax.quadgk`. It's main advantage is in allowing arbitrary high orders,
+    which can be useful for smooth but highly oscillatory integrands in the absence of a
+    specialized solver, in which case choosing order to have ~7-8 points per period
+    is often the most efficient.
+
+    As with :func:`~quadax.quadgk`, an interior jump or singularity is best passed as a
+    breakpoint in `interval` rather than left for the subdivision to find.
 
     Parameters
     ----------
@@ -227,7 +236,7 @@ def quadcc(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -246,7 +255,8 @@ def quadcc(
         algorithm.
     order : int
         Order of local integration rule. Must be a multiple of 4, or with
-        ``closed=False`` any even order of at least 4; see ``ClenshawCurtisRule``.
+        ``closed=False`` any even order of at least 4; see
+        :class:`~quadax.ClenshawCurtisRule`.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -259,26 +269,23 @@ def quadcc(
         worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
         scale with the order. Lower it to reduce memory on an expensive integrand.
-        Values larger than the number of nodes are clipped to it. In a gradient the
-        adjoint evaluates several sub-intervals together, so the width there is
-        ``batch_size`` times the adjoint's own ``chunk_size``.
+        Values larger than the number of nodes are clipped to it.
     closed : bool, optional
         Whether the interval endpoints are among the nodes of the local rule. The
         default closed rule is cheaper on smooth, peaked and oscillatory integrands. The
         open (Fejer-2) rule never evaluates the integrand at an interval endpoint, which
         is what to use for integrands that are singular or undefined there; it is
         markedly cheaper on infinite intervals whose integrand decays algebraically,
-        and on endpoint singularities. See ``ClenshawCurtisRule``.
+        and on endpoint singularities. See :class:`~quadax.ClenshawCurtisRule`.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -365,7 +372,12 @@ def quadts(
     error estimate. Breakpoints can be specified in `interval` where integration
     difficulty may occur.
 
-    Especially good for integrands with singular behavior at an endpoint.
+    This can often be the most efficient method for smooth integrands or weak endpoint
+    singularities (up to around ``x**-0.5``, including those induced by an algebraically
+    decaying integrand on an infinite interval). Beyond that the truncation floor
+    in the map (limited by working precision) dominates and no amount of refinement can
+    do better. In those cases the extrapolating method :func:`~quadax.quadgk` is
+    the more reliable choice.
 
     Parameters
     ----------
@@ -376,7 +388,7 @@ def quadts(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -409,19 +421,16 @@ def quadts(
         recover.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
         scale with the order. Lower it to reduce memory on an expensive integrand.
-        Values larger than the number of nodes are clipped to it. In a gradient the
-        adjoint evaluates several sub-intervals together, so the width there is
-        ``batch_size`` times the adjoint's own ``chunk_size``.
+        Values larger than the number of nodes are clipped to it.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -501,11 +510,11 @@ def adaptive_quadrature(
     throw: bool = False,
     **kwargs,
 ):
-    """Global adaptive quadrature.
+    """Global adaptive quadrature with user specified local rule.
 
     This is a lower level routine allowing for custom local quadrature rules. For most
-    applications the higher order methods ``quadgk``, ``quadcc``, ``quadts`` are
-    preferable.
+    applications the higher order methods :func:`~quadax.quadgk`,
+    :func:`~quadax.quadcc`, :func:`~quadax.quadts` are preferable.
 
     Parameters
     ----------
@@ -518,7 +527,7 @@ def adaptive_quadrature(
         Lower and upper limits of integration with possible breakpoints. Use np.inf to
         denote infinite intervals. Its dtype sets the working precision: the integrand
         is called with an ``x`` of this dtype, and the result follows it unless the
-        integrand upcasts. A integer types or python floats falls back to the JAX
+        integrand upcasts. Integer types or python floats fall back to the JAX
         default. Must be real; complex integrands are supported, complex limits are not.
     args : tuple, optional
         Extra arguments passed to fun.
@@ -543,12 +552,11 @@ def adaptive_quadrature(
         worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance

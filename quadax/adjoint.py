@@ -495,8 +495,7 @@ class AbstractAdjoint(eqx.Module):
     which runs the primal solve and attaches whatever custom differentiation rule it
     wants.
 
-    See the Adjoints section of the API documentation for the adjoints quadax ships and
-    how to choose between them.
+    See :ref:`adjoints` for the adjoints quadax ships and how to choose between them.
     """
 
     @abc.abstractmethod
@@ -560,8 +559,7 @@ class DirectAdjoint(AbstractAdjoint):
 
     This is the default, and is the cheaper option for a cheap integrand in either mode.
     When one evaluation of the integrand is expensive, :class:`LeibnizAdjoint` can be an
-    order of magnitude faster or more; see the Adjoints section of the API documentation
-    for the trade-offs.
+    order of magnitude faster or more; see :ref:`adjoints` for the trade-offs.
 
     It works by running the primal solve recording the final adaptive mesh, and then
     using the same mesh (with corrections when differentiating the interval itself) to
@@ -1119,8 +1117,8 @@ class LeibnizAdjoint(AbstractAdjoint):
     r"""Differentiate by the Leibniz rule, either mode, with its own error control.
 
     The derivative is evaluated with its own adaptive solve, so it gets its own error
-    control rather than inheriting the subdivision chosen for the integral, see the
-    Adjoints section of the API documentation for when that is worth paying for.
+    control rather than inheriting the subdivision chosen for the integral; see
+    :ref:`adjoints` for when that is worth paying for.
 
     Because each mode picks its own subdivision, forward and reverse results agree to
     quadrature accuracy rather than exactly.

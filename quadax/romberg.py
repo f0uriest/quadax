@@ -1,5 +1,6 @@
 """Romberg integration aka adaptive trapezoid with Richardson extrapolation."""
 
+import warnings
 from collections.abc import Callable
 from functools import partial
 
@@ -52,9 +53,17 @@ def romberg(
 
     Returns the integral of `fun` (a function of one variable) over `interval`.
 
-    Good for non-smooth or piecewise smooth integrands.
+    Refines a uniform mesh over the whole interval and accelerates the sequence of
+    trapezoidal sums by Richardson extrapolation. Suited to smooth integrands on a
+    finite interval, where the extrapolation is worth orders of magnitude and the cost
+    is competitive with the adaptive routines. Often has less compile and dispatch
+    overhead compared to the locally adaptive routines which can mean lower wall clock
+    time for cheap integrands.
 
-    Not recommended for infinite intervals, or functions with singularities.
+    Not recommended for infinite intervals or non-smooth integrands or those with
+    other localized features. The uniform mesh cannot refine towards a difficulty, so an
+    integrand with a local feature pays for the entire interval to resolve one point.
+    For these cases :func:`~quadax.quadgk` is preferred.
 
     Parameters
     ----------
@@ -64,8 +73,8 @@ def romberg(
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
         Its dtype sets the working precision: the integrand is called with an ``x`` of
-        this dtype, and the result follows it unless the integrand upcasts. A integer
-        types or python floats falls back to the JAX default. Must be real; complex
+        this dtype, and the result follows it unless the integrand upcasts. Integer
+        types or python floats fall back to the JAX default. Must be real; complex
         integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun
@@ -89,19 +98,21 @@ def romberg(
         should be callable.
     extrapolate : bool, optional
         Whether to accelerate convergence by Richardson extrapolation, which is what
-        makes this Romberg's method rather than plain repeated bisection. On by default.
-        Turning it off leaves the same nodes and the same halving schedule, reading the
-        un-extrapolated estimate instead, which is worth having when the integrand is
-        not smooth enough for the extrapolation's error expansion to hold. There it
-        can amplify rather than cancel, and the honest estimate is the better one.
+        makes this Romberg's method rather than plain repeated bisection. On by default,
+        and worth leaving on: it is where nearly all of this routine's accuracy comes
+        from, buying several orders of magnitude on a smooth integrand from the same
+        nodes. Turning it off leaves the same nodes and the same halving schedule,
+        reading the un-extrapolated trapezoidal sum instead. That is the more
+        conservative reading where the integrand is not smooth enough for the error
+        expansion to hold, but on such an integrand this routine is the wrong choice
+        anyways.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``divmax`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel.
         Defaults to ``2**divmin``, which is one batch for the whole starting grid and
@@ -150,7 +161,7 @@ def romberg(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
+          * table : (ndarray, size(divmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation. With
             ``extrapolate=False`` only the first column is filled.
 
@@ -867,7 +878,7 @@ def _romberg_levels(
 
 
 @eqx.filter_jit
-def rombergts(
+def _rombergts(
     fun: Callable[..., jax.Array],
     interval: ArrayLike,
     args: tuple = (),
@@ -884,11 +895,27 @@ def rombergts(
 ):
     """Romberg integration with tanh-sinh (aka double exponential) transformation.
 
+    The shared implementation behind :func:`~quadax.tanhsinh` and the deprecated
+    :func:`~quadax.rombergts`, which differ only in the default for ``extrapolate``
+    and in how much of the table they hand back. Private so that the deprecation
+    warning sits outside the jit and fires on every call rather than once per trace.
+
     Returns the integral of `fun` (a function of one variable) over `interval`.
 
-    Performs well for functions with singularities at the endpoints or integration
-    over infinite intervals. May be slightly less efficient than ``quadgk`` or
-    ``quadcc`` for smooth integrands.
+    Performs well for functions with mild singularities at the endpoints or integration
+    over infinite intervals, and is the most robust of the routines here on an infinite
+    interval, reaching the requested tolerance where the adaptive tanh-sinh rule stops
+    short. It pays several times as many integrand evaluations as
+    :func:`~quadax.quadgk` for that, and on a smooth integrand it is far more expensive
+    than either adaptive routine rather than slightly, so use it where those have
+    failed rather than by default.
+
+    Interior breaks are the one thing it cannot do at all: its mesh is uniform, it
+    accepts no breakpoints, and a singularity or a jump away from the limits should go
+    to :func:`~quadax.quadgk` with that point passed in ``interval``.
+
+    Consider passing ``extrapolate=False``, which is usually both cheaper and more
+    accurate here; see the ``extrapolate`` entry below.
 
     Parameters
     ----------
@@ -898,8 +925,8 @@ def rombergts(
     interval : array-like
         Lower and upper limits of integration. Use np.inf to denote infinite intervals.
         Its dtype sets the working precision: the integrand is called with an ``x`` of
-        this dtype, and the result follows it unless the integrand upcasts. A integer
-        types or python floats falls back to the JAX default. Must be real; complex
+        this dtype, and the result follows it unless the integrand upcasts. Integer
+        types or python floats fall back to the JAX default. Must be real; complex
         integrands are supported, complex limits are not.
     args : tuple
         additional arguments passed to fun
@@ -922,20 +949,26 @@ def rombergts(
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
     extrapolate : bool, optional
-        Whether to accelerate convergence by Richardson extrapolation, which is what
-        makes this Romberg's method rather than plain repeated bisection. On by default.
-        Turning it off leaves the same nodes and the same halving schedule, reading the
-        un-extrapolated estimate instead, which is worth having when the integrand is
-        not smooth enough for the extrapolation's error expansion to hold. There it
-        can amplify rather than cancel, and the honest estimate is the better one.
+        Whether to accelerate convergence by Richardson extrapolation. On by default,
+        but usually worth turning off here, unlike in :func:`~quadax.romberg`. The
+        tanh-sinh substitution already makes the trapezoidal rule converge
+        exponentially, so there is no expansion in powers of the step left for the
+        table to fit. Extrapolating anyway blends the accurate finest level with much
+        coarser ones and returns a value orders of magnitude worse than the
+        un-extrapolated sum it was built from, while taking more levels to reach a
+        given tolerance.
+
+        What it still buys is a more conservative error estimate, which is why it
+        remains the default. With it off the reported error stays a bound on every
+        integrand tested except one that oscillates without settling towards its
+        endpoint, where it was measured to understate the true error by 1.6x.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which is gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. ``LeibnizAdjoint`` gives the derivative
-        its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter``
-        is generous; see the Adjoints section of the API documentation for when that
-        is worth paying for.
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``divmax`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel.
         Defaults to ``2**divmin``, which is one batch for the whole starting grid and
@@ -984,7 +1017,7 @@ def rombergts(
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
-          * table : (ndarray, size(dixmax+1, divmax+1, ...)) Estimate of the integral
+          * table : (ndarray, size(divmax+1, divmax+1, ...)) Estimate of the integral
             from each level of discretization and each step of extrapolation. With
             ``extrapolate=False`` only the first column is filled.
 
@@ -1038,4 +1071,188 @@ def rombergts(
         divmin,
         throw,
         truncation=_tanhsinh_truncation,
+    )
+
+
+def tanhsinh(
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
+    divmax: int = 20,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
+    batch_size: int | None = None,
+    divmin: int = 4,
+    throw: bool = False,
+):
+    """Tanh-sinh (aka double exponential) quadrature on a uniformly refined mesh.
+
+    Returns the integral of `fun` (a function of one variable) over `interval`.
+
+    Substitutes ``x = tanh(pi/2 sinh(t))``, which flattens an endpoint singularity into
+    a doubly exponentially decaying tail, and applies the trapezoidal rule to the
+    result on a mesh that is halved until the requested tolerance is met.
+
+    Performs well for functions with mild singularities at the endpoints or integration
+    over infinite intervals.
+
+    Interior breaks are the one thing it cannot do at all: its mesh is uniform, it
+    accepts no breakpoints, and a singularity or a jump away from the limits should go
+    to :func:`~quadax.quadgk` with that point passed in ``interval``.
+
+    Parameters
+    ----------
+    fun : callable
+        Function to integrate, should have a signature of the form
+        ``fun(x, *args)`` -> float, Array. Should be JAX transformable.
+    interval : array-like
+        Lower and upper limits of integration. Use np.inf to denote infinite intervals.
+        Its dtype sets the working precision: the integrand is called with an ``x`` of
+        this dtype, and the result follows it unless the integrand upcasts. Integer
+        types or python floats fall back to the JAX default. Must be real; complex
+        integrands are supported, complex limits are not. Breakpoints are not
+        supported; pass exactly two limits.
+    args : tuple, optional
+        Extra arguments passed to fun.
+    full_output : bool, optional
+        If True, return the estimate from every refinement level. See below.
+    epsabs, epsrel : float, optional
+        Absolute and relative error tolerance. Default is the square root of the
+        machine precision of the working dtype, ie of `interval`, or of the integrand's
+        own dtype if that is the coarser of the two. Algorithm tries to obtain an
+        accuracy of ``abs(i-result) <= max(epsabs, epsrel*abs(i))`` where ``i`` =
+        integral of `fun` over `interval`, and ``result`` is the numerical
+        approximation.
+    divmax : int, optional
+        Maximum number of divisions, ie the most times the mesh may be halved.
+    norm : int, callable
+        Norm to use for measuring error for vector valued integrands. No effect if the
+        integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
+        should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``divmax`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
+    batch_size : int, optional
+        Maximum number of points at which to evaluate the integrand in parallel.
+        Defaults to ``2**divmin``, which is one batch for the whole starting grid and
+        exactly one for the refinement level after it. Each refinement level doubles the
+        number of new points, so raising this together with ``divmin`` is usually worth
+        a lot on GPU/TPU, at the cost of peak memory scaling with it. Levels with fewer
+        new points than one batch are padded up to a full batch, so a level costs
+        ``batch_size`` evaluations however few points it places; that padding is what
+        keeps a single batch shape traced for every level rather than one per level.
+        Clipped to the largest number of points any one level places.
+    divmin : int, optional
+        Number of refinement levels the first pass places at once, rather than arriving
+        at one level at a time. Costs nothing over starting from a single interval: the
+        coarser levels are filled from the same evaluations.
+    throw : bool, optional
+        Whether to raise an error if the routine does not converge. If True, a run
+        that terminates for any reason other than reaching the requested tolerance
+        raises with the message its ``status`` carries. If False, the default, that
+        status is reported on the returned ``info`` and left to the caller to act on.
+
+    Returns
+    -------
+    y  : float, Array
+        Approximation to the integral
+    info : QuadratureInfo
+        Named tuple with the following fields:
+
+        * err : (float) Estimate of the error in the approximation. Built from how far
+          the estimate moved over the last few refinement levels rather than over the
+          last one alone, plus the tail that movement's own contraction rate implies,
+          the mass the map leaves outside the range integrated over, and floored at the
+          precision the integrand can be summed to.
+        * neval : (int) Total number of function evaluations.
+        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
+          the requested tolerances were reached; every other member names a difficulty
+          and prints as the message explaining it. Where a run meets more than one
+          condition the most severe is reported.
+        * info : (ndarray or None) Only present if ``full_output`` is True: the
+          trapezoidal estimate at each refinement level, of shape
+          ``(divmax + 1, ...)``. Levels beyond the one the routine stopped at are zero.
+
+    Notes
+    -----
+    The number of new points a refinement level places is only known at run time, so
+    there is no single shape to vectorize over. Integrand evaluations are made in
+    fixed size batches of ``batch_size``, defaulting to 16; raise it to get more
+    parallelism on GPU/TPU.
+
+    """
+    y, info = _rombergts(
+        fun,
+        interval,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        divmax,
+        norm,
+        False,
+        adjoint,
+        batch_size,
+        divmin,
+        throw,
+    )
+    if full_output:
+        # without extrapolation only column 0 of the square table is ever written, so
+        # the rest is zeros the caller has no use for
+        info = QuadratureInfo(info.err, info.neval, info.status, info.info[:, 0])
+    return y, info
+
+
+def rombergts(
+    fun: Callable[..., jax.Array],
+    interval: ArrayLike,
+    args: tuple = (),
+    full_output: bool = False,
+    epsabs: ArrayLike | None = None,
+    epsrel: ArrayLike | None = None,
+    divmax: int = 20,
+    norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
+    extrapolate: bool = True,
+    adjoint: AbstractAdjoint = DirectAdjoint(),
+    batch_size: int | None = None,
+    divmin: int = 4,
+    throw: bool = False,
+):
+    """Romberg integration with tanh-sinh transformation.
+
+    .. deprecated::
+        Use :func:`~quadax.tanhsinh` instead, which avoids Richardson extrapolation
+        and is often more efficient.
+
+    Takes the same arguments as :func:`~quadax.tanhsinh`, plus ``extrapolate``, and
+    returns the full ``(divmax + 1, divmax + 1, ...)`` table under ``full_output``
+    rather than only the levels.
+
+    """
+    warnings.warn(
+        "rombergts is deprecated, use tanhsinh instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _rombergts(
+        fun,
+        interval,
+        args,
+        full_output,
+        epsabs,
+        epsrel,
+        divmax,
+        norm,
+        extrapolate,
+        adjoint,
+        batch_size,
+        divmin,
+        throw,
     )

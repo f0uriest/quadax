@@ -8,7 +8,7 @@ fail loudly instead.
 
 import pytest
 
-from quadax import quadcc, quadgk, quadts, romberg, rombergts
+from quadax import quadcc, quadgk, quadts, romberg, tanhsinh
 
 from .problems import (
     ALL,
@@ -22,9 +22,7 @@ from .problems import (
     quadcc_open,
 )
 
-METHODS = {
-    m.__name__ for m in (quadgk, quadcc, quadcc_open, quadts, romberg, rombergts)
-}
+METHODS = {m.__name__ for m in (quadgk, quadcc, quadcc_open, quadts, romberg, tanhsinh)}
 
 
 @pytest.mark.parametrize("i", ALL, ids=problem_id)

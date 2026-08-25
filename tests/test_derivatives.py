@@ -21,7 +21,7 @@ from quadax import (
     quadgk,
     quadts,
     romberg,
-    rombergts,
+    tanhsinh,
 )
 from quadax.adaptive import _adaptive_solve
 from quadax.adjoint import (
@@ -38,7 +38,7 @@ config.update("jax_enable_x64", True)
 
 
 adaptive_methods = [quadgk, quadcc, quadts]
-romberg_methods = [romberg, rombergts]
+romberg_methods = [romberg, tanhsinh]
 all_methods = adaptive_methods + romberg_methods
 
 # The three adaptive routines differ only in the local rule applied on each
@@ -56,8 +56,8 @@ adjoint_ids = ["direct", "leibniz"]
 # One routine from each family that groups its integrand evaluations differently. The
 # adaptive routines share the wrapper that cuts the batches to fit a node count known
 # when the rule is built; the Romberg pair pads instead, because a level's size is only
-# known at run time, and rombergts pads a mapped integrand.
-batching_families = [quadgk, romberg, rombergts]
+# known at run time, and tanhsinh pads a mapped integrand.
+batching_families = [quadgk, romberg, tanhsinh]
 
 # problems exercising the paths that differ: plain, interior breakpoints, an infinite
 # limit, and a vector valued integrand.
@@ -418,7 +418,7 @@ class TestRomberg:
         the two directions are transposes of the same linear functional, they agree to
         rounding rather than merely to quadrature accuracy. Not asserted bitwise: the
         integrand's own jvp and vjp can still differ in the last bit, which they do for
-        rombergts, where the integrand also carries a tanh-sinh transform.
+        tanhsinh, where the integrand also carries a tanh-sinh transform.
         """
         prob = example_problems[0]
         interval = jnp.asarray(prob["interval"])
@@ -944,7 +944,7 @@ def test_romberg_differentiates_the_extrapolation(quad):
         fwd, np.asarray(jax.jacfwd(unrolled)(c)), rtol=ULP_RTOL, atol=ULP_ATOL
     )
     # Forward and reverse are transposes of the same frozen linear functional, so they
-    # agree to within rounding. For rombergts the integrand also carries a tanh-sinh
+    # agree to within rounding. For tanhsinh the integrand also carries a tanh-sinh
     # transform, whose own jvp and vjp can differ in the last bit.
     np.testing.assert_allclose(fwd, rev, rtol=ULP_RTOL, atol=ULP_ATOL)
     # and accurate to Romberg's standard, not the trapezoid rule's
@@ -996,8 +996,16 @@ class TestDerivativeDTypes:
         assert y_dot.dtype == dtype
 
 
+# Which entry of the table a Romberg style solve reads, as (method, extrapolate) with
+# `None` for a routine that takes no such flag. `tanhsinh` always reads column zero,
+# which is the same case as `romberg` with the flag off, but it has to be exercised in
+# its own right since it reaches that column by a different route.
+RICHARDSON_CASES = [(romberg, False), (romberg, True), (tanhsinh, None)]
+RICHARDSON_IDS = ["romberg-plain", "romberg-extrap", "ts"]
+
+
 class TestRombergWithoutRichardson:
-    """Turning Richardson off must not cost Romberg its derivatives.
+    """Reading column zero must not cost a Romberg style solve its derivatives.
 
     ``DirectAdjoint`` freezes the number of levels the solve settled on and
     differentiates that fixed discretization through a custom primitive, so the frozen
@@ -1010,6 +1018,11 @@ class TestRombergWithoutRichardson:
     interval = jnp.array([0.0, 2.0])
     args = jnp.asarray(0.7)
 
+    @staticmethod
+    def _opts(extrapolate):
+        """The flag, where the routine has one."""
+        return {} if extrapolate is None else {"extrapolate": extrapolate}
+
     def _quad(self, method, extrapolate, adjoint):
         return lambda c: method(
             self.fun,
@@ -1018,12 +1031,13 @@ class TestRombergWithoutRichardson:
             epsabs=1e-10,
             epsrel=1e-10,
             divmax=14,
-            extrapolate=extrapolate,
             adjoint=adjoint,
+            **self._opts(extrapolate),
         )[0]
 
-    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
-    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    @pytest.mark.parametrize(
+        "method, extrapolate", RICHARDSON_CASES, ids=RICHARDSON_IDS
+    )
     @pytest.mark.parametrize("adjoint", adjoints, ids=adjoint_ids)
     def test_modes_agree(self, method, extrapolate, adjoint):
         """Forward and reverse give the same derivative in either setting."""
@@ -1034,8 +1048,9 @@ class TestRombergWithoutRichardson:
             rtol=1e-10,
         )
 
-    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
-    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    @pytest.mark.parametrize(
+        "method, extrapolate", RICHARDSON_CASES, ids=RICHARDSON_IDS
+    )
     def test_matches_finite_differences(self, method, extrapolate):
         """And it is the right derivative, not merely a self-consistent one.
 
@@ -1049,8 +1064,9 @@ class TestRombergWithoutRichardson:
         fd = (float(f(self.args + h)) - float(f(self.args - h))) / (2 * h)
         np.testing.assert_allclose(got, fd, rtol=1e-6)
 
-    @pytest.mark.parametrize("method", romberg_methods, ids=["romberg", "ts"])
-    @pytest.mark.parametrize("extrapolate", [False, True], ids=["plain", "extrap"])
+    @pytest.mark.parametrize(
+        "method, extrapolate", RICHARDSON_CASES, ids=RICHARDSON_IDS
+    )
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev])
     def test_wrt_interval(self, method, extrapolate, transform):
         """Derivatives with respect to the limits work in either setting.
@@ -1065,7 +1081,7 @@ class TestRombergWithoutRichardson:
             epsabs=1e-10,
             epsrel=1e-10,
             divmax=14,
-            extrapolate=extrapolate,
+            **self._opts(extrapolate),
         )[0]
         got = np.asarray(transform(f)(self.interval))
         # d/db of int_a^b f = f(b), and d/da = -f(a)

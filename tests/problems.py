@@ -628,7 +628,7 @@ ROMBERG_CONVERGES = [
 ]
 # The tanh-sinh substitution flattens an endpoint singularity into the exponentially
 # decaying tail the trapezoidal rule wants, so the variant reaches well past SMOOTH.
-ROMBERGTS_CONVERGES = [
+TANHSINH_CONVERGES = [
     0,
     1,
     2,
@@ -732,7 +732,7 @@ QUADPACK_MODEL = ErrorModel(slack=1.0, honesty=25)
 
 # Romberg builds its estimate from the movement of the Richardson diagonal over the last
 # few levels, inflates it by the geometric tail that movement's own contraction rate
-# implies, and floors it at `50*eps*integral_abs`. `rombergts` adds to that the mass its
+# implies, and floors it at `50*eps*integral_abs`. `tanhsinh` adds to that the mass its
 # map leaves outside the range being integrated over, taken from the outermost term of
 # the sum. That mass is fixed by the map rather than by the mesh, so refining converges
 # onto it and the movement between levels says nothing about it at all. Left out, it was
@@ -894,7 +894,7 @@ def quadcc_open(*args, **kwargs):
 #
 # `# scipy too` marks the entries where the nearest scipy routine does not deliver the
 # tolerance either, measured against scipy 1.17.1: `scipy.integrate.tanhsinh` for
-# `quadts` and `rombergts`, `scipy.integrate.quad` for the rest, since scipy has no
+# `quadts` and `tanhsinh`, `scipy.integrate.quad` for the rest, since scipy has no
 # Clenshaw-Curtis or Romberg to compare against. A routine counts as delivering only if
 # it both reports success and lands inside `max(tol, tol*|exact|)`, the same bound the
 # routine under test has to meet, and `quad` keeps its default `limit=50` so that it is
@@ -906,7 +906,7 @@ def quadcc_open(*args, **kwargs):
 # entry is one where a widely used routine does solve the problem, so the shortfall is
 # quadax's; a marked one says the integrand is hard for the method rather than badly
 # implemented here, and `scipy.integrate.tanhsinh` failing on much the same set as
-# `quadts` and `rombergts` is what the double-exponential reading above rests on.
+# `quadts` and `tanhsinh` is what the double-exponential reading above rests on.
 # Marked entries are still worth fixing, but they are evidence about the method and not
 # a defect report.
 KNOWN_FAILURES = {
@@ -947,17 +947,17 @@ KNOWN_FAILURES = {
     ("quadts", "sin-inverse"): {1e-4, 1e-8},  # scipy too
     ("quadts", "sqrt-over-semicircle"): {1e-8},  # unaccelerated
     ("quadts", "two-interior"): {1e-8},  # unaccelerated
-    ("rombergts", "beta-both-ends"): {1e-8},  # scipy too
-    ("rombergts", "decay-1.01"): {1e-4},  # scipy too
-    ("rombergts", "jump"): {1e-8, 1e-12},  # scipy too
-    ("rombergts", "loglog"): {1e-4, 1e-8},  # scipy too
-    ("rombergts", "loglog-cube"): {1e-8},  # scipy too
-    ("rombergts", "loglog-right"): {1e-4},  # scipy too
-    ("rombergts", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
-    ("rombergts", "pow-0.9-right"): {1e-4},  # scipy too
-    ("rombergts", "pow-0.99"): {1e-4},  # scipy too
-    ("rombergts", "sqrt-over-semicircle"): {1e-12},  # scipy too
-    ("rombergts", "sqrt-tan"): {1e-8, 1e-12},  # scipy too
+    ("tanhsinh", "beta-both-ends"): {1e-8},  # scipy too
+    ("tanhsinh", "decay-1.01"): {1e-4},  # scipy too
+    ("tanhsinh", "jump"): {1e-8, 1e-12},  # scipy too
+    ("tanhsinh", "loglog"): {1e-4, 1e-8},  # scipy too
+    ("tanhsinh", "loglog-cube"): {1e-8},  # scipy too
+    ("tanhsinh", "loglog-right"): {1e-4},  # scipy too
+    ("tanhsinh", "loglog-sqrt"): {1e-4, 1e-8},  # scipy too
+    ("tanhsinh", "pow-0.9-right"): {1e-4},  # scipy too
+    ("tanhsinh", "pow-0.99"): {1e-4},  # scipy too
+    ("tanhsinh", "sqrt-over-semicircle"): {1e-12},  # scipy too
+    ("tanhsinh", "sqrt-tan"): {1e-8, 1e-12},  # scipy too
     ("romberg", "loglog"): {1e-4, 1e-8, 1e-12},  # scipy too
     ("romberg", "loglog-right"): {1e-4, 1e-8, 1e-12},  # scipy too
 }
@@ -995,6 +995,8 @@ KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadgk", "loglog"): {1e-4},  # host dependent
     ("quadgk", "loglog-cube"): {1e-4},  # scipy too
     ("quadts", "decay-line"): {1e-8},  # 1.07x, the tail estimate has no margin
+    ("tanhsinh", "osc-tail"): {1e-4},  # 1.6x
+    ("tanhsinh", "sin-inverse"): {1e-4},  # 1.6x
 }
 
 

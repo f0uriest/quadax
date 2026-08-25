@@ -1,10 +1,13 @@
 
-########
-quadax
-########
+.. image:: https://raw.githubusercontent.com/f0uriest/quadax/main/docs/_static/images/logo.png
+    :alt: quadax
+    :width: 420
+
 |License| |DOI| |Issues| |Pypi|
 
 |Docs| |UnitTests| |Codecov|
+
+.. docs-include-start
 
 quadax is a library for numerical quadrature and integration using JAX.
 
@@ -51,6 +54,8 @@ Usage
     assert info.err < max(epsabs, epsrel*abs(y))
     np.testing.assert_allclose(y, 1/4, rtol=epsrel, atol=epsabs)
 
+
+.. docs-include-end
 
 For full details of various options see the `API documentation <https://quadax.readthedocs.io/en/latest/api.html>`__
 
