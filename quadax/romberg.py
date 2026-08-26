@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
-from ._status import STATUS, escalate
+from ._status import STATUS, error_if_flagged, escalate
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -154,10 +154,10 @@ def romberg(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -285,7 +285,7 @@ def _romberg(
     status = state["status"]
     out = QuadratureInfo(state["err_sum"], state["neval"], status, info)
     if throw:
-        y = status.error_if(y, status != STATUS.normal)
+        y = error_if_flagged(y, status)
     return y, out
 
 
@@ -1010,10 +1010,10 @@ def _rombergts(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -1172,10 +1172,10 @@ def tanhsinh(
           the mass the map leaves outside the range integrated over, and floored at the
           precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (ndarray or None) Only present if ``full_output`` is True: the
           trapezoidal estimate at each refinement level, of shape
           ``(divmax + 1, ...)``. Levels beyond the one the routine stopped at are zero.

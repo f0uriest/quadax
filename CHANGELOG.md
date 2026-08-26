@@ -12,20 +12,22 @@ v0.3.0
   un-extrapolated sum it was built from while taking more levels to reach a given
   tolerance.
 - Reworked how a routine reports why it stopped.
-  - `QuadratureInfo.status` is now a `quadax.STATUS` naming the termination condition,
-    where it was previously an integer bitmask. `STATUS.normal` means the requested
-    tolerances were reached; every other member prints as the message explaining the
-    difficulty. This is a breaking change: `int(info.status)` and the old
-    `quadax.STATUS` lookup table are both gone, replaced by comparing against members,
-    eg `info.status == quadax.STATUS.divergent`.
-  - All six quadrature routines take a new `throw` option, default False. With
-    `throw=True` a run that stops for any reason other than reaching the requested
-    tolerance raises, with the message its status carries; the default reports the
-    status on `info` and leaves it to the caller.
+  - `QuadratureInfo.status` remains an integer, but is now a single code naming the
+    termination condition rather than a bitmask of flags. `quadax.STATUS` is the
+    enumeration of those codes: `STATUS.normal`, which is 0, means the requested
+    tolerances were reached, and every other code names a difficulty. This is a
+    breaking change in the values themselves: a code is compared against a member, eg
+    `info.status == quadax.STATUS.divergent`, where a bit was previously tested for.
+    Looking a code up, `quadax.STATUS[info.status]`, gives the member it names, which
+    prints as the message explaining it.
   - A run meeting more than one condition now reports the most severe rather than a
     bitmask of all of them, ordered by what a reader should do about it: spend more
     budget, distrust the error estimate, distrust the answer. Where the conditions
     combined before, the reported one is the actionable one.
+  - All iterative quadrature routines take a new `throw` option, default False. With
+    `throw=True` a run that stops for any reason other than reaching the requested
+    tolerance raises, with the message its status carries; the default reports the
+    status on `info` and leaves it to the caller.
 - Added convergence acceleration to the adaptive integrators. The sequence of running
   totals is accelerated using Wynn's epsilon algorithm, which can greatly reduce the
   work needed for integrands with algebraic singularities or on infinite intervals.
