@@ -19,7 +19,7 @@ from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 from . import _acceleration
-from ._status import STATUS, escalate, withdraw
+from ._status import STATUS, error_if_flagged, escalate, withdraw
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -145,10 +145,10 @@ def quadgk(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -301,10 +301,10 @@ def quadcc(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -446,10 +446,10 @@ def quadts(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -574,10 +574,10 @@ def adaptive_quadrature(
 
         * err : (float) Estimate of the error in the approximation.
         * neval : (int) Total number of rule evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -649,7 +649,7 @@ def adaptive_quadrature(
     info = state if full_output else None
     out = QuadratureInfo(err, neval, status, info)
     if throw:
-        y = status.error_if(y, status != STATUS.normal)
+        y = error_if_flagged(y, status)
     return y, out
 
 

@@ -293,9 +293,10 @@ class TestExtrapolation:
             extrapolate=True,
         )
         np.testing.assert_allclose(float(y), finite_part, rtol=1e-6)
-        assert info.status == quadax.STATUS.divergent
-        # the docstrings tell users to print the flag, so it has to carry a message
-        assert quadax.STATUS[info.status].strip()
+        assert int(info.status) == quadax.STATUS.divergent
+        # the docstrings tell users to look the code up in STATUS, so it has to be
+        # there and carry a message
+        assert quadax.STATUS[info.status].message.strip()
 
     def test_no_asymptotic_structure_falls_back(self):
         """``sin(1/x)`` has no trend to extrapolate, so the table must not win.
@@ -1048,7 +1049,7 @@ def test_throw_raises_with_the_status_it_would_have_reported(method, budget):
 
     _, info = method(fun, interval, **unreachable)
     assert info.status != quadax.STATUS.normal
-    expected = re.escape(quadax.STATUS[info.status][:40])
+    expected = re.escape(quadax.STATUS[info.status].message[:40])
     with pytest.raises(eqx.EquinoxRuntimeError, match=expected):
         method(fun, interval, throw=True, **unreachable)
 

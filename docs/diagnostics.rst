@@ -19,7 +19,7 @@ Every adaptive routine returns ``(y, info)``. The integral is ``y``; ``info`` is
    * - ``neval``
      - Number of evaluations of the integrand.
    * - ``status``
-     - Why the routine stopped, as a member of :class:`~quadax.STATUS`.
+     - Why the routine stopped, as one of the integer codes in :class:`~quadax.STATUS`.
    * - ``info``
      - The solver's own state, present only with ``full_output=True``. What it
        holds differs between the adaptive and Romberg routines; see the individual
@@ -34,11 +34,13 @@ Check ``status`` before trusting ``err``, and ``err`` before trusting ``y``::
 Termination status
 ------------------
 
-``STATUS.normal`` means the requested tolerances were reached; every other member of
-:class:`~quadax.STATUS` names a difficulty and prints as the message explaining it::
+``status`` is an integer code, so it survives ``vmap`` and ``jit`` like any other
+output. ``STATUS.normal``, which is 0, means the requested tolerances were reached;
+every other code names a difficulty, and looking it up in :class:`~quadax.STATUS` gives
+the member that prints as the message explaining it::
 
     if info.status != quadax.STATUS.normal:
-        print(info.status)
+        print(quadax.STATUS[info.status])
 
 Pass ``throw=True`` to have the routine raise that message itself rather than report
 it, for code that should not carry on with an unconverged answer::

@@ -12,8 +12,6 @@ import numpy as np
 from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
-from ._status import STATUS
-
 
 def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str = ""):
     """Raise an error if condition is met.
@@ -696,11 +694,11 @@ class QuadratureInfo(NamedTuple):
         Estimate of the error in the quadrature result.
     neval : int
         Number of evaluations of the integrand.
-    status : STATUS
-        Why the routine terminated. ``STATUS.normal`` means the requested tolerances
-        were reached; every other member names a difficulty, and prints as the message
-        explaining it. Where a run meets several conditions the most severe is
-        reported.
+    status : int
+        Code for why the routine terminated, one of ``quadax.STATUS``.
+        ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+        code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+        Where a run meets several conditions the most severe is reported.
     info : dict or None
         Other information returned by the algorithm. See specific algorithm for
         details. Only present if ``full_output`` is True.
@@ -708,7 +706,7 @@ class QuadratureInfo(NamedTuple):
 
     err: float | jax.Array
     neval: int | jax.Array
-    status: STATUS
+    status: int | jax.Array
     info: Any
 
 
