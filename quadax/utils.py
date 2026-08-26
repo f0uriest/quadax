@@ -12,6 +12,23 @@ import numpy as np
 from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
+# Floor under any absolute error estimate, as a multiple of eps times the integral of
+# |f| over the same domain. No estimate is meaningful below the noise of evaluating the
+# integrand and summing it, so every rule and every driver in the package clamps its
+# estimate here rather than reporting an accuracy the arithmetic cannot support.
+#
+# The multiplier is not a count of summed terms: XLA reduces pairwise, which holds the
+# summation error near eps whatever the rule size. What it covers is the conditioning of
+# the integrand. Abscissae carry ~eps*|x|, which the integrand amplifies by |f'|, so the
+# achievable accuracy degrades as the integrand varies faster, and no fixed multiple of
+# eps can be right for every integrand. 50 is QUADPACK's compromise across that:
+# generous for smooth integrands, mildly optimistic for strongly oscillatory ones.
+#
+# Products with this are guarded against underflow where the integral of |f| can be
+# denormal, since a floor that has underflowed to zero is a no-op precisely where the
+# integrand is smallest.
+_ROUNDOFF_FLOOR = 50.0
+
 
 def errorif(cond: bool | jax.Array, err: type[Exception] = ValueError, msg: str = ""):
     """Raise an error if condition is met.
