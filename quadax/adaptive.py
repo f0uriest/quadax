@@ -40,6 +40,7 @@ from .fixed_order import (
     TanhSinhRule,
 )
 from .utils import (
+    _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _real_dtype,
     bounded_while_loop,
@@ -47,6 +48,65 @@ from .utils import (
     resolve_dtypes,
     tree_where,
 )
+
+# The constants below are QUADPACK's [1], empirical there rather than derived. They
+# govern when the loop gives up on a line of attack, never what it reports as the
+# answer, so each one trades evaluations against the risk of stopping early on a hard
+# integrand.
+
+# Extrapolations in a row that fail to improve on the best the table has produced,
+# after which the table is judged to have stopped making progress. Paired with
+# `_STALL_SHARP`: a table that is not improving but still reports an error comparable
+# to the mesh's has not given up on anything.
+_STALL_LIMIT = 5
+
+# How far under the mesh's own error estimate the table's has to sit for the stall test
+# to fire. The comparison is against the uncorrected estimate, which measures the spread
+# of the last few extrapolants, so this asks whether the table has settled rather than
+# how far the answer might be off.
+_STALL_SHARP = 1e-3
+
+# How close two successive area estimates have to be for a bisection to count as having
+# bought nothing, as a relative tolerance on the area. Floored at the roundoff level in
+# use, since a flat threshold only means anything while it sits above the noise of the
+# difference it is applied to.
+_STAGNANT_RTOL = 1e-5
+
+# ...and how little the error estimate has to shrink over that same bisection. The two
+# together say the sub-interval was split and neither the value nor its error moved.
+_NO_PROGRESS = 0.99
+
+# Bisections that bought nothing, tolerated before the run reports roundoff. Counted
+# over the whole run.
+_ROUNDOFF1_LIMIT = 10
+
+# The same events counted over the extrapolating phase alone, where reaching the limit
+# forces the extrapolation to proceed without waiting for the mesh to localize any
+# further rather than ending the run.
+_ROUNDOFF_ACCEL_LIMIT = 5
+
+# Bisections that made the error estimate *worse*, tolerated before the run reports
+# roundoff. A larger budget than `_ROUNDOFF1_LIMIT` because a single such bisection says
+# much less on its own, and only counted at all once the mesh has grown past
+# `_ROUNDOFF2_MIN_NINTER` sub-intervals, below which it is ordinary coarse mesh noise.
+_ROUNDOFF2_LIMIT = 20
+_ROUNDOFF2_MIN_NINTER = 10
+
+# How far the extrapolated value may sit from the running mesh total before the sequence
+# is judged never to have been converging. Applied both ways round, so an extrapolation
+# a hundredfold larger and one a hundredfold smaller are equally suspect.
+_DIVERGENCE_RATIO = 100.0
+
+# Fraction of the integral of |f| that the result has to reach for the divergence test
+# above to mean anything. Below it the integral is the residue of heavy cancellation and
+# the ratio is a comparison of two near-zero numbers.
+_CANCELLATION_FRAC = 0.01
+
+# Smallest sub-interval width, as a multiple of eps times the half span of the domain,
+# that the abscissae can still resolve. Unlike every test above this one is about the
+# mesh rather than the values, so it scales with the precision the abscissae are carried
+# at rather than the precision of the sums.
+_MIN_WIDTH = 100.0
 
 
 @eqx.filter_jit
@@ -656,9 +716,9 @@ def adaptive_quadrature(
 def _at_roundoff_floor(state, epmach, norm):
     """Report whether the error has bottomed out while still above the tolerance.
 
-    The local rule floors each sub-interval's error estimate at ``50*eps*int|f|`` over
+    The local rule floors each sub-interval's error estimate at the roundoff level over
     that sub-interval, so the total can never fall below that floor summed over the
-    partition, and that sum stays near ``50*eps*int|f|`` over the whole domain however
+    partition, and that sum stays at the roundoff level over the whole domain however
     finely the mesh is refined. Once the total has reached the floor and is still above
     ``err_bnd``, no amount of further subdivision will reach the requested tolerance,
     because the tolerance is below what the arithmetic can resolve.
@@ -669,7 +729,9 @@ def _at_roundoff_floor(state, epmach, norm):
     reached and reports the actual difficulty.
     """
     intabs = norm(jnp.sum(state["f_arr"], axis=0))
-    return (state["err_sum"] <= 100.0 * epmach * intabs) & (
+    # Twice the floor, so that a total sitting just above it still reads as having
+    # bottomed out rather than as one more iteration's worth of progress away.
+    return (state["err_sum"] <= 2 * _ROUNDOFF_FLOOR * epmach * intabs) & (
         state["err_sum"] > state["err_bnd"]
     )
 
@@ -886,7 +948,7 @@ def _accelerate_full(
     # *search* is floored, the acceptance test below still uses the tolerance as
     # asked, so this can never report success on an accuracy that was not reached.
     accel_target = jnp.maximum(
-        state["err_accel_target"], 50 * epmach * norm(state["area"])
+        state["err_accel_target"], _ROUNDOFF_FLOOR * epmach * norm(state["area"])
     )
     search = ~state["roundoff_in_table"] & (err_unlocalized > accel_target)
     found = active & search & ~keep_bisecting & jnp.any(candidate)
@@ -904,13 +966,14 @@ def _accelerate_full(
     # A pass that only recorded its value did not extrapolate, if so don't judge it.
     ran = take_step & _acceleration.ready(state["accel_table"])
     n_stalled = jnp.where(ran, state["n_stalled"] + 1, state["n_stalled"])
-    # The table has been asked six times running for something better than it already
-    # has and has not produced it, while claiming an error far under what the mesh
-    # reports. Nothing further is going to come of it. Both thresholds are QUADPACK's,
-    # and the comparison is against the uncorrected estimate so that it keeps asking
-    # QUADPACK's question: this is a test of whether the table is still making progress,
-    # which is what the spread measures, not of how far the answer might be off.
-    stalled = ran & (n_stalled > 5) & (state["accel_sharp"] < 1e-3 * state["err_sum"])
+    # The table has been asked `_STALL_LIMIT` times running for something better than
+    # it already has and has not produced it, while claiming an error far under what the
+    # mesh reports. Nothing further is going to come of it.
+    stalled = (
+        ran
+        & (n_stalled > _STALL_LIMIT)
+        & (state["accel_sharp"] < _STALL_SHARP * state["err_sum"])
+    )
 
     # QUADPACK ranks candidate extrapolations by the same error estimate it reports.
     # That is only safe while the two are the same number. Here the reported one carries
@@ -1052,21 +1115,26 @@ def _accept_extrapolation(state, mesh_y, norm):
     untestable = degenerate & ~(accel_err > mesh_err) & (scale_mesh == 0)
 
     # Did the extrapolated value run away from the running total? An extrapolation that
-    # differs from the mesh by a hundredfold either way, or comes out with the opposite
-    # sign, or a mesh whose own error estimate exceeds the size of what it estimates,
-    # all say the same thing: the sequence was never converging, and what the recursion
-    # inferred a limit from was noise. The bounds are QUADPACK's, which states the
-    # magnitude and sign parts as one signed ratio; the sign half is written out
-    # separately here so that it carries over to vector and complex integrands, where a
-    # signed ratio has no meaning. For a real scalar the two forms agree exactly.
+    # differs from the mesh by `_DIVERGENCE_RATIO` either way, or comes out with the
+    # opposite sign, or a mesh whose own error estimate exceeds the size of what it
+    # estimates, all say the same thing: the sequence was never converging, and what the
+    # recursion inferred a limit from was noise. QUADPACK states the magnitude and sign
+    # parts as one signed ratio; the sign half is written out separately here so that it
+    # carries over to vector and complex integrands, where a signed ratio has no
+    # meaning. For a real scalar the two forms agree exactly.
     ratio = scale_accel / jnp.maximum(scale_mesh, tiny)
     opposed = jnp.real(jnp.sum(accel_y * jnp.conj(mesh_y))) < 0
-    diverging = (ratio < 0.01) | (ratio > 100) | opposed | (mesh_err > scale_mesh)
+    diverging = (
+        (ratio < 1 / _DIVERGENCE_RATIO)
+        | (ratio > _DIVERGENCE_RATIO)
+        | opposed
+        | (mesh_err > scale_mesh)
+    )
     # Where the integral is the residue of heavy cancellation the ratio is a comparison
     # of two near-zero numbers and means nothing, so the test is made only when the
     # result is an appreciable fraction of the integral of |f|.
     testable = state["sign_known"] | (
-        jnp.maximum(scale_accel, scale_mesh) > 0.01 * state["abs_total"]
+        jnp.maximum(scale_accel, scale_mesh) > _CANCELLATION_FRAC * state["abs_total"]
     )
     divergent = have_accel & ~use_mesh & ~untestable & testable & diverging
 
@@ -1318,8 +1386,10 @@ def _adaptive_solve(
         # answer is the residue of heavy cancellation, which makes the ratio test at the
         # end meaningless on a value near zero. True says the integrand did not change
         # sign, to within roundoff, so the two are the same size and the ratio means
-        # something. The `50 * eps` slack is QUADPACK's.
-        state["sign_known"] = _norm(state["area"]) >= (1 - 50 * epmach) * abs_total
+        # something. The slack is the same roundoff level the error estimates use.
+        state["sign_known"] = (
+            _norm(state["area"]) >= (1 - _ROUNDOFF_FLOOR * epmach) * abs_total
+        )
         state["abs_total"] = abs_total
         state["bisect_next"] = jnp.argmax(state["e_arr"])
         state["err_accel_target"] = state["err_bnd"]
@@ -1424,30 +1494,34 @@ def _adaptive_solve(
 
         # test for roundoff error
         # is the area estimate not changing and error not getting smaller?
-        # QUADPACK's threshold is a flat 1e-5, which is only meaningful while it sits
-        # above the noise floor of the difference it is applied to, ~eps*|area12|. It
-        # does at float32 and float64 (`50*eps` is 6e-6 and 1.1e-14, so the maximum is
-        # 1e-5 either way and this is QUADPACK's test unchanged) but not in half
-        # precision, where a flat 1e-5 is below the noise and this counter could never
-        # fire. `50` is the same as in the local rule's roundoff floor.
-        stagnant = max(1e-5, 50 * epmach)
+        # `_STAGNANT_RTOL` is only meaningful while it sits above the noise floor of
+        # the difference it is applied to, ~eps*|area12|. It does at float32 and float64
+        # (the roundoff level is 6e-6 and 1.1e-14 there, so the maximum is
+        # `_STAGNANT_RTOL` either way and this is QUADPACK's test unchanged) but not in
+        # half precision, where it would sit below the noise and this counter could
+        # never fire.
+        stagnant = max(_STAGNANT_RTOL, _ROUNDOFF_FLOOR * epmach)
         stagnated = (
             resolved
             & (_norm(area_i - area12) <= stagnant * _norm(area12))
-            & (erro12 >= 0.99 * err_i)
+            & (erro12 >= _NO_PROGRESS * err_i)
         )
         state["roundoff1"] += stagnated
         # are errors getting larger as we go to smaller intervals?
-        state["roundoff2"] += resolved & (state["ninter"] > 10) & (erro12 > err_i)
+        state["roundoff2"] += (
+            resolved & (state["ninter"] > _ROUNDOFF2_MIN_NINTER) & (erro12 > err_i)
+        )
 
         if extrapolate:
             # The same stagnation events, counted again over the extrapolating phase
-            # alone. Five stagnant iterations says the table is being fed a sequence
-            # that has stopped improving, which both forces the extrapolation to go
-            # ahead without waiting for the mesh to localize any further, and widens the
-            # error it reports. The count (5) is from QUADPACK.
+            # alone. Reaching the limit says the table is being fed a sequence that has
+            # stopped improving, which both forces the extrapolation to go ahead without
+            # waiting for the mesh to localize any further, and widens the error it
+            # reports.
             state["roundoff_accel"] += stagnated & state["accelerating"]
-            state["roundoff_in_table"] |= state["roundoff_accel"] >= 5
+            state["roundoff_in_table"] |= (
+                state["roundoff_accel"] >= _ROUNDOFF_ACCEL_LIMIT
+            )
             # Both halves sit one level deeper than the sub-interval they came from.
             levcur = state["level"][i] + 1
             state["level"] = state["level"].at[i].set(levcur).at[n].set(levcur)
@@ -1479,8 +1553,8 @@ def _adaptive_solve(
             ~converged
             & (
                 _at_roundoff_floor(state, epmach, _norm)
-                | (state["roundoff1"] >= 10)
-                | (state["roundoff2"] >= 20)
+                | (state["roundoff1"] >= _ROUNDOFF1_LIMIT)
+                | (state["roundoff2"] >= _ROUNDOFF2_LIMIT)
             ),
         )
 
@@ -1492,15 +1566,13 @@ def _adaptive_solve(
         )
 
         # test for bad behavior of the integrand (ie, intervals are getting too small)
-        # This one is about the *mesh*, not the values, so it scales with the precision
-        # the abscissae are carried at rather than the precision of the sums.
         state["status"] = escalate(
             state["status"],
             STATUS.bad_integrand,
             ~converged
             & (
                 jnp.maximum(jnp.abs(b1 - a1), jnp.abs(b2 - a2))
-                <= (100.0 * epmach_x * halfspan)
+                <= (_MIN_WIDTH * epmach_x * halfspan)
             ),
         )
 

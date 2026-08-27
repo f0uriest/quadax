@@ -14,7 +14,29 @@ from .quad_weights import (
     get_tanhsinh_table,
     gk_weights,
 )
-from .utils import _real_dtype, check_size, errorif, tanhsinh_tmax, wrap_func
+from .utils import (
+    _ROUNDOFF_FLOOR,
+    _real_dtype,
+    check_size,
+    errorif,
+    tanhsinh_tmax,
+    wrap_func,
+)
+
+# The two constants of QUADPACK's rescaling of the difference between a nested pair of
+# rules into an error estimate for the finer of the two. Both are QUADPACK's [1], which
+# uses the same pair at every order from 15 through 61; see the ``dqk*`` routines.
+#
+# How far the raw difference is inflated before the estimate saturates at the full
+# variation of the integrand over the interval. Fit empirically rather than derived.
+_ERR_INFLATION = 200.0
+
+# The exponent the inflated ratio is raised to, which is the ratio of the two rules'
+# convergence rates: a rule exact to degree ``d`` has local error ``~h**(d+2)``, giving
+# ``(d_high+2)/(d_low+2)``. 1.5 is the large order limit of that ratio for
+# Gauss-Kronrod, and a lower bound across every rule implemented here, so it is the
+# conservative choice; a larger exponent would shrink the estimate.
+_ERR_RATE_RATIO = 1.5
 
 
 def _dot(w, f):
@@ -270,7 +292,7 @@ class NestedRule(AbstractQuadratureRule):
             # estimate of an integral over [a, b]. QUADPACK scales all four by
             # ``dhlgth``; the error estimate below compares ``abserr`` against
             # ``integral_mmn``, so the two have to be on the same scale for the
-            # ``200 ... **1.5`` interpolation to mean what it was tuned to mean.
+            # rescaling below to mean what it was tuned to mean.
             dhalflength = jnp.abs(halflength)
             integral_abs = _dot(wh, jnp.abs(f)) * dhalflength  # ~integral of abs(fun)
             integral_mmn = (
@@ -280,9 +302,9 @@ class NestedRule(AbstractQuadratureRule):
             result = result_kronrod
 
             # Compile time constants, taken as python floats rather than as arrays of
-            # the working dtype: `uflow / (50 * eps)` evaluated *in* half precision is a
-            # needless underflow risk, and as a weakly typed python float the threshold
-            # promotes to whatever it is compared against anyway.
+            # the working dtype: `uflow / (_ROUNDOFF_FLOOR * eps)` evaluated *in* half
+            # precision is a needless underflow risk, and as a weakly typed python float
+            # the threshold promotes to whatever it is compared against anyway.
             uflow = float(jnp.finfo(etype).tiny)
             eps = float(jnp.finfo(etype).eps)
 
@@ -293,33 +315,26 @@ class NestedRule(AbstractQuadratureRule):
             abserr = jnp.abs(result_kronrod - result_gauss)
 
             # Measure that discrepancy against how much the integrand varies over the
-            # interval. This rescaling, and the 200 and 1.5 in it, are QUADPACK's, fit
-            # empirically there rather than derived; see [1] and the ``dqk*`` routines,
-            # which use the same two constants at every order from 15 through 61.
-            # With ``r = abserr / integral_mmn`` the estimate becomes
-            # ``integral_mmn * min(1, (200*r)**1.5)``, which has three regimes:
-            #   - ``r >= 1/200``: saturate at ``integral_mmn``. The rules disagree at
-            #     the scale of the variation of the integrand, so nothing has been
-            #     resolved and the whole variation is the only honest bound.
+            # interval. With ``r = abserr / integral_mmn`` the estimate becomes
+            # ``integral_mmn * min(1, (_ERR_INFLATION*r)**_ERR_RATE_RATIO)``, which has
+            # three regimes:
+            #   - ``r >= 1/_ERR_INFLATION``: saturate at ``integral_mmn``. The rules
+            #     disagree at the scale of the variation of the integrand, so nothing
+            #     has been resolved and the whole variation is the only honest bound.
             #   - middle: inflate the raw difference, by up to ~200x. This is most of
             #     the useful range, so the rescaling is usually pessimistic rather than
             #     optimistic, contrary to how the formula first reads.
-            #   - ``r < 200**-1.5``: deflate, the regime where the two rules agree to
-            #     near machine precision and the difference genuinely overstates the
-            #     error of the high order rule.
-            # The exponent is the ratio of the two rules' convergence rates: a rule
-            # exact to degree ``d`` has local error ``~h**(d+2)``, giving
-            # ``(d_high+2)/(d_low+2)``. 1.5 is the large-order limit of that ratio for
-            # Gauss-Kronrod, and a lower bound across every rule implemented here, so it
-            # is the conservative choice, a larger exponent would shrink the estimate.
+            #   - ``r < _ERR_INFLATION**-_ERR_RATE_RATIO``: deflate, the regime where
+            #     the two rules agree to near machine precision and the difference
+            #     genuinely overstates the error of the high order rule.
             # The guard covers a constant integrand, where ``integral_mmn`` is zero and
             # the ratio would be 0/0.
 
             # double where trick to avoid nans when ratio would be zero or inf
             # The scaling is only defined when both quantities are nonzero. The ratio
-            # must also be substituted, not just masked afterwards: ``x ** 1.5`` has an
-            # infinite second derivative at ``x == 0``, so differentiating the
-            # unselected branch twice yields ``inf * 0 == nan``, which ``where``
+            # must also be substituted, not just masked afterwards: a fractional
+            # power has an infinite second derivative at ``x == 0``, so differentiating
+            # the unselected branch twice yields ``inf * 0 == nan``, which ``where``
             # then propagates.
             # ``abserr`` is exactly zero whenever the two rules agree to the last bit,
             # which a smooth enough integrand does reach.
@@ -328,28 +343,25 @@ class NestedRule(AbstractQuadratureRule):
             ratio = jnp.where(scalable, abserr / mmn_safe, 1.0)
 
             # The saturation is applied inside the power rather than outside it:
-            # forming ``200 * ratio`` first overflows in half precision for any
-            # ``ratio > 328``, and the result is then discarded by the outer ``min``
+            # forming ``_ERR_INFLATION * ratio`` first overflows in half precision for
+            # any ``ratio > 328``, and the result is then discarded by the outer ``min``
             # regardless. The inner clamp is the identity whenever the outer one is, so
-            # this is bit for bit ``min(1, (200*ratio)**1.5)`` wherever that expression
-            # does not overflow.
+            # this is bit for bit ``min(1, (_ERR_INFLATION*ratio)**_ERR_RATE_RATIO)``
+            # wherever that expression does not overflow.
             abserr = jnp.where(
                 scalable,
-                integral_mmn * jnp.minimum(200.0 * jnp.minimum(ratio, 1.0), 1.0) ** 1.5,
+                integral_mmn
+                * jnp.minimum(_ERR_INFLATION * jnp.minimum(ratio, 1.0), 1.0)
+                ** _ERR_RATE_RATIO,
                 abserr,
             )
 
             # No error estimate can be meaningful below the noise of the evaluation
-            # itself. This floor is not a count of summed terms (XLA's pairwise
-            # reduction holds summation error near ``eps`` whatever the rule size) but
-            # covers the conditioning of the integrand: nodes carry ``~eps*|x|``, which
-            # the integrand amplifies by ``|f'|``, so the achievable accuracy degrades
-            # as the integrand varies faster. 50 is a compromise across that, generous
-            # for smooth integrands and mildly optimistic for strongly oscillatory ones.
-            # The ``uflow`` guard keeps the product from underflowing to zero.
+            # itself; see ``_ROUNDOFF_FLOOR``. The ``uflow`` guard keeps the product
+            # from underflowing to zero.
             abserr = jnp.where(
-                (integral_abs > uflow / (50.0 * eps)),
-                jnp.maximum((eps * 50.0) * integral_abs, abserr),
+                (integral_abs > uflow / (_ROUNDOFF_FLOOR * eps)),
+                jnp.maximum((_ROUNDOFF_FLOOR * eps) * integral_abs, abserr),
                 abserr,
             )
             # The nested pair only sees what the nodes span. A rule whose outermost

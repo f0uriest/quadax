@@ -20,6 +20,7 @@ from .adjoint import (
     closure_convert,
 )
 from .utils import (
+    _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _pnorm,
     _real_dtype,
@@ -551,7 +552,7 @@ def _romberg_err(
       For the trapezoidal column, whose ratio settles at 1/4, the two together come to
       ``4/3`` of the movement, which is that column's error exactly.
 
-    Finally the result is floored at ``50 * eps * resabs``, since no estimate is
+    Finally the result is floored at the roundoff level, since no estimate is
     meaningful below the noise of evaluating and summing the integrand.
     """
     # Substituted rather than masked, in both ratios: the denominators are exactly zero
@@ -569,15 +570,12 @@ def _romberg_err(
     ratio = jnp.minimum(ratio, _TAIL_CAP)
     err = err + d * ratio / (1 - ratio)
 
-    # The floor covers the conditioning of the integrand rather than the summation:
-    # abscissae carry `~eps*|x|`, which the integrand amplifies by `|f'|`. 50 is
-    # QUADPACK's constant for the same quantity. The guard keeps the product from
-    # underflowing to zero, which would make the floor a no-op precisely where the
-    # integrand is smallest.
+    # See `_ROUNDOFF_FLOOR`. The guard keeps the product from underflowing to zero,
+    # which would make the floor a no-op precisely where the integrand is smallest.
     absnorm = _norm(resabs)
     return jnp.where(
-        absnorm > uflow / (50.0 * eps),
-        jnp.maximum((50.0 * eps) * absnorm, err),
+        absnorm > uflow / (_ROUNDOFF_FLOOR * eps),
+        jnp.maximum((_ROUNDOFF_FLOOR * eps) * absnorm, err),
         err,
     )
 
@@ -672,7 +670,8 @@ def _romberg_solve(
     f = jax.eval_shape(vfunc, (a + b) / 2)
     rtype = _real_dtype(f.dtype)
     # Compile time constants, as python floats rather than arrays of the working dtype:
-    # forming `uflow / (50 * eps)` in half precision is a needless underflow risk.
+    # forming `uflow / (_ROUNDOFF_FLOOR * eps)` in half precision is a needless
+    # underflow risk.
     eps = float(jnp.finfo(rtype).eps)
     uflow = float(jnp.finfo(rtype).tiny)
 
@@ -788,7 +787,7 @@ def _romberg_solve(
         # `_romberg_err` floors the estimate at the precision the integrand can be
         # summed to, so a run sitting on that floor is asking for more than the
         # arithmetic can deliver, however many levels remain.
-        floor = 50.0 * eps * _norm(resabs)
+        floor = _ROUNDOFF_FLOOR * eps * _norm(resabs)
         status = escalate(
             status, STATUS.roundoff, missed & rested & asked & (err <= floor)
         )
