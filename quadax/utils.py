@@ -2,7 +2,7 @@
 
 import functools
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 import equinox as eqx
@@ -91,18 +91,30 @@ def _coarser_dtype(dtype1, dtype2) -> Any:
 
 
 def resolve_dtypes(
-    interval: jax.Array, fun: Callable[..., jax.Array], args: tuple[Any, ...] = ()
+    interval: jax.Array | Sequence[jax.Array],
+    fun: Callable[..., jax.Array],
+    args: tuple[Any, ...] = (),
+    ndim: int | None = None,
 ) -> DTypes:
     """Work out the dtypes of a quadrature from its limits and its integrand.
 
     The single point at which quadax decides what precision it is working in. See
     :class:`DTypes` for what each one governs.
+
+    ``interval`` is either one array of limits or, for a box, one array per axis, in
+    which case the working precision is the widest of them. ``ndim`` says what one
+    abscissa looks like: ``None`` is a scalar, the 1D case, and an int is the length of
+    the vector a cubature rule hands the integrand.
     """
-    xtype = jnp.asarray(interval).dtype
+    if isinstance(interval, (list, tuple)):
+        xtype = jnp.result_type(*[jnp.asarray(axis) for axis in interval])
+    else:
+        xtype = jnp.asarray(interval).dtype
     # `jnp.zeros((), xtype)` rather than `jnp.array(0.0)`: the latter is *weakly* typed,
     # which both hides the requested precision and lets different expressions involving
     # it settle on different dtypes. See the note on `MAPFUNS`.
-    f = jax.eval_shape(fun, jnp.zeros((), xtype), *args)
+    xprobe = jnp.zeros(() if ndim is None else (ndim,), xtype)
+    f = jax.eval_shape(fun, xprobe, *args)
     ytype = jnp.result_type(xtype, f.dtype)
     etype = _real_dtype(ytype)
     return DTypes(xtype, ytype, etype, _coarser_dtype(xtype, etype))
@@ -257,6 +269,184 @@ class _MappedFunction(eqx.Module):
     @eqx.filter_jit
     def __call__(self, t: jax.Array, *args):
         x, w = jax.lax.switch(self.bitmask, MAPFUNS, t, self.a, self.b)
+        return self.sgn * w * self.fun(x, *args)
+
+
+def _as_box_intervals(interval) -> tuple[jax.Array, ...]:
+    """Normalize either accepted form of ``interval`` to one array per axis.
+
+    An array is the corners and nothing else, a non-array sequence is one interval per
+    axis and may carry breakpoints. Dispatching on the type rather than the shape is
+    what keeps the two unambiguous: an ``(ndim, 2)`` array and the sequence obtained by
+    iterating over it mean the same thing, so the convenience form cannot silently
+    denote a different box than the general one.
+    """
+    if isinstance(interval, (jax.Array, np.ndarray)):
+        errorif(
+            interval.ndim != 2 or interval.shape[1] != 2,
+            ValueError,
+            f"an array of limits must have shape (ndim, 2), giving the two limits of "
+            f"each axis, but got shape {interval.shape}. Note this is the transpose of "
+            "stacking the two corners: use jnp.stack([a, b], axis=-1). To pass "
+            "breakpoints, give a list or tuple of one array per axis instead.",
+        )
+        intervals = tuple(interval[k] for k in range(interval.shape[0]))
+    else:
+        errorif(
+            not isinstance(interval, (list, tuple)),
+            TypeError,
+            f"limits must be an array of shape (ndim, 2) or a list or tuple of one "
+            f"array per axis, got {type(interval).__name__}.",
+        )
+        intervals = tuple(jnp.asarray(axis) for axis in interval)
+    errorif(
+        len(intervals) == 0,
+        ValueError,
+        "limits must cover at least one axis, but got an empty sequence.",
+    )
+    for k, axis in enumerate(intervals):
+        errorif(
+            axis.ndim != 1 or axis.shape[0] < 2,
+            ValueError,
+            f"the limits of axis {k} must be a one dimensional array holding at least "
+            f"its two endpoints, with any breakpoints between them, but got shape "
+            f"{axis.shape}.",
+        )
+        errorif(
+            jnp.issubdtype(axis.dtype, jnp.complexfloating),
+            TypeError,
+            f"integration limits must be real, but axis {k} has dtype {axis.dtype}. "
+            "The subdivision has to order the breakpoints, which complex numbers do "
+            "not admit.",
+        )
+    # Limits are differentiated with respect to, so an integer or boolean axis has to
+    # become inexact here rather than being left for AD to treat as static metadata.
+    return tuple(
+        axis
+        if jnp.issubdtype(axis.dtype, jnp.inexact)
+        else axis.astype(jnp.result_type(float))
+        for axis in intervals
+    )
+
+
+def box_corners(interval: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
+    """Opposite corners of a box given as one interval per axis.
+
+    Parameters
+    ----------
+    interval : sequence of Array
+        One interval per axis, as returned by :func:`~quadax.utils.map_box`.
+
+    Returns
+    -------
+    a, b : Array, shape(ndim,)
+        Opposite corners of the box, the first and last entry of each axis.
+    """
+    return (
+        jnp.stack([axis[0] for axis in interval]),
+        jnp.stack([axis[-1] for axis in interval]),
+    )
+
+
+def map_box(fun: Callable[..., jax.Array], interval):
+    """Map a function over an arbitrary box to one that can be subdivided.
+
+    Transform a function such that the integral of ``fun`` over the box given by
+    ``interval`` is the same as the integral of ``fun_t`` over ``interval_t``, which is
+    finite along every axis whatever ``interval`` was.
+
+    Parameters
+    ----------
+    fun : callable
+        Integrand to transform, with signature ``fun(x, *args)`` where ``x`` has shape
+        ``(ndim,)``.
+    interval : Array, shape(ndim, 2), or sequence of array-like
+        Limits of integration. An array gives the two limits of each axis and no
+        breakpoints. A list or tuple gives one array per axis, each holding that axis'
+        limits with any breakpoints between them, so the axes may carry different
+        numbers of them. Use np.inf to denote infinite extent along an axis.
+
+    Returns
+    -------
+    fun_t : callable
+        Transformed integrand, taking ``x`` of shape ``(ndim,)``.
+    interval_t : tuple of Array
+        One interval per axis, finite along every axis, each as long as the
+        corresponding entry of ``interval``. Use :func:`~quadax.utils.box_corners` to
+        recover the two corners.
+
+    Notes
+    -----
+    Breakpoints do not change the transformation, which acts on a point at a time; they
+    are carried through it so that whatever subdivides the box afterwards can start
+    from them.
+
+    The map is separable, so its Jacobian is the product of the one dimensional ones and
+    reaches the ``ndim`` th power of the magnitude a single axis would give. On a
+    low precision dtype that product can overflow at the nodes furthest out, where the
+    integrand is correspondingly small; the non-finite value is masked away rather than
+    contributing, so the node is lost. Mapping an infinite domain in half precision is
+    limited by this rather than by the rule applied afterwards.
+    """
+    intervals = _as_box_intervals(interval)
+    # One dtype across the axes, so the per axis branches below cannot disagree on the
+    # dtype they return; see the note above on why `t` must not be weakly typed.
+    xtype = jnp.result_type(*intervals)
+    intervals = [axis.astype(xtype) for axis in intervals]
+
+    a, b = box_corners(intervals)
+    # Reversing an axis flips the sign of the integral, so every axis is put in
+    # ascending order and the signs are collected into one factor.
+    sgn = jnp.prod(jnp.where(a > b, -1, 1).astype(xtype))
+    a, b = jnp.minimum(a, b), jnp.maximum(a, b)
+    # Breakpoints outside their axis are pulled to its endpoints, which leaves sub
+    # boxes of zero width for whatever subdivides the box to ignore.
+    intervals = [jnp.sort(jnp.clip(v, a[k], b[k])) for k, v in enumerate(intervals)]
+
+    # bit mask to select the mapping case for each axis, as in `map_interval`
+    bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
+
+    fun_mapped = _MappedBoxFunction(fun, bitmask, sgn, a, b)
+
+    # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
+    # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
+    # where type trick to avoid nan in reverse mode.
+    finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
+    interval_t = []
+    for k, v in enumerate(intervals):
+        v_finite = jnp.where(jnp.isinf(v), finite[k], v)
+        # One `switch` per axis rather than a `vmap` of one over a batched index, which
+        # would become a select over *every* branch, evaluated. The branches disagree on
+        # which endpoint they use, so on an infinite axis the unselected ones return
+        # nan, and a nan that is merely discarded still poisons the reverse mode
+        # derivative. The loop is over a static number of axes, so it unrolls at
+        # trace time.
+        v_t = jax.lax.switch(bitmask[k], MAPFUNS_INV, v_finite, a[k], b[k])
+        v_t = jnp.where(v == jnp.inf, 1, jnp.where(v == -jnp.inf, -1, v_t))
+        interval_t.append(v_t)
+    return fun_mapped, tuple(interval_t)
+
+
+class _MappedBoxFunction(eqx.Module):
+    """Function mapped to a box a fixed cubature rule can be applied over."""
+
+    fun: Callable[..., jax.Array]
+    bitmask: jax.Array
+    sgn: jax.Array
+    a: jax.Array
+    b: jax.Array
+
+    @eqx.filter_jit
+    def __call__(self, t: jax.Array, *args):
+        ndim = self.a.shape[0]
+        xw = [
+            jax.lax.switch(self.bitmask[k], MAPFUNS, t[k], self.a[k], self.b[k])
+            for k in range(ndim)
+        ]
+        x = jnp.stack([p[0] for p in xw])
+        # The map acts on each axis alone, so its Jacobian is diagonal and the volume
+        # element is the product of the per axis derivatives.
+        w = jnp.prod(jnp.stack([p[1] for p in xw]))
         return self.sgn * w * self.fun(x, *args)
 
 

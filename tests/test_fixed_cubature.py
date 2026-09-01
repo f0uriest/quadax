@@ -30,7 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule
+from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule, quadgk
 from quadax.fixed_cubature import (
     AbstractCubatureRule,
     GenzMalikRule,
@@ -44,6 +44,7 @@ from quadax.quad_weights import (
     _orbit_weights,
     get_genz_malik_table,
 )
+from quadax.utils import box_corners, map_box
 
 from .problems import ULP_ATOL, ULP_RTOL, real_dtypes
 
@@ -717,3 +718,72 @@ class TestConstruction:
     def test_bad_batch_size_rejected(self, bad):
         with pytest.raises(ValueError, match="batch_size"):
             GenzMalikRule(2, batch_size=bad)
+
+
+class TestInfiniteBox:
+    """A box with unbounded axes, mapped by ``map_box`` and then integrated.
+
+    The map is checked on its own in ``tests/test_utils.py``; what is under test here is
+    that a rule applied afterwards recovers the integral, including when the axes are
+    unbounded in different ways.
+    """
+
+    @pytest.mark.parametrize(
+        "a, b, exact",
+        [
+            ([0.0, 0.0], [np.inf, np.inf], 1.0),
+            ([-np.inf, -np.inf], [0.0, 0.0], 1.0),
+            ([0.0, -np.inf], [np.inf, np.inf], np.sqrt(np.pi)),
+            ([-np.inf, -np.inf], [np.inf, np.inf], np.pi),
+        ],
+        ids=["a_inf", "ninf_b", "mixed", "ninf_inf"],
+    )
+    def test_an_unbounded_box_is_integrated(self, a, b, exact):
+        """Gaussian on the infinite axes and a decaying exponential on the rest."""
+
+        def fun(x):
+            lo, hi = jnp.asarray(a), jnp.asarray(b)
+            semi = jnp.isinf(lo) ^ jnp.isinf(hi)
+            return jnp.prod(jnp.where(semi, jnp.exp(-jnp.abs(x)), jnp.exp(-(x**2))))
+
+        rule = TensorProductRule([GaussKronrodRule(61)] * 2)
+        limits = jnp.stack([jnp.asarray(a), jnp.asarray(b)], axis=-1)
+        fun_t, interval_t = map_box(fun, limits)
+        y, err, _, _, _ = rule.integrate(fun_t, *box_corners(interval_t), ())
+        np.testing.assert_allclose(float(y), exact, rtol=1e-8, atol=0)
+        assert float(err) >= abs(float(y) - exact)
+
+    def test_a_separable_integral_factorizes(self):
+        """The two dimensional answer must be the one dimensional one squared.
+
+        The Jacobian of the box map is a product over axes, so an error in it shows up
+        as a mismatch with the same integrand done one axis at a time.
+        """
+        fun_1d = lambda x: jnp.exp(-x) / (1 + x**2)  # noqa: E731
+        y_1d = quadgk(fun_1d, jnp.array([0.0, jnp.inf]))[0]
+        fun = lambda x: jnp.prod(jnp.exp(-x) / (1 + x**2))  # noqa: E731
+        fun_t, interval_t = map_box(fun, jnp.array([[0.0, np.inf], [0.0, np.inf]]))
+        y = TensorProductRule([GaussKronrodRule(61)] * 2).integrate(
+            fun_t, *box_corners(interval_t), ()
+        )
+        np.testing.assert_allclose(float(y[0]), float(y_1d) ** 2, rtol=1e-10, atol=0)
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_genz_malik_over_an_unbounded_box(self, ndim):
+        """The fully symmetric rules go through the same map as the tensor product.
+
+        The map concentrates a Gaussian against the ends of the reference box, which a
+        single application of a fixed rule resolves only to a few percent. So what is
+        asserted is that the answer is the right one to that accuracy and that the
+        error estimate covers the distance to it, not a tight tolerance a fixed rule
+        has no way to meet.
+        """
+        fun = lambda x: jnp.exp(-jnp.sum(x**2))  # noqa: E731
+        limits = jnp.tile(jnp.array([-jnp.inf, jnp.inf]), (ndim, 1))
+        fun_t, interval_t = map_box(fun, limits)
+        y, err, *_ = GenzMalikRule(ndim, degree=13).integrate(
+            fun_t, *box_corners(interval_t), ()
+        )
+        exact = np.pi ** (ndim / 2)
+        np.testing.assert_allclose(float(y), exact, rtol=5e-2, atol=0)
+        assert float(err) >= abs(float(y) - exact)
