@@ -183,11 +183,51 @@ class TestGenzMalikExactness:
         got = integrate_cheb(GenzMalikRule(ndim, degree), a, b, degrees)
         assert abs(got - exact) > 0.01 * abs(exact)
 
+    @pytest.mark.parametrize("degree", DEGREES)
+    def test_one_axis_is_exact_to_its_degree(self, degree):
+        """Over a single axis the rule and its embedded rule reach their degrees.
+
+        Swept on its own rather than through ``NDIMS`` because a single axis is where
+        the family degenerates: there is one orbit per generator and one moment
+        equation per even power, so the system the weights come from is square and the
+        residual the other dimensions are checked against is satisfied whatever the
+        generators are. Exactness is then the only thing left that can be measured, and
+        a pure power is the only polynomial there is to measure it with.
+        """
+        a, b = box("offset", 1)
+        rule = GenzMalikRule(1, degree)
+        table = get_genz_malik_table(1, degree)
+        xh, wl = table.x, table.wl
+        tol = EXACTNESS_TOL[degree]
+        cheb = lambda k: np.cos(k * np.arccos(xh[:, 0]))
+        for total in range(degree + 1):
+            np.testing.assert_allclose(
+                integrate_cheb(rule, a, b, [total]),
+                cheb_product_integral(a, b, [total]),
+                rtol=tol,
+                atol=tol,
+                err_msg=f"degree {total}",
+            )
+        for total in range(degree - 1):
+            np.testing.assert_allclose(
+                wl @ cheb(total),
+                cheb_product_integral([-1.0], [1.0], [total]),
+                rtol=tol,
+                atol=tol,
+                err_msg=f"embedded, degree {total}",
+            )
+        # and each stops where it is supposed to, one degree past its own
+        exact = cheb_product_integral(a, b, [degree + 1])
+        assert abs(integrate_cheb(rule, a, b, [degree + 1]) - exact) > 0.01 * abs(exact)
+        exact = cheb_product_integral([-1.0], [1.0], [degree - 1])
+        assert abs(wl @ cheb(degree - 1) - exact) > 0.01 * abs(exact)
+
     @pytest.mark.parametrize("ndim", NDIMS)
     @pytest.mark.parametrize("degree", DEGREES)
     def test_embedded_rule_is_two_degrees_lower(self, ndim, degree):
         """The embedded weights are exact two degrees lower, and fail one past that."""
-        xh, _, wl, _ = get_genz_malik_table(ndim, degree)
+        table = get_genz_malik_table(ndim, degree)
+        xh, wl = table.x, table.wl
         for total in range(degree - 1):
             for degrees in compositions(total, ndim):
                 v = np.prod(np.cos(np.asarray(degrees) * np.arccos(xh)), axis=1)
@@ -219,10 +259,11 @@ class TestTablesAreWellFormed:
         orbits = exact_orbits(ndim, degree)
         assert _orbit_weights(orbits, ndim, degree)[1] == 0
         assert _orbit_weights(orbits[:-1], ndim, degree - 2)[1] == 0
-        xh, _, _, _ = get_genz_malik_table(ndim, degree)
-        assert sum(sum(o.values()) for o in orbits) == len(xh)
+        xh = get_genz_malik_table(ndim, degree).x
+        # every node of the rule, plus the axis orbit only the null rules read
+        assert sum(sum(o.values()) for o in orbits) + 2 * ndim == len(xh)
         if degree == 7:
-            assert len(xh) == 2**ndim + 2 * ndim**2 + 2 * ndim + 1
+            assert len(xh) == 2**ndim + 2 * ndim**2 + 4 * ndim + 1
 
     @pytest.mark.parametrize("degree", DEGREES)
     def test_every_node_lies_inside_the_cube(self, degree):
@@ -234,7 +275,7 @@ class TestTablesAreWellFormed:
         classical rule, whose generators are the simple rationals pinned here.
         """
         for ndim in NDIMS:
-            xh, _, _, _ = get_genz_malik_table(ndim, degree)
+            xh = get_genz_malik_table(ndim, degree).x
             assert np.max(np.abs(xh)) < 1.0
         squares = _fs_generators((degree - 1) // 2 - 1, _FS_DELTA2[degree])
         if degree == 7:
@@ -251,7 +292,8 @@ class TestTablesAreWellFormed:
     @pytest.mark.parametrize("degree", DEGREES)
     def test_genz_malik_weights_sum_to_the_volume(self, ndim, degree):
         """Both rules integrate a constant, ie the volume of the reference cube."""
-        _, wh, wl, wsplit = get_genz_malik_table(ndim, degree)
+        table = get_genz_malik_table(ndim, degree)
+        wh, wl, wsplit = table.wh, table.wl, table.wsplit
         np.testing.assert_allclose(wh.sum(), 2**ndim, rtol=1e-12)
         np.testing.assert_allclose(wl.sum(), 2**ndim, rtol=1e-12)
         # A fourth difference must be blind to a constant, or a flat integrand would
@@ -575,15 +617,16 @@ class TestBatchSize:
     def test_genz_malik_node_count(self):
         # The higher degrees have no such closed form, their orbit lists depending on
         # how the degree partitions across the axes, so they are pinned at the
-        # dimensions swept here.
+        # dimensions swept here. Every count includes the 2*ndim nodes of the orbit
+        # the error estimate adds on top of the rule's own.
         counts = {
-            9: {2: 29, 3: 71, 5: 263},
-            11: {2: 45, 3: 137, 5: 713},
-            13: {2: 65, 3: 239, 5: 1715},
+            9: {2: 33, 3: 77, 5: 273},
+            11: {2: 49, 3: 143, 5: 723},
+            13: {2: 69, 3: 245, 5: 1725},
         }
         for ndim in NDIMS:
-            expected = 2**ndim + 2 * ndim**2 + 2 * ndim + 1
-            assert GenzMalikRule(ndim).nodes_per_call == expected
+            expected = 2**ndim + 2 * ndim**2 + 4 * ndim + 1
+            assert GenzMalikRule(ndim, 7).nodes_per_call == expected
             for degree, expected_n in counts.items():
                 assert GenzMalikRule(ndim, degree).nodes_per_call == expected_n[ndim]
 
@@ -639,9 +682,9 @@ class TestVmapAndNorm:
 class TestConstruction:
     """What the constructors accept, and what they say when they refuse."""
 
-    def test_genz_malik_needs_at_least_two_dimensions(self):
-        with pytest.raises(ValueError, match="at least 2"):
-            GenzMalikRule(1)
+    def test_genz_malik_needs_at_least_one_dimension(self):
+        with pytest.raises(ValueError, match="at least one dimension"):
+            GenzMalikRule(0)
 
     def test_genz_malik_rejects_an_unimplemented_degree(self):
         with pytest.raises(NotImplementedError, match="should be one of"):
@@ -655,11 +698,11 @@ class TestConstruction:
         with pytest.raises(ValueError, match="must not be given"):
             TensorProductRule([GaussKronrodRule(15)] * 2, ndim=2)
 
-    def test_tensor_product_needs_at_least_two_axes(self):
-        with pytest.raises(ValueError, match="at least 2"):
-            TensorProductRule([GaussKronrodRule(15)])
-        with pytest.raises(ValueError, match="at least 2"):
-            TensorProductRule(GaussKronrodRule(15), ndim=1)
+    def test_tensor_product_needs_at_least_one_axis(self):
+        with pytest.raises(ValueError, match="at least one axis"):
+            TensorProductRule([])
+        with pytest.raises(ValueError, match="positive integer"):
+            TensorProductRule(GaussKronrodRule(15), ndim=0)
 
     def test_tensor_product_needs_nested_rules(self):
         """A rule without embedded low order weights cannot estimate error.
