@@ -17,6 +17,9 @@ from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     QuadratureOps,
+    _frozen_mesh,
+    _quad_on_mesh,
+    _rebuild_box_mesh,
     build_box_integrand,
     closure_convert,
 )
@@ -294,12 +297,12 @@ def adaptive_cubature(
         "epsrel": epsrel,
         "max_nregion": max_nregion,
     }
-    # Only `build` and `solve`: rebuilding the mesh as a smooth function of the limits
-    # needs per-axis owner and fraction bookkeeping that nothing records, so the
-    # derivative goes straight through the loop instead.
     ops = QuadratureOps(
         build=partial(build_box_integrand, f_conv=f_conv, ndim=rule.ndim),
         solve=_cubature_solve,
+        rebuild=_rebuild_box_mesh,
+        on_mesh=_quad_on_mesh,
+        frozen=_frozen_mesh,
     )
     y, state = adjoint.quadrature(ops, intervals, args, consts, kwargs, opts)
 
@@ -366,6 +369,14 @@ def _init_cubature_state(
     state["err_bnd"] = jnp.zeros((), etype)  # error bound we're trying to reach
     state["area"] = jnp.zeros(shape, ytype)  # current best estimate for I
     state["err_sum"] = jnp.zeros((), etype)  # current estimate for error in I
+    # Where each region sits relative to the *initial* mesh, one column per axis: which
+    # cell of that axis' breakpoints it was carved out of, and the fractions of the way
+    # along that cell its two corners lie at. These are what stay fixed when a limit or
+    # a breakpoint moves, so recording them lets the mesh be rebuilt as a smooth
+    # function of `interval` by gather and rescale.
+    state["owner"] = jnp.zeros((max_nregion, ndim), int).at[:n_init].set(idx)
+    state["frac_a"] = jnp.zeros((max_nregion, ndim), xtype)
+    state["frac_b"] = jnp.zeros((max_nregion, ndim), xtype).at[:n_init].set(1.0)
     return state
 
 
@@ -508,12 +519,25 @@ def _cubature_solve(
                 .set(jnp.where(swap, x1, x2))
             )
 
+        # Both halves stay inside whichever cell of the initial mesh this region came
+        # from, splitting its span along the cut axis at the midpoint of the fractions.
+        # The other axes are untouched, exactly as the corners are.
+        frac_a_i = state["frac_a"][i]
+        frac_b_i = state["frac_b"][i]
+        frac_mid = 0.5 * (frac_a_i[k] + frac_b_i[k])
+        frac_a1, frac_b1 = frac_a_i, frac_b_i.at[k].set(frac_mid)
+        frac_a2, frac_b2 = frac_a_i.at[k].set(frac_mid), frac_b_i
+        owner_i = state["owner"][i]
+
         state["e_arr"] = place(state["e_arr"], error1, error2)
         state["r_arr"] = place(state["r_arr"], area1, area2)
         state["f_arr"] = place(state["f_arr"], intabs1, intabs2)
         state["d_arr"] = place(state["d_arr"], split1, split2)
         state["a_arr"] = place(state["a_arr"], a1, a2)
         state["b_arr"] = place(state["b_arr"], b1, b2)
+        state["owner"] = place(state["owner"], owner_i, owner_i)
+        state["frac_a"] = place(state["frac_a"], frac_a1, frac_a2)
+        state["frac_b"] = place(state["frac_b"], frac_b1, frac_b2)
 
         # Both running totals are summed afresh from the per-region contributions rather
         # than carried forward as `total += new - old`. Accumulating discards ~eps times

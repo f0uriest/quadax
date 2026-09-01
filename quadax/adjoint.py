@@ -208,6 +208,23 @@ def _rebuild_mesh(interval, frozen):
     return lo + frac_a * width, lo + frac_b * width
 
 
+def _rebuild_box_mesh(interval, frozen):
+    """Rebuild a box subdivision from `interval`, as a function of the limits.
+
+    The n dimensional counterpart of ``_rebuild_mesh``. Cutting a region cuts one of its
+    axes, so along every axis independently the same invariant holds as in one
+    dimension: the region stays inside whichever cell of that axis' breakpoints it was
+    carved out of, at fixed dyadic fractions of the way along it. ``interval`` gives one
+    array of breakpoints per axis and the owner and fractions have one column per axis,
+    so this is the one dimensional gather and rescale done axis by axis.
+    """
+    owner, frac_a, frac_b = frozen
+    lo = jnp.stack([axis[owner[:, k]] for k, axis in enumerate(interval)], axis=-1)
+    hi = jnp.stack([axis[owner[:, k] + 1] for k, axis in enumerate(interval)], axis=-1)
+    width = hi - lo
+    return lo + frac_a * width, lo + frac_b * width
+
+
 # Default for the adjoints' ``chunk_size``: how many sub-intervals of a fixed
 # subdivision are evaluated at once. Evaluating them all together is fastest but makes
 # peak memory scale with ``max_ninter``, which is a safety bound users tend to set
@@ -221,11 +238,12 @@ _CHUNK = 8
 
 
 def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
-    """Group a fixed subdivision into blocks of sub-intervals ready for evaluation.
+    """Group a fixed subdivision into blocks ready for evaluation.
 
     Returns the blocked endpoints and mask to scan over, a function evaluating one
     block, the shape and dtype of one sub-interval's contribution, and how many slots
-    the subdivision has.
+    the subdivision has. An endpoint is a scalar for a one dimensional subdivision and
+    a row of corner coordinates for a box, and the two are handled alike throughout.
     """
     # Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
     # block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make
@@ -249,16 +267,23 @@ def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
     # that is singular somewhere in the mapped domain from poisoning the unused slots
     # with a NaN that the mask would then propagate. So the granularity of the skip is
     # ``chunk_size``.
-    used = a_arr != b_arr
-    a_safe = jnp.where(used, a_arr, a_arr[0])
-    b_safe = jnp.where(used, b_arr, b_arr[0])
+    # Over a box an endpoint is a row of corner coordinates rather than a scalar, and a
+    # region with no extent along any one axis contributes nothing, so the emptiness
+    # test reduces over the axes.
+    used = (a_arr != b_arr).reshape(a_arr.shape[0], -1).any(axis=-1)
+    keep = used.reshape((-1,) + (1,) * (a_arr.ndim - 1))
+    a_safe = jnp.where(keep, a_arr, a_arr[0])
+    b_safe = jnp.where(keep, b_arr, b_arr[0])
 
     nslot = a_arr.shape[0]
     chunk = min(chunk_size, nslot)
     pad = -nslot % chunk
-    reshape = lambda x, fill: jnp.pad(x, (0, pad), constant_values=fill).reshape(
-        -1, chunk
-    )
+
+    def blocked(x, fill):
+        """Pad the slot axis out to whole blocks, then group it into them."""
+        fill = jnp.broadcast_to(jnp.asarray(fill, x.dtype), (pad, *x.shape[1:]))
+        x = jnp.concatenate([x, fill])
+        return x.reshape(-1, chunk, *x.shape[1:])
 
     apply1 = lambda a, b: rule._apply(vfunc, a, b, ())
     sds = jax.eval_shape(apply1, a_arr[0], b_arr[0])
@@ -266,9 +291,9 @@ def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
     # mesh's. With the mesh at float64 and the values at float32 the latter would
     # otherwise be promoted straight back to float64 here.
     blocks = (
-        reshape(a_safe, a_arr[0]),
-        reshape(b_safe, b_arr[0]),
-        reshape(used.astype(_real_dtype(sds.dtype)), 0.0),
+        blocked(a_safe, a_arr[0]),
+        blocked(b_safe, b_arr[0]),
+        blocked(used.astype(_real_dtype(sds.dtype)), 0.0),
     )
 
     def evaluate(block):

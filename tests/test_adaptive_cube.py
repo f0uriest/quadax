@@ -319,6 +319,34 @@ class TestTransformations:
             np.testing.assert_allclose(fwd, rev, rtol=1e-13, atol=1e-15)
             np.testing.assert_allclose(fwd, jax.jacfwd(exact)(x), rtol=1e-6, atol=1e-9)
 
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_the_adjoints_options_do_not_move_the_derivative(self, transform):
+        """Chunking and checkpointing trade memory against speed and nothing else.
+
+        The derivative is taken on the mesh the solve settled on, which is evaluated in
+        blocks of regions with the slots past the end of the mesh masked out, so a chunk
+        size that does not divide the slot count is the one that has to pad. Taken with
+        respect to a limit, which is the case that rebuilds the mesh from the limits
+        rather than reusing the corners as they were recorded.
+        """
+        fun = lambda x, p: jnp.exp(-p * jnp.sum(x**2))
+        run = lambda adjoint: transform(
+            lambda z: cubgm(
+                fun,
+                [jnp.array([0.0, z]), jnp.array([0.0, 1.0])],
+                args=(1.3,),
+                max_nregion=50,
+                adjoint=adjoint,
+            )[0]
+        )(0.8)
+        want = run(DirectAdjoint())
+        for adjoint in (
+            DirectAdjoint(chunk_size=3),
+            DirectAdjoint(checkpoint=True),
+            DirectAdjoint(chunk_size=1, checkpoint=True),
+        ):
+            np.testing.assert_allclose(run(adjoint), want, rtol=1e-13, atol=1e-15)
+
 
 class TestPlumbing:
     """Options that must not change the answer, and dtypes that must follow it."""
