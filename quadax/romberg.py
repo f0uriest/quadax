@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
-from ._status import STATUS, escalate
+from ._status import STATUS, error_if_flagged, escalate
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -20,6 +20,7 @@ from .adjoint import (
     closure_convert,
 )
 from .utils import (
+    _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _pnorm,
     _real_dtype,
@@ -154,10 +155,10 @@ def romberg(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -285,7 +286,7 @@ def _romberg(
     status = state["status"]
     out = QuadratureInfo(state["err_sum"], state["neval"], status, info)
     if throw:
-        y = status.error_if(y, status != STATUS.normal)
+        y = error_if_flagged(y, status)
     return y, out
 
 
@@ -551,7 +552,7 @@ def _romberg_err(
       For the trapezoidal column, whose ratio settles at 1/4, the two together come to
       ``4/3`` of the movement, which is that column's error exactly.
 
-    Finally the result is floored at ``50 * eps * resabs``, since no estimate is
+    Finally the result is floored at the roundoff level, since no estimate is
     meaningful below the noise of evaluating and summing the integrand.
     """
     # Substituted rather than masked, in both ratios: the denominators are exactly zero
@@ -569,15 +570,12 @@ def _romberg_err(
     ratio = jnp.minimum(ratio, _TAIL_CAP)
     err = err + d * ratio / (1 - ratio)
 
-    # The floor covers the conditioning of the integrand rather than the summation:
-    # abscissae carry `~eps*|x|`, which the integrand amplifies by `|f'|`. 50 is
-    # QUADPACK's constant for the same quantity. The guard keeps the product from
-    # underflowing to zero, which would make the floor a no-op precisely where the
-    # integrand is smallest.
+    # See `_ROUNDOFF_FLOOR`. The guard keeps the product from underflowing to zero,
+    # which would make the floor a no-op precisely where the integrand is smallest.
     absnorm = _norm(resabs)
     return jnp.where(
-        absnorm > uflow / (50.0 * eps),
-        jnp.maximum((50.0 * eps) * absnorm, err),
+        absnorm > uflow / (_ROUNDOFF_FLOOR * eps),
+        jnp.maximum((_ROUNDOFF_FLOOR * eps) * absnorm, err),
         err,
     )
 
@@ -672,7 +670,8 @@ def _romberg_solve(
     f = jax.eval_shape(vfunc, (a + b) / 2)
     rtype = _real_dtype(f.dtype)
     # Compile time constants, as python floats rather than arrays of the working dtype:
-    # forming `uflow / (50 * eps)` in half precision is a needless underflow risk.
+    # forming `uflow / (_ROUNDOFF_FLOOR * eps)` in half precision is a needless
+    # underflow risk.
     eps = float(jnp.finfo(rtype).eps)
     uflow = float(jnp.finfo(rtype).tiny)
 
@@ -788,7 +787,7 @@ def _romberg_solve(
         # `_romberg_err` floors the estimate at the precision the integrand can be
         # summed to, so a run sitting on that floor is asking for more than the
         # arithmetic can deliver, however many levels remain.
-        floor = 50.0 * eps * _norm(resabs)
+        floor = _ROUNDOFF_FLOOR * eps * _norm(resabs)
         status = escalate(
             status, STATUS.roundoff, missed & rested & asked & (err <= floor)
         )
@@ -1010,10 +1009,10 @@ def _rombergts(
           last one alone, plus the tail that movement's own contraction rate implies,
           and floored at the precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (dict or None) Other information returned by the algorithm.
           Only present if ``full_output`` is True. Contains the following:
 
@@ -1172,10 +1171,10 @@ def tanhsinh(
           the mass the map leaves outside the range integrated over, and floored at the
           precision the integrand can be summed to.
         * neval : (int) Total number of function evaluations.
-        * status : (quadax.STATUS) Why the routine terminated. ``STATUS.normal`` means
-          the requested tolerances were reached; every other member names a difficulty
-          and prints as the message explaining it. Where a run meets more than one
-          condition the most severe is reported.
+        * status : (int) Code for why the routine terminated, one of ``quadax.STATUS``.
+          ``STATUS.normal`` (0) means the requested tolerances were reached; every other
+          code names a difficulty, whose message is ``print(quadax.STATUS[status])``.
+          Where a run meets more than one condition the most severe is reported.
         * info : (ndarray or None) Only present if ``full_output`` is True: the
           trapezoidal estimate at each refinement level, of shape
           ``(divmax + 1, ...)``. Levels beyond the one the routine stopped at are zero.

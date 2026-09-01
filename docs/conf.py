@@ -416,36 +416,26 @@ latex_toplevel_sectioning = "chapter"
 
 
 # -- Enumeration members -----------------------------------------------------------
-# `quadax.STATUS` is an `equinox.Enumeration`, whose members the metaclass keeps out of
-# the class namespace and serves through `__getattr__`. Neither `dir` nor `vars` sees
-# them, so autodoc documents such a class as though it were empty. equinox builds a
-# listing of its own, but only for a class carrying no docstring, and writes it in the
-# markdown its own docs are built from, which does not survive being read as reST.
-# This generates the same listing from the same source, in reST.
+# The members of `quadax.STATUS` carry the message explaining them as an attribute
+# rather than as a docstring, which is what autodoc would otherwise pick up, and the
+# code each one reports is what a reader needs alongside it. This writes both into the
+# class page, in declaration order.
+import enum  # noqa: E402
 import textwrap  # noqa: E402
-
-import equinox  # noqa: E402
-
-
-def _enumeration_members(cls):
-    """Name and message of each member, in declaration order.
-
-    ``_name_to_item`` is equinox's own record of them, and the only way to enumerate
-    them.
-    """
-    return [(name, cls[item]) for name, item in cls._name_to_item.items()]
 
 
 def _document_enumeration_members(app, what, name, obj, options, lines):
     """Append the members of an Enumeration to its class page."""
     if what != "class" or not isinstance(obj, type):
         return
-    if not issubclass(obj, equinox.Enumeration) or obj is equinox.Enumeration:
+    if not issubclass(obj, enum.Enum) or not all(hasattr(m, "message") for m in obj):
         return
     lines += ["", ".. rubric:: Members", ""]
-    for member, message in _enumeration_members(obj):
-        lines.append(f"``{member}``")
-        lines += textwrap.wrap(message, 84, initial_indent="   ", subsequent_indent="   ")
+    for member in obj:
+        lines.append(f"``{member.name}`` (code ``{member.value}``)")
+        lines += textwrap.wrap(
+            member.message, 84, initial_indent="   ", subsequent_indent="   "
+        )
         lines.append("")
 
 

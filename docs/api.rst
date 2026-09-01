@@ -59,7 +59,7 @@ Results and termination status
 
 Every iterative routine returns its result alongside a :class:`~quadax.QuadratureInfo`,
 whose ``status`` says why it stopped. See :doc:`diagnostics` for how to read one and
-what to do about each member.
+what to do about each code.
 
 .. autosummary::
     :toctree: _api/
