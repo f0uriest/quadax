@@ -19,6 +19,7 @@ from . import _acceleration
 from .utils import (
     _real_dtype,
     check_size,
+    map_box,
     map_interval,
     tree_where,
     wrap_func,
@@ -36,21 +37,22 @@ class _ConvertedFunction(eqx.Module):
         return self.f_conv(x, self.args, *self.consts)
 
 
-def closure_convert(fun, args, xtype):
+def closure_convert(fun, args, xtype, ndim=None):
     """Hoist values closed over by ``fun`` so that they are visible to AD.
 
     Custom derivative rules only see their explicit arguments. Anything ``fun`` closes
     over would otherwise silently get a zero gradient, so pull it out into ``consts``
     and pass it in explicitly.
 
-    ``xtype`` is the dtype the abscissa will be carried at. It matters here rather
-    than only downstream because ``closure_convert`` traces ``fun`` to a jaxpr at the
-    dtype it is given, and that jaxpr is what every later evaluation of the integrand
-    goes through.
+    ``xtype`` is the dtype the abscissa will be carried at, and ``ndim`` its shape:
+    ``None`` for the scalar abscissa of a 1D quadrature, an int for the length of the
+    vector a cubature rule hands the integrand. Both matter here rather than only
+    downstream because ``closure_convert`` traces ``fun`` to a jaxpr at the abscissa it
+    is given, and that jaxpr is what every later evaluation of the integrand goes
+    through.
     """
-    f_conv, consts = jax.closure_convert(
-        lambda x, args_: fun(x, *args_), jnp.zeros((), xtype), args
-    )
+    xprobe = jnp.zeros(() if ndim is None else (ndim,), xtype)
+    f_conv, consts = jax.closure_convert(lambda x, args_: fun(x, *args_), xprobe, args)
     return f_conv, tuple(consts)
 
 
@@ -65,6 +67,19 @@ def build_integrand(interval, args, consts, *, f_conv, safe=False):
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_mapped, interval_t = map_interval(fun, interval)
     return wrap_func(fun_mapped, (), interval_t.dtype, safe=safe), interval_t
+
+
+def build_box_integrand(interval, args, consts, *, f_conv, ndim, safe=False):
+    """Map the integrand over a box to the reference cube and wrap it.
+
+    The n dimensional counterpart of ``build_integrand``. ``interval`` is one array of
+    limits per axis, and so is the ``interval_t`` returned, each carrying whatever
+    breakpoints that axis was given.
+    """
+    fun = _ConvertedFunction(f_conv, args, consts)
+    fun_mapped, interval_t = map_box(fun, interval)
+    xtype = jnp.result_type(*interval_t)
+    return wrap_func(fun_mapped, (), xtype, safe=safe, ndim=ndim), interval_t
 
 
 class QuadratureOps(NamedTuple):
@@ -502,7 +517,7 @@ class AbstractAdjoint(eqx.Module):
     def quadrature(
         self,
         ops: QuadratureOps,
-        interval: jax.Array,
+        interval: jax.Array | tuple[jax.Array, ...],
         args: tuple,
         consts: tuple,
         kwargs: dict,
@@ -514,9 +529,10 @@ class AbstractAdjoint(eqx.Module):
         ----------
         ops : QuadratureOps
             Primitive operations for this quadrature method.
-        interval : jax.Array
+        interval : jax.Array or tuple of jax.Array
             Limits of integration with possible breakpoints, in the original
-            (unmapped) coordinates.
+            (unmapped) coordinates. One array for a one dimensional quadrature, one
+            per axis for a cubature over a box.
         args : tuple
             Extra arguments to the integrand.
         consts : tuple

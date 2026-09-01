@@ -67,8 +67,21 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
         "as a breakpoint is worth more, since the mesh no longer has to find it.",
     )
 
-    max_divisions = (
+    max_nregion = (
         2,
+        "The subdivision used all max_nregion regions without reaching the tolerance. "
+        "The value returned is the total over the mesh it ended with, and the reported "
+        "error is that mesh's own estimate for it. A box is cut along one axis at a "
+        "time, so resolving a feature that is a surface rather than a point costs "
+        "regions in proportion to how finely the axes along it must be divided, and "
+        "raising max_nregion helps only if the subdivision was still making progress. "
+        "Where the integrand has a singularity or a jump on a known axis aligned "
+        "plane, passing that coordinate in `interval` as a breakpoint on its axis is "
+        "worth more, since the mesh no longer has to find it.",
+    )
+
+    max_divisions = (
+        3,
         "The schedule used all divmax refinement levels without reaching the "
         "tolerance. A Romberg mesh halves the whole interval uniformly and cannot "
         "refine near a difficulty, so an integrand with a local feature is better "
@@ -76,7 +89,7 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
     )
 
     no_converge = (
-        3,
+        4,
         "The convergence acceleration stopped making progress: six extrapolations in "
         "a row produced nothing better than the one already held, while claiming an "
         "error far below what the subdivision reports. The best of them is returned, "
@@ -86,7 +99,7 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
     )
 
     truncation = (
-        4,
+        5,
         "The tanh-sinh map leaves more of the integral outside the range its abscissae "
         "cover than the tolerance allows, so refining further cannot reach it. This is "
         "a property of the map in finite precision rather than of the mesh, and more "
@@ -97,7 +110,7 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
     )
 
     bad_integrand = (
-        5,
+        6,
         "Subdivision drove sub-intervals down to a width of order the floating point "
         "spacing across the interval, where the abscissae within one can no longer be "
         "told apart, so the mesh cannot localize the difficulty any further. This is "
@@ -108,7 +121,7 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
     )
 
     roundoff = (
-        6,
+        7,
         "The achievable accuracy is limited by roundoff. Subdivision has stopped "
         "buying accuracy: the error estimate has reached the floor the arithmetic "
         "imposes, or the total stopped moving while its error stayed where it was. The "
@@ -119,7 +132,7 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
     )
 
     divergent = (
-        7,
+        8,
         "The integral is suspected to be divergent. The extrapolated value bears no "
         "relation to the running total it was built from. A finite value may still be "
         "returned, but do not use it without establishing that the integral converges.",
