@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import scipy.special
 
 from quadax import (
     STATUS,
@@ -210,6 +211,43 @@ class TestOneDimension:
         assert int(nd.info["nregion"]) == int(one.info["ninter"])
         np.testing.assert_allclose(float(nd.err), float(one.err), rtol=0.05)
 
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_the_leibniz_boundary_term_reduces_too(self, transform):
+        """Over one axis a face of the box is a point, and the term is a difference.
+
+        The boundary term is an integral over a face, which has one dimension fewer
+        than the box, so over a single axis it is an integral over nothing: one
+        evaluation of the integrand at the single point the face consists of. Nothing
+        special marks that case in the code, it is the general one at ``ndim - 1 == 0``,
+        and this is what says so. A jump at a moving breakpoint is the case that would
+        come back as zero if the term were dropped rather than degenerating.
+        """
+        step = lambda t, z: jnp.where(t > z[0], 1.0, 0.0)  # noqa: E731
+        limits = lambda s: jnp.stack(  # noqa: E731
+            [-jnp.ones_like(s), s, jnp.ones_like(s)]
+        )
+        nd = lambda s: adaptive_cubature(  # noqa: E731
+            TensorProductRule(GaussKronrodRule(21), ndim=1),
+            lambda x, z: step(x[0], z),
+            [limits(s)],
+            (jnp.atleast_1d(s),),
+            adjoint=LeibnizAdjoint(),
+        )[0]
+        one = lambda s: adaptive_quadrature(  # noqa: E731
+            GaussKronrodRule(21),
+            step,
+            limits(s),
+            (jnp.atleast_1d(s),),
+            extrapolate=False,
+            adjoint=LeibnizAdjoint(),
+        )[0]
+        s = jnp.asarray(0.3)
+        np.testing.assert_allclose(float(nd(s)), float(one(s)), rtol=1e-13)
+        np.testing.assert_allclose(
+            float(transform(nd)(s)), float(transform(one)(s)), rtol=1e-13, atol=1e-15
+        )
+        np.testing.assert_allclose(float(transform(nd)(s)), -1.0, atol=1e-9)
+
 
 class TestStatus:
     """Each way the routine can stop, and that it reports the right one."""
@@ -319,6 +357,45 @@ class TestTransformations:
             np.testing.assert_allclose(fwd, rev, rtol=1e-13, atol=1e-15)
             np.testing.assert_allclose(fwd, jax.jacfwd(exact)(x), rtol=1e-6, atol=1e-9)
 
+    @pytest.mark.parametrize(
+        "adjoint", [LeibnizAdjoint(), DirectAdjoint()], ids=["leibniz", "direct"]
+    )
+    @pytest.mark.parametrize(
+        "second",
+        [
+            lambda f: jax.jacfwd(jax.jacfwd(f)),
+            jax.hessian,
+            lambda f: jax.grad(jax.grad(f)),
+        ],
+        ids=["jacfwd^2", "hessian", "grad^2"],
+    )
+    def test_second_derivatives(self, second, adjoint):
+        """Both adjoints survive being differentiated twice, in every nesting.
+
+        One parameter reaches the answer by every route at once: through an argument of
+        the integrand, through a limit, and through a breakpoint that a discontinuity
+        is pinned to. So the second derivative is taken of an interior solve, of an
+        outer face and of a jump between two faces together, and the exact answer is
+        wrong if any one of them is.
+        """
+        fun = lambda x, z: jnp.where(x[0] > z[0], 5.0, 1.0) * jnp.exp(-z[0] * x[1])
+        f = lambda s: cubgm(  # noqa: E731
+            fun,
+            [
+                jnp.stack([jnp.zeros_like(s), s, jnp.ones_like(s)]),
+                jnp.stack([jnp.zeros_like(s), s]),
+            ],
+            (jnp.atleast_1d(s),),
+            adjoint=adjoint,
+        )[0]
+        # int_0^1 int_0^s = (5 - 4s) (1 - exp(-s^2))/s, itself differentiated twice
+        exact = lambda s: (5 - 4 * s) * (1 - jnp.exp(-s * s)) / s  # noqa: E731
+        s = jnp.asarray(0.37)
+        want = float(jax.jacfwd(jax.jacfwd(exact))(s))
+        got = float(second(f)(s))
+        assert np.isfinite(got)
+        np.testing.assert_allclose(got, want, rtol=1e-8)
+
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
     def test_the_adjoints_options_do_not_move_the_derivative(self, transform):
         """Chunking and checkpointing trade memory against speed and nothing else.
@@ -346,6 +423,165 @@ class TestTransformations:
             DirectAdjoint(chunk_size=1, checkpoint=True),
         ):
             np.testing.assert_allclose(run(adjoint), want, rtol=1e-13, atol=1e-15)
+
+
+class TestLeibnizAdjoint:
+    """The boundary term over a box, which is an integral over a face of it."""
+
+    # A jump on a hyperplane normal to the first axis, marked with a breakpoint tied to
+    # the same parameter that positions it, which is the supported way to write one.
+    # `int_0^1 int_0^1 = (5 - 4s) sin(1)`, so the whole derivative is the jump term.
+    JUMP = staticmethod(lambda x, z: jnp.where(x[0] > z[0], 5.0, 1.0) * jnp.cos(x[1]))
+
+    def _jump_problem(self, adjoint, **kwargs):
+        return lambda s: cubgm(
+            self.JUMP,
+            [
+                jnp.stack([jnp.zeros_like(s), s, jnp.ones_like(s)]),
+                jnp.array([0.0, 1.0]),
+            ],
+            (jnp.atleast_1d(s),),
+            adjoint=adjoint,
+            **kwargs,
+        )[0]
+
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    @pytest.mark.parametrize(
+        "adjoint", [LeibnizAdjoint(), DirectAdjoint()], ids=["leibniz", "direct"]
+    )
+    def test_a_moving_jump_gets_its_face_term(self, adjoint, transform):
+        """A discontinuity moving with its breakpoint, differentiated two ways.
+
+        Differentiating a jump gives a delta that no quadrature of the integrand's
+        tangent can represent, so it has to come from the motion of the breakpoint.
+        The two adjoints recover it by different routes and neither is a check on the
+        other: ``DirectAdjoint`` differentiates the mesh, which moves with the
+        breakpoint, so the two contributions cancel term by term at shared abscissae;
+        ``LeibnizAdjoint`` integrates the integrand's jump over the face the breakpoint
+        lies in.
+        """
+        f = self._jump_problem(adjoint)
+        s = jnp.asarray(0.37)
+        np.testing.assert_allclose(float(f(s)), (5 - 4 * 0.37) * np.sin(1.0), atol=1e-9)
+        np.testing.assert_allclose(
+            float(transform(f)(s)), -4 * np.sin(1.0), rtol=1e-6, atol=1e-9
+        )
+
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_the_face_is_built_on_the_axis_that_moves(self, transform):
+        """Which axis carries the moving feature has to survive the trip to the term.
+
+        An axis that is not being differentiated is handed down as ``None``, which is a
+        pytree in its own right and vanishes from a flattened interval unless it is
+        asked for. Losing it renumbers the axes, and the boundary term is then built on
+        the wrong face, so this puts the only moving axis in the middle where a
+        renumbering cannot come out right by luck.
+        """
+        fun = lambda x, z: (  # noqa: E731
+            jnp.where(x[1] > z[0], 5.0, 1.0) * jnp.exp(-jnp.sum(x[::2] ** 2))
+        )
+        f = lambda s: cubgm(  # noqa: E731
+            fun,
+            [
+                jnp.array([0.0, 1.0]),
+                jnp.stack([jnp.zeros_like(s), s, jnp.ones_like(s)]),
+                jnp.array([0.0, 1.0]),
+            ],
+            (jnp.atleast_1d(s),),
+            adjoint=LeibnizAdjoint(),
+        )[0]
+        # -4 (int_0^1 exp(-u^2) du)^2, the jump times the face it is integrated over
+        want = -4 * (np.sqrt(np.pi) / 2 * scipy.special.erf(1.0)) ** 2
+        np.testing.assert_allclose(
+            float(transform(f)(jnp.asarray(0.37))), want, rtol=1e-8
+        )
+
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_a_moving_limit_is_the_face_integral(self, transform):
+        """In three dimensions a face is a genuine two dimensional cubature.
+
+        ``d/db int_0^b int_0^1 int_0^1 cos(u)cos(v)cos(w) = cos(b) sin(1)^2``, the
+        right hand side being exactly the integral over the face `u = b` that the
+        boundary term has to produce.
+        """
+        f = lambda b: cubgm(  # noqa: E731
+            lambda u: jnp.cos(u[0]) * jnp.cos(u[1]) * jnp.cos(u[2]),
+            [jnp.array([0.0, b]), jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])],
+            adjoint=LeibnizAdjoint(),
+        )[0]
+        b = jnp.asarray(0.7)
+        np.testing.assert_allclose(
+            float(transform(f)(b)), np.cos(0.7) * np.sin(1.0) ** 2, rtol=1e-8
+        )
+
+    def test_a_direction_that_moves_one_axis_only(self):
+        """A face is skipped when the limits it would be multiplied by are not moving.
+
+        ``interval`` is one array per axis, so an axis is live or not as a whole and
+        whether it is actually moving is known only once there are values. Forward mode
+        checks, and skips the faces of an axis whose limits come out stationary, which
+        is exact rather than approximate: a face multiplied by zero contributes nothing.
+        A directional derivative along one axis' limit is the case that has something to
+        skip, and it has to agree with the column of the full Jacobian that it is.
+        """
+        fun = lambda x, p: jnp.exp(-p * jnp.sum(x**2))  # noqa: E731
+        f = lambda z: cubgm(  # noqa: E731
+            fun,
+            [
+                jnp.stack([jnp.zeros_like(z[0]), z[0]]),
+                jnp.stack([jnp.zeros_like(z[1]), z[1]]),
+            ],
+            (1.3,),
+            adjoint=LeibnizAdjoint(),
+        )[0]
+        z = jnp.array([0.8, 1.1])
+        jac = jax.jacfwd(f)(z)
+        for k in range(2):
+            v = jnp.zeros(2).at[k].set(1.0)
+            np.testing.assert_allclose(
+                float(jax.jvp(f, (z,), (v,))[1]), float(jac[k]), rtol=1e-13, atol=1e-15
+            )
+
+    def test_the_face_options_are_scoped_to_the_faces(self):
+        """``options_face`` reaches every face and nothing but the faces.
+
+        It has no forward and reverse halves, unlike the options for the interior
+        solve, because the face integrals are primal quantities and both directions
+        integrate the identical ones. An unknown option is the cheapest way to see
+        where a set of them lands: one in ``options_rev`` reaches only reverse mode,
+        one in ``options_face`` reaches both.
+        """
+        s = jnp.asarray(0.37)
+        run = lambda adjoint, transform: transform(  # noqa: E731
+            self._jump_problem(adjoint)
+        )(s)
+        # the primal runs whatever the adjoint was given, having no face to integrate
+        self._jump_problem(LeibnizAdjoint(options_face={"nope": 1}))(s)
+
+        rev_only = LeibnizAdjoint(options_rev={"nope": 1})
+        run(rev_only, jax.jacfwd)
+        with pytest.raises(TypeError, match="nope"):
+            run(rev_only, jax.jacrev)
+
+        faces = LeibnizAdjoint(options_face={"nope": 1})
+        for transform in (jax.jacfwd, jax.jacrev):
+            with pytest.raises(TypeError, match="nope"):
+                run(faces, transform)
+
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    def test_a_face_rule_may_be_given_outright(self, transform):
+        """A rule of the face's own dimension in ``options_face`` is used as it stands.
+
+        The default is to derive one from the box rule per axis, which a rule that
+        cannot be built one axis shorter has no way of doing. Handing one over is the
+        way round that, and it has to give the same answer.
+        """
+        face = TensorProductRule(GaussKronrodRule(21), ndim=1)
+        want = transform(self._jump_problem(LeibnizAdjoint()))(jnp.asarray(0.37))
+        got = transform(
+            self._jump_problem(LeibnizAdjoint(options_face={"rule": face}))
+        )(jnp.asarray(0.37))
+        np.testing.assert_allclose(float(got), float(want), rtol=1e-8)
 
 
 class TestPlumbing:
@@ -439,13 +675,31 @@ class TestConstruction:
                 max_nregion=4,
             )
 
-    def test_the_leibniz_adjoint_is_rejected(self):
-        with pytest.raises(NotImplementedError, match="DirectAdjoint"):
-            cubgm(
-                lambda x: jnp.sum(x),
-                jnp.array([[0.0, 1.0]] * 2),
-                adjoint=LeibnizAdjoint(),
+    def test_a_rule_with_no_face_rule_is_rejected(self):
+        """LeibnizAdjoint integrates over a face, which needs a rule one axis shorter.
+
+        Both shipped families build one. A rule that does not can still be used, by
+        handing the adjoint a face rule of its own, and the message says so.
+        """
+
+        class _NoFaceRule(AbstractCubatureRule):
+            @property
+            def ndim(self):
+                return 2
+
+            def integrate(self, fun, a, b, args):
+                z = jnp.zeros(())
+                return z, z, z, z, jnp.zeros(2)
+
+        interval = jnp.array([[0.0, 1.0]] * 2)
+        with pytest.raises(NotImplementedError, match="options_face"):
+            adaptive_cubature(
+                _NoFaceRule(), lambda x: jnp.sum(x), interval, adjoint=LeibnizAdjoint()
             )
+        # the same rule is fine under the adjoint that never builds a face
+        adaptive_cubature(
+            _NoFaceRule(), lambda x: jnp.sum(x), interval, adjoint=DirectAdjoint()
+        )
 
     def test_the_direct_adjoint_is_the_default(self):
         y, _ = cubgm(

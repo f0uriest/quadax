@@ -787,3 +787,55 @@ class TestInfiniteBox:
         exact = np.pi ** (ndim / 2)
         np.testing.assert_allclose(float(y), exact, rtol=5e-2, atol=0)
         assert float(err) >= abs(float(y) - exact)
+
+
+class TestFaceRules:
+    """Building a rule of one fewer axis, which is what a face is integrated on."""
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    @pytest.mark.parametrize("name", ["genz-malik", "tensor-gk"])
+    def test_it_integrates_the_face_exactly(self, name, ndim):
+        """The dropped rule is a real rule over the remaining axes, not a stand-in.
+
+        Checked by integrating a Chebyshev product the family is exact for, over the
+        box with one axis removed, so a rule that came back with the wrong node set or
+        the wrong weights could not pass.
+        """
+        rules = {
+            "genz-malik": GenzMalikRule(ndim, 7),
+            "tensor-gk": TensorProductRule(GaussKronrodRule(15), ndim=ndim),
+        }
+        face = rules[name]._drop_axis(0)
+        assert face.ndim == ndim - 1
+        a, b = box("unit", ndim - 1)
+        degrees = (2,) * (ndim - 1)
+        np.testing.assert_allclose(
+            integrate_cheb(face, a, b, degrees),
+            cheb_product_integral(a, b, degrees),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+    def test_a_tensor_product_drops_the_axis_it_was_asked_for(self):
+        """Which axis is dropped matters as soon as the axis rules are not all alike."""
+        rules = [GaussKronrodRule(15), ClenshawCurtisRule(32), TanhSinhRule(41)]
+        product = TensorProductRule(rules)
+        for k in range(3):
+            kept = [type(r).__name__ for r in product._drop_axis(k)._rules]
+            assert kept == [type(r).__name__ for j, r in enumerate(rules) if j != k]
+
+    def test_a_rule_that_cannot_build_one_says_so(self):
+        """The base class refuses rather than guessing, and names the way round it."""
+
+        class _Plain(AbstractCubatureRule):
+            @property
+            def ndim(self):
+                return 2
+
+            def integrate(self, fun, a, b, args):
+                raise NotImplementedError
+
+        with pytest.raises(NotImplementedError, match="options_face"):
+            _Plain()._drop_axis(0)
+        with pytest.raises(NotImplementedError, match="no axis left"):
+            TensorProductRule(GaussKronrodRule(15), ndim=1)._drop_axis(0)

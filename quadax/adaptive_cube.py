@@ -16,7 +16,9 @@ from .adaptive import _MIN_WIDTH, _at_roundoff_floor
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
+    LeibnizAdjoint,
     QuadratureOps,
+    _box_boundary_term,
     _frozen_mesh,
     _quad_on_mesh,
     _rebuild_box_mesh,
@@ -101,8 +103,11 @@ def cubgm(
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
     adjoint : AbstractAdjoint, optional
-        How to compute derivatives of the cubature. Only :class:`~quadax.DirectAdjoint`
-        is supported.
+        How to compute derivatives of the cubature. :class:`~quadax.DirectAdjoint`,
+        the default, differentiates the subdivision the solve settled on and is usually
+        the cheaper choice. :class:`~quadax.LeibnizAdjoint` gives the derivative its own
+        error control, at the cost of integrating over the faces of the box, which is an
+        adaptive solve of one dimension fewer per axis whose limits move.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -220,8 +225,11 @@ def adaptive_cubature(
     max_nregion : int, optional
         An upper bound on the number of regions used in the adaptive algorithm.
     adjoint : AbstractAdjoint, optional
-        How to compute derivatives of the cubature. Only :class:`~quadax.DirectAdjoint`
-        is supported.
+        How to compute derivatives of the cubature. :class:`~quadax.DirectAdjoint`,
+        the default, differentiates the subdivision the solve settled on and is usually
+        the cheaper choice. :class:`~quadax.LeibnizAdjoint` gives the derivative its own
+        error control, at the cost of integrating over the faces of the box, which is an
+        adaptive solve of one dimension fewer per axis whose limits move.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -258,13 +266,20 @@ def adaptive_cubature(
         "rule should be an instance of quadax.AbstractCubatureRule, "
         f"got {type(rule)}. One dimensional rules go to quadax.adaptive_quadrature.",
     )
+    # A boundary term over a box is an integral over a face, which needs a rule one
+    # dimension down. Both shipped families build one; a rule that does not can still be
+    # used by handing the adjoint a face rule directly. Checked here rather than where
+    # the face is built so that the message names the rule the caller passed.
     errorif(
-        not isinstance(adjoint, DirectAdjoint),
+        isinstance(adjoint, LeibnizAdjoint)
+        and rule.ndim > 1
+        and "rule" not in {**adjoint.options, **adjoint.options_face}
+        and type(rule)._drop_axis is AbstractCubatureRule._drop_axis,
         NotImplementedError,
-        f"{type(adjoint).__name__} is not supported for cubature, only DirectAdjoint. "
-        "Giving the derivative its own error control requires the integrand's jump "
-        "across a moving breakpoint integrated over the face it lies in, which is an "
-        "(ndim-1) dimensional cubature that quadax does not have.",
+        f"{type(rule).__name__} cannot build a rule over one fewer axis, which is what "
+        "LeibnizAdjoint needs to integrate over a face of the box. Pass a rule of "
+        f"dimension {rule.ndim - 1} as options_face={{'rule': ...}} on the adjoint, or "
+        "use DirectAdjoint.",
     )
     intervals = _as_box_intervals(interval)
     errorif(
@@ -303,6 +318,7 @@ def adaptive_cubature(
         rebuild=_rebuild_box_mesh,
         on_mesh=_quad_on_mesh,
         frozen=_frozen_mesh,
+        boundary=_box_boundary_term,
     )
     y, state = adjoint.quadrature(ops, intervals, args, consts, kwargs, opts)
 

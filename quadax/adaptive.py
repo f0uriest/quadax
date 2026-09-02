@@ -24,6 +24,7 @@ from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     QuadratureOps,
+    _endpoint_term,
     _frozen_mesh,
     _frozen_replay,
     _mesh_solve,
@@ -699,6 +700,7 @@ def adaptive_quadrature(
         # to replay the extrapolation too, not just the mesh.
         frozen=_frozen_replay if extrapolate else _frozen_mesh,
         frozen_solve=_replay_solve if extrapolate else _mesh_solve,
+        boundary=_endpoint_term,
         mesh_is_primal=not extrapolate,
     )
     y, state = adjoint.quadrature(ops, interval, args, consts, kwargs, opts)

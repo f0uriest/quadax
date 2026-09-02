@@ -155,6 +155,21 @@ class AbstractCubatureRule(eqx.Module):
         )
         return eqx.tree_at(lambda rule: rule._norm, self, norm)
 
+    def _drop_axis(self, axis: int) -> "AbstractCubatureRule":
+        """A rule of the same family over every axis but ``axis``.
+
+        Internal: used by :class:`~quadax.LeibnizAdjoint`, whose boundary term is an
+        integral over a face of the box, which is one dimension lower than the box.
+        Users writing a custom rule only need this if they want that adjoint to work
+        with it; the alternative is to hand the adjoint a face rule directly, which is
+        what its ``options_face`` is for.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot build a rule over one fewer axis, which is "
+            "what integrating over a face of the box needs. Pass a rule of dimension "
+            "ndim-1 as options_face={'rule': ...} on the adjoint instead."
+        )
+
 
 class NestedCubatureRule(AbstractCubatureRule):
     """Base class for nested cubature rules.
@@ -542,6 +557,7 @@ class GenzMalikRule(NestedCubatureRule):
     _rho: jax.Array
     _l1: jax.Array
     _l1_top: float = eqx.field(static=True)
+    _degree: int = eqx.field(static=True)
 
     def __init__(
         self,
@@ -555,6 +571,7 @@ class GenzMalikRule(NestedCubatureRule):
         # both embedded rules, so that the error estimate has a space of null rules to
         # work over rather than a single one.
         table = get_genz_malik_table(ndim, degree)
+        self._degree = degree
         self._xh = jnp.asarray(table.x)
         self._wh = jnp.asarray(table.wh)
         self._wl = jnp.asarray(table.wl)
@@ -570,6 +587,17 @@ class GenzMalikRule(NestedCubatureRule):
         self._batch_size = (
             None if batch_size is None else min(batch_size, self._xh.shape[0])
         )
+
+    def _drop_axis(self, axis: int) -> "GenzMalikRule":
+        """The same family and degree over one fewer axis.
+
+        The dimension enters the construction only as the length the generators are
+        padded to and the number of parts a partition may have, so every dimension of
+        the family is built from the same constants and there is nothing to project.
+        ``axis`` goes unused because the rule is fully symmetric. The table is cached,
+        so rebuilding costs nothing after the first time.
+        """
+        return GenzMalikRule(self.ndim - 1, self._degree, self._norm, self._batch_size)
 
     def _error_estimate(
         self,
@@ -807,6 +835,25 @@ class TensorProductRule(NestedCubatureRule):
         check_size(batch_size)
         self._batch_size = (
             None if batch_size is None else min(batch_size, self._xh.shape[0])
+        )
+
+    def _drop_axis(self, axis: int) -> "TensorProductRule":
+        """The product of the axis rules with the one for ``axis`` left out.
+
+        The sequence of axis rules is the whole of what makes this rule ``ndim``
+        dimensional, so which axis is dropped matters whenever they are not all the
+        same rule.
+        """
+        errorif(
+            len(self._rules) < 2,
+            NotImplementedError,
+            "A one dimensional tensor product rule has no axis left to integrate over "
+            "once one is dropped.",
+        )
+        return TensorProductRule(
+            self._rules[:axis] + self._rules[axis + 1 :],
+            norm=self._norm,
+            batch_size=self._batch_size,
         )
 
     def _build(self, xtype) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
