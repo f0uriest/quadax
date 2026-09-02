@@ -762,9 +762,8 @@ def _accelerate(
     unchanged.
     """
     # `bisect_next_err_rank == 0` says the pointer never walked down the ordering, so
-    # the region with the largest error is the one at its head and `argmax` finds
-    # it without the sort. Ties go the same way: `argsort` is stable, so its first entry
-    # and `argmax` both take the lowest index among equal errors.
+    # the region with the largest error is the one at its head, which `argmax` names
+    # directly. Ties break the same way in both paths, towards the lower index.
     bisect_next = jnp.argmax(state["e_arr"])
     # `can_bisect` is the depth test the full pass makes on the worst region:
     # bisecting it again would keep both halves within the current depth budget, so the
@@ -772,8 +771,8 @@ def _accelerate(
     can_bisect = (state["level"][bisect_next] + 1) <= state["level_max"]
     # `ordinary` is the fast path itself, the three conditions under which the full pass
     # would change nothing: the acceleration has not started, the pointer into the
-    # error ordering is still at its head so `bisect_next` is the region the
-    # sorted ranking would have picked, and the depth test says to bisect it.
+    # error ordering is still at its head so `bisect_next` is the region the full
+    # ranking would have picked, and the depth test says to bisect it.
     ordinary = (
         ~state["accelerating"] & (state["bisect_next_err_rank"] == 0) & can_bisect
     )
@@ -816,6 +815,51 @@ def _accelerate(
         )
 
     return jax.lax.cond(unvmap_any(~ordinary), run, skip, state)
+
+
+def _err_rank_of(e_arr, region):
+    """Position of `region` in the descending ordering of `e_arr`, ties by lower index.
+
+    Counting the regions that outrank it gives the same position a stable ranking
+    would, without building one.
+    """
+    e_region = e_arr[region]
+    return jnp.count_nonzero(e_arr > e_region) + jnp.count_nonzero(
+        (e_arr == e_region) & (jnp.arange(e_arr.shape[0]) < region)
+    )
+
+
+def _err_at_rank(e_arr, rank):
+    """The error estimate holding `rank` in the descending ordering of `e_arr`.
+
+    Only a handful of ranks are ever wanted per pass, so this searches for the one
+    asked rather than ranking the whole array. Error estimates are non-negative, so
+    their bit patterns are monotone as unsigned integers and ``count(e_arr >= v)`` is
+    monotone in ``v``; a bisection on the bits therefore locates the rank, at one
+    reduction over the array per bit.
+
+    The answer is snapped to an entry of `e_arr`, which the bound itself need not be:
+    the search can finish among subnormals, where flush-to-zero makes the comparisons
+    that placed it unreliable.
+    """
+    nbits = 8 * e_arr.dtype.itemsize
+    utype = jnp.dtype(f"uint{nbits}")
+    # Clamping first keeps the search inside the non-negative half of the number line,
+    # where the bits are monotone, whatever a caller's estimates happen to hold.
+    bits = jax.lax.bitcast_convert_type(jnp.maximum(e_arr, 0), utype)
+
+    def step(_, bounds):
+        lo, hi = bounds
+        mid = lo + (hi - lo) // utype.type(2)
+        value = jax.lax.bitcast_convert_type(mid, e_arr.dtype)
+        above = jnp.count_nonzero(e_arr >= value) > rank
+        return jnp.where(above, mid, lo), jnp.where(above, hi, mid)
+
+    lo, _ = jax.lax.fori_loop(
+        0, nbits, step, (utype.type(0), bits.max() + utype.type(1))
+    )
+    bound = jax.lax.bitcast_convert_type(lo, e_arr.dtype)
+    return jnp.min(jnp.where(e_arr >= bound, e_arr, jnp.inf).astype(e_arr.dtype))
 
 
 def _accelerate_full(
@@ -901,20 +945,50 @@ def _accelerate_full(
     skips if all elements don't need it.
     """
     # --- Setup: the ranking, the gating flags, and the unlocalized error ------------
-    # The acceleration needs the regions ranked by error estimate, not just the
-    # worst one: once it starts extrapolating it walks down the ranking looking for a
-    # region that is still worth bisecting.
-    order = jnp.argsort(-state["e_arr"])
+    # The acceleration needs regions ranked by error estimate, not just the worst one:
+    # once it starts extrapolating it walks down the ranking looking for a region that
+    # is still worth bisecting. Only a few positions in that ranking are ever read, so
+    # they are located directly instead of by ordering the whole array. Ordering it
+    # costs more than everything else the loop does put together, and the cost grows
+    # with the *capacity* rather than with the regions in play, so a caller who leaves
+    # generous headroom pays for slots that are still empty.
+    #
+    # Regions carrying equal estimates are ranked by index, lowest first, and every
+    # query below breaks ties that way.
+    worst = jnp.argmax(state["e_arr"])
     # The pointer must never sit below the region just bisected, or the walk would
     # start past an error larger than any it can then find. Bisection does not always
     # reduce an error estimate (two halves of an unresolved region can between
     # them report more error than their parent did) so slot `i` may have moved *up*
     # the ranking, and the pointer is clamped to follow it up when it does.
     bisect_next_err_rank = jnp.minimum(
-        state["bisect_next_err_rank"], jnp.argmax(order == i)
+        state["bisect_next_err_rank"], _err_rank_of(state["e_arr"], i)
     )
     state["bisect_next_err_rank"] = bisect_next_err_rank
-    bisect_next = order[bisect_next_err_rank]
+
+    def at_head(_):
+        """The pointer sits at the head, where locating it takes no search at all."""
+        return worst, jnp.ones(max_nregion, bool)
+
+    def walked_down(_):
+        """The pointer has walked down the ordering, so its estimate must be found."""
+        err_ptr = _err_at_rank(state["e_arr"], bisect_next_err_rank)
+        # Regions sharing the pointer's estimate are separated by index, so the pointer
+        # picks out one of them and the rest of that group ranks below it.
+        tied = state["e_arr"] == err_ptr
+        among_tied = jnp.cumsum(tied) - 1
+        at_ptr = bisect_next_err_rank - jnp.count_nonzero(state["e_arr"] > err_ptr)
+        return (
+            jnp.argmax(tied & (among_tied == at_ptr)),
+            (state["e_arr"] < err_ptr) | (tied & (among_tied >= at_ptr)),
+        )
+
+    # A pointer still at the head is the common case, and by far the cheaper one, so it
+    # is branched on rather than folded into the general path. Batched, the search runs
+    # if any element needs it, which is harmless: it is correct at the head too.
+    bisect_next, ranked_below_ptr = jax.lax.cond(
+        unvmap_any(bisect_next_err_rank != 0), walked_down, at_head, None
+    )
 
     # Everything below is skipped on an iteration that reached the tolerance or raised a
     # flag: in both cases the run is over and the mesh result is the one that will be
@@ -954,9 +1028,10 @@ def _accelerate_full(
     # ranks can never be reached before the budget runs out.
     last = nregion
     jupbnd = jnp.where(last > 2 + max_nregion // 2, max_nregion + 3 - last, last)
-    ranks = jnp.arange(max_nregion)
-    can_bisect_ranked = (state["level"][order] + 1) <= state["level_max"]
-    candidate = can_bisect_ranked & (ranks >= bisect_next_err_rank) & (ranks < jupbnd)
+    # Everything ranked at or below the pointer. `begin` moved the pointer to rank one,
+    # which is every region but the worst.
+    ranked_below = jnp.where(begin, jnp.arange(max_nregion) != worst, ranked_below_ptr)
+    candidate = ranked_below & ((state["level"] + 1) <= state["level_max"])
     # A table already known to be running on a stagnant sequence skips the search: more
     # subdivision has been shown not to help it.
     #
@@ -975,10 +1050,17 @@ def _accelerate_full(
         state["err_accel_target"], _ROUNDOFF_FLOOR * epmach * norm(state["area"])
     )
     search = ~state["roundoff_in_table"] & (err_unlocalized > accel_target)
-    found = active & search & ~keep_bisecting & jnp.any(candidate)
-    found_rank = jnp.argmax(candidate)
+    # The first candidate the walk would reach is the one with the largest estimate,
+    # since the walk runs down the ranking; `jupbnd` is then applied to its rank.
+    found_region = jnp.argmax(
+        jnp.where(candidate, state["e_arr"], -jnp.inf).astype(state["e_arr"].dtype)
+    )
+    found_rank = _err_rank_of(state["e_arr"], found_region)
+    found = (
+        active & search & ~keep_bisecting & jnp.any(candidate) & (found_rank < jupbnd)
+    )
     bisect_next_err_rank = jnp.where(found, found_rank, bisect_next_err_rank)
-    bisect_next = jnp.where(found, order[found_rank], bisect_next)
+    bisect_next = jnp.where(found, found_region, bisect_next)
 
     # --- 3. Is the extrapolation good enough to stop on? ----------------------------
     take_step = active & ~keep_bisecting & ~found
@@ -1059,7 +1141,7 @@ def _accelerate_full(
     # go back to the largest error, allow the subdivision one more level of
     # depth, and let the mesh localize further before the next extrapolation.
     reset = take_step & ~done
-    bisect_next = jnp.where(reset, order[0], bisect_next)
+    bisect_next = jnp.where(reset, worst, bisect_next)
     bisect_next_err_rank = jnp.where(reset, 0, bisect_next_err_rank)
     accelerating &= ~reset
     level_max = jnp.where(reset, state["level_max"] + 1, state["level_max"])
