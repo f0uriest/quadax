@@ -739,30 +739,40 @@ def _at_roundoff_floor(state, epmach, norm):
 
 
 def _accelerate(
-    state, i, erro12, err_i, converged, norm, epsabs, epsrel, epmach, max_ninter
+    state,
+    i,
+    erro12,
+    err_i,
+    converged,
+    norm,
+    epsabs,
+    epsrel,
+    epmach,
+    nregion,
+    max_nregion,
 ):
     """One pass of the extrapolation control flow, skipped where it is a no-op.
 
     Most iterations of a run that extrapolates are ordinary bisection: the acceleration
     has not started, the pointer into the error ordering is at the head, and the worst
-    sub-interval can still be subdivided within the current depth budget. On those the
-    whole block below reduces to two updates: which sub-interval to bisect next, and
-    the running total of the error still sitting in sub-intervals that are not yet
+    region can still be subdivided within the current depth budget. On those the
+    whole block below reduces to two updates: which region to bisect next, and
+    the running total of the error still sitting in regions that are not yet
     localized. The ordering, the epsilon table and the acceptance tests are all
     unchanged.
     """
     # `bisect_next_err_rank == 0` says the pointer never walked down the ordering, so
-    # the sub-interval with the largest error is the one at its head and `argmax` finds
+    # the region with the largest error is the one at its head and `argmax` finds
     # it without the sort. Ties go the same way: `argsort` is stable, so its first entry
     # and `argmax` both take the lowest index among equal errors.
     bisect_next = jnp.argmax(state["e_arr"])
-    # `can_bisect` is the depth test the full pass makes on the worst sub-interval:
+    # `can_bisect` is the depth test the full pass makes on the worst region:
     # bisecting it again would keep both halves within the current depth budget, so the
     # mesh still has room to refine there and no extrapolation is called for yet.
     can_bisect = (state["level"][bisect_next] + 1) <= state["level_max"]
     # `ordinary` is the fast path itself, the three conditions under which the full pass
     # would change nothing: the acceleration has not started, the pointer into the
-    # error ordering is still at its head so `bisect_next` is the sub-interval the
+    # error ordering is still at its head so `bisect_next` is the region the
     # sorted ranking would have picked, and the depth test says to bisect it.
     ordinary = (
         ~state["accelerating"] & (state["bisect_next_err_rank"] == 0) & can_bisect
@@ -801,14 +811,26 @@ def _accelerate(
             epsabs,
             epsrel,
             epmach,
-            max_ninter,
+            nregion,
+            max_nregion,
         )
 
     return jax.lax.cond(unvmap_any(~ordinary), run, skip, state)
 
 
 def _accelerate_full(
-    state, i, levcur, erro12, err_i, converged, norm, epsabs, epsrel, epmach, max_ninter
+    state,
+    i,
+    levcur,
+    erro12,
+    err_i,
+    converged,
+    norm,
+    epsabs,
+    epsrel,
+    epmach,
+    nregion,
+    max_nregion,
 ):
     """One pass of the extrapolation control flow.
 
@@ -831,7 +853,7 @@ def _accelerate_full(
     those has no trend in it to extrapolate.
 
     So the override runs the opposite way round to what the competition suggests. It is
-    the extrapolation that causes sub-intervals well down the error ranking to be
+    the extrapolation that causes regions well down the error ranking to be
     bisected, ones the subdivision would never choose for itself, while the difficult
     region is held frozen. It is not frozen for long (it is deepened once per round) but
     on a schedule rather than whenever it happens to carry the largest error, and that
@@ -842,18 +864,18 @@ def _accelerate_full(
     stages advance across those visits.
 
     1. *Has the mesh localized?* Let the subdivision home in. While the worst
-       sub-interval is still within the depth budget this is the ordinary adaptive loop
+       region is still within the depth budget this is the ordinary adaptive loop
        and nothing else happens. Once it reaches the budget the difficult region is
        resolved as tightly as this round allows, and is frozen.
 
     2. *Is anything else worth bisecting first?* Clean up elsewhere, which is what earns
-       the coming reading the right to be taken. A sub-interval further down the ranking
+       the coming reading the right to be taken. A region further down the ranking
        that still has depth left is bisected in preference to feeding the table, for as
-       long as enough error remains in such sub-intervals to be worth collecting.
+       long as enough error remains in such regions to be worth collecting.
 
        This is not a sweep that levels the domain. The test is on their *total* error
        and each pass takes the largest of them, so the cleanup stops partway down the
-       ranking and sub-intervals whose error is already negligible are never reached.
+       ranking and regions whose error is already negligible are never reached.
        What it drains towards is the caller's own tolerance, so that the part of the
        domain still being subdivided is inside the whole error budget and the
        extrapolation is left accounting for the frozen part alone. Cleanup also ends
@@ -869,7 +891,7 @@ def _accelerate_full(
     4. Otherwise raise the depth budget by one, unfreeze the difficult region, and begin
        the next round against a mesh allowed to localize one level further.
 
-    Which sub-interval to bisect is therefore settled at the *end* of an iteration
+    Which region to bisect is therefore settled at the *end* of an iteration
     rather than the start, which is why it is carried in the state rather than
     recomputed from the error estimates. Whether the extrapolated value is returned at
     all is not settled here; see ``_accept_extrapolation``.
@@ -879,13 +901,13 @@ def _accelerate_full(
     skips if all elements don't need it.
     """
     # --- Setup: the ranking, the gating flags, and the unlocalized error ------------
-    # The acceleration needs the sub-intervals ranked by error estimate, not just the
+    # The acceleration needs the regions ranked by error estimate, not just the
     # worst one: once it starts extrapolating it walks down the ranking looking for a
-    # sub-interval that is still worth bisecting.
+    # region that is still worth bisecting.
     order = jnp.argsort(-state["e_arr"])
-    # The pointer must never sit below the sub-interval just bisected, or the walk would
+    # The pointer must never sit below the region just bisected, or the walk would
     # start past an error larger than any it can then find. Bisection does not always
-    # reduce an error estimate (two halves of an unresolved sub-interval can between
+    # reduce an error estimate (two halves of an unresolved region can between
     # them report more error than their parent did) so slot `i` may have moved *up*
     # the ranking, and the pointer is clamped to follow it up when it does.
     bisect_next_err_rank = jnp.minimum(
@@ -901,7 +923,7 @@ def _accelerate_full(
     proceed = ~converged & (state["status"] == STATUS.normal)
     active = proceed & ~state["no_accel"]
 
-    # The error still sitting in sub-intervals that are not yet localized, ie those the
+    # The error still sitting in regions that are not yet localized, ie those the
     # subdivision has not yet driven down to the current depth. The parent's share
     # leaves it, and the children's returns only if they are still large enough to be
     # worth subdividing.
@@ -910,7 +932,7 @@ def _accelerate_full(
     err_unlocalized = jnp.where(active, err_unlocalized, state["err_unlocalized"])
 
     # --- 1. Has the mesh localized? -------------------------------------------------
-    # While the worst sub-interval can still be subdivided within the current depth
+    # While the worst region can still be subdivided within the current depth
     # budget there is more to be had from refining the mesh, and this stays the ordinary
     # adaptive loop.
     can_bisect = (state["level"][bisect_next] + 1) <= state["level_max"]
@@ -922,7 +944,7 @@ def _accelerate_full(
     bisect_next_err_rank = jnp.where(begin, 1, bisect_next_err_rank)
 
     # --- 2. Is something else worth bisecting first? --------------------------------
-    # Before extrapolating, look further down the ranking for a sub-interval that still
+    # Before extrapolating, look further down the ranking for a region that still
     # has room to bisect within the current depth budget. Bisecting one of those brings
     # the unlocalized error down without re-refining the region the table is already
     # extrapolating past; refining that region instead would move the running total by
@@ -930,16 +952,16 @@ def _accelerate_full(
     # smoothly converging one the epsilon algorithm assumes. The search starts at the
     # pointer and runs no further than the subdivisions still available, since lower
     # ranks can never be reached before the budget runs out.
-    last = state["ninter"]
-    jupbnd = jnp.where(last > 2 + max_ninter // 2, max_ninter + 3 - last, last)
-    ranks = jnp.arange(max_ninter)
+    last = nregion
+    jupbnd = jnp.where(last > 2 + max_nregion // 2, max_nregion + 3 - last, last)
+    ranks = jnp.arange(max_nregion)
     can_bisect_ranked = (state["level"][order] + 1) <= state["level_max"]
     candidate = can_bisect_ranked & (ranks >= bisect_next_err_rank) & (ranks < jupbnd)
     # A table already known to be running on a stagnant sequence skips the search: more
     # subdivision has been shown not to help it.
     #
     # The threshold is floored at the roundoff level. It decides when the error left in
-    # the unlocalized sub-intervals has become small enough that extrapolating past them
+    # the unlocalized regions has become small enough that extrapolating past them
     # is worthwhile, which is a control decision rather than a convergence test, and a
     # caller asking for a tolerance below what the arithmetic can deliver (`epsabs=0`
     # as shorthand for "do your best") would otherwise leave it permanently false.
@@ -1048,7 +1070,7 @@ def _accelerate_full(
     # `_replay_solve`; the slot this bisection created labels the step.
     n_append = state["n_append"] + take_step
     updates = {
-        "append_mask": state["append_mask"].at[state["ninter"] - 1].set(take_step),
+        "append_mask": state["append_mask"].at[nregion - 1].set(take_step),
         "n_append": n_append,
         "accel_ncall": jnp.where(improved, n_append, state["accel_ncall"]),
         "bisect_next": bisect_next,
@@ -1092,7 +1114,7 @@ def _accept_extrapolation(state, mesh_y, norm):
     have_accel = jnp.isfinite(state["accel_err"]) & (mesh_err > state["err_bnd"])
     # Where the table was running on a sequence that had stopped improving, its own
     # estimate understates the error by whatever was still outstanding in the
-    # sub-intervals it had passed over, since the extrapolation assumed that outstanding
+    # regions it had passed over, since the extrapolation assumed that outstanding
     # amount would be recovered by the trend. Add it back.
     accel_err = jnp.where(
         state["roundoff_in_table"],
@@ -1621,6 +1643,7 @@ def _adaptive_solve(
                 epsabs,
                 epsrel,
                 epmach,
+                state["ninter"],
                 max_ninter,
             )
         return state

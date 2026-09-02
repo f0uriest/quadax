@@ -11,8 +11,17 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
+from . import _acceleration
 from ._status import STATUS, error_if_flagged, escalate
-from .adaptive import _MIN_WIDTH, _at_roundoff_floor
+from .adaptive import (
+    _MIN_WIDTH,
+    _NO_PROGRESS,
+    _ROUNDOFF_ACCEL_LIMIT,
+    _STAGNANT_RTOL,
+    _accelerate,
+    _accept_extrapolation,
+    _at_roundoff_floor,
+)
 from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
@@ -20,13 +29,16 @@ from .adjoint import (
     QuadratureOps,
     _box_boundary_term,
     _frozen_mesh,
+    _frozen_replay,
     _quad_on_mesh,
     _rebuild_box_mesh,
+    _replay_solve,
     build_box_integrand,
     closure_convert,
 )
 from .fixed_cubature import AbstractCubatureRule, GenzMalikRule
 from .utils import (
+    _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _as_box_intervals,
     _real_dtype,
@@ -49,6 +61,7 @@ def cubgm(
     degree: int = 9,
     norm: float | int | Callable[[jax.Array], jax.Array] = jnp.inf,
     adjoint: AbstractAdjoint = DirectAdjoint(),
+    extrapolate: bool = True,
     batch_size: int | None = None,
     throw: bool = False,
 ):
@@ -108,6 +121,12 @@ def cubgm(
         the cheaper choice. :class:`~quadax.LeibnizAdjoint` gives the derivative its own
         error control, at the cost of integrating over the faces of the box, which is an
         adaptive solve of one dimension fewer per axis whose limits move.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. Can be turned off for integrands known to be smooth
+        which can reduce overhead and improve wall time.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -165,6 +184,7 @@ def cubgm(
         epsrel,
         max_nregion,
         adjoint=adjoint,
+        extrapolate=extrapolate,
         throw=throw,
     )
     info = QuadratureInfo(
@@ -184,6 +204,7 @@ def adaptive_cubature(
     epsrel: Any = None,
     max_nregion: int = 1000,
     adjoint: AbstractAdjoint = DirectAdjoint(),
+    extrapolate: bool = True,
     throw: bool = False,
     **kwargs,
 ):
@@ -230,6 +251,12 @@ def adaptive_cubature(
         the cheaper choice. :class:`~quadax.LeibnizAdjoint` gives the derivative its own
         error control, at the cost of integrating over the faces of the box, which is an
         adaptive solve of one dimension fewer per axis whose limits move.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. Can be turned off for integrands known to be smooth
+        which can reduce overhead and improve wall time.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -311,14 +338,22 @@ def adaptive_cubature(
         "epsabs": epsabs,
         "epsrel": epsrel,
         "max_nregion": max_nregion,
+        "extrapolate": extrapolate,
     }
     ops = QuadratureOps(
         build=partial(build_box_integrand, f_conv=f_conv, ndim=rule.ndim),
         solve=_cubature_solve,
         rebuild=_rebuild_box_mesh,
         on_mesh=_quad_on_mesh,
-        frozen=_frozen_mesh,
+        # An accelerated solve may return an extrapolated value rather than the sum over
+        # the subdivision, so the fixed-discretization evaluation the adjoints reuse has
+        # to replay the extrapolation too, not just the mesh.
+        frozen=_frozen_replay if extrapolate else _frozen_mesh,
+        frozen_solve=(
+            partial(_replay_solve, rebuild=_rebuild_box_mesh) if extrapolate else None
+        ),
         boundary=_box_boundary_term,
+        mesh_is_primal=not extrapolate,
     )
     y, state = adjoint.quadrature(ops, intervals, args, consts, kwargs, opts)
 
@@ -333,7 +368,7 @@ def adaptive_cubature(
 
 
 def _init_cubature_state(
-    interval: Sequence[jax.Array], shape, xtype, ytype, etype, max_nregion
+    interval: Sequence[jax.Array], shape, xtype, ytype, etype, max_nregion, extrapolate
 ):
     """State of the subdivision loop before the initial regions are evaluated.
 
@@ -393,6 +428,69 @@ def _init_cubature_state(
     state["owner"] = jnp.zeros((max_nregion, ndim), int).at[:n_init].set(idx)
     state["frac_a"] = jnp.zeros((max_nregion, ndim), xtype)
     state["frac_b"] = jnp.zeros((max_nregion, ndim), xtype).at[:n_init].set(1.0)
+
+    if not extrapolate:
+        return state
+
+    # How deep in the subdivision each region sits, ie how many cuts separate it from
+    # the cell of the initial grid containing it. This is the measure of whether the
+    # mesh has localized: a region that has been cut `level_max` times is treated as
+    # resolved, and the loop leaves it alone and extrapolates past it instead. Depth
+    # rather than size, because with breakpoints the cells of the initial grid can
+    # differ in size and a single threshold across the whole box would declare the small
+    # ones resolved before they had been touched. Each cut halves a region's volume
+    # whichever axis it falls on, so the count is the same quantity in every dimension.
+    state["level"] = jnp.zeros(max_nregion, int)  # depth of each region
+    state["level_max"] = 1  # depth at which a region counts as resolved
+    # Which region to cut next, and its rank in the error ordering (when extrapolation
+    # is used we don't always cut the largest error). Both are chosen at the *end* of an
+    # iteration, since the choice is part of the extrapolation control flow, so they are
+    # carried rather than recomputed from `e_arr` at the top of the body.
+    state["bisect_next"] = jnp.zeros((), int)  # slot
+    state["bisect_next_err_rank"] = jnp.zeros((), int)  # its 0-based rank by error
+
+    state["accel_table"] = _acceleration.init_table(shape, ytype)  # the epsilon table
+    state["accel_result"] = jnp.zeros(shape, ytype)  # best extrapolation so far
+    # Its estimated error. Infinite until an extrapolation is accepted, which is how
+    # "none was ever taken" is recognized at the end.
+    state["accel_err"] = jnp.array(jnp.inf, etype)
+    # How tightly that extrapolation settled, which is what candidates are ranked by.
+    state["accel_sharp"] = jnp.array(jnp.inf, etype)
+    state["n_stalled"] = jnp.zeros((), int)  # extrapolations with no improvement
+    state["accelerating"] = jnp.zeros((), bool)  # mesh localized, table being fed
+    state["no_accel"] = jnp.zeros((), bool)  # acceleration abandoned for good
+    # Readings that told the table nothing, and the flag they raise. What is counted is
+    # a term fed to the table that moved neither the running total nor its error; see
+    # the body for why this is not QUADPACK's per-bisection count. `area_fed` and
+    # `err_fed` are the two as they stood at the last reading, and `n_append_seen` is
+    # how many readings had been taken when the body last looked, which is how it
+    # recognizes that one has happened.
+    state["roundoff_accel"] = jnp.zeros((), int)
+    state["roundoff_in_table"] = jnp.zeros((), bool)  # the sequence has stagnated
+    state["area_fed"] = jnp.zeros(shape, ytype)
+    state["err_fed"] = jnp.zeros((), etype)
+    state["n_append_seen"] = jnp.zeros((), int)
+    state["correc"] = jnp.zeros((), etype)  # what to widen `accel_err` by if it has
+    state["err_accel_target"] = jnp.zeros((), etype)  # tolerance to accept one at
+    # total error that we think can still be reduced by subdivision.
+    state["err_unlocalized"] = jnp.zeros((), etype)
+    state["accel_done"] = jnp.zeros((), bool)  # the extrapolation block's exits
+    # Regions whose local rule saturated on the first pass.
+    state["ndin"] = jnp.zeros(max_nregion, bool)
+    # Bookkeeping for `_replay_solve`, which is how an accelerated solve is
+    # differentiated. None of it is read by the integrator itself. The parent arrays and
+    # the birth times are indexed by the slot a cut creates, which is unique to that
+    # step; `birth` is indexed by slot and holds the birth time of whatever occupies it
+    # now. Time is counted in regions rather than steps, so it starts at the initial
+    # count.
+    state["birth"] = jnp.full(max_nregion, n_init, int)
+    state["p_owner"] = jnp.zeros((max_nregion, ndim), int)
+    state["p_frac_a"] = jnp.zeros((max_nregion, ndim), xtype)
+    state["p_frac_b"] = jnp.zeros((max_nregion, ndim), xtype)
+    state["p_birth"] = jnp.zeros(max_nregion, int)
+    state["append_mask"] = jnp.zeros(max_nregion, bool)
+    state["n_append"] = jnp.zeros((), int)
+    state["accel_ncall"] = jnp.zeros((), int)
     return state
 
 
@@ -405,13 +503,24 @@ def _cubature_solve(
     epsabs,
     epsrel,
     max_nregion,
+    extrapolate=False,
     norm=None,
 ):
     """Run the globally adaptive subdivision loop over a box.
 
-    Each iteration takes the region with the largest error estimate, asks the local rule
-    which of its axes is worth cutting, and bisects it along that axis, until the errors
-    sum to less than the tolerance.
+    With ``extrapolate=False`` each iteration takes the region with the largest error
+    estimate, asks the local rule which of its axes is worth cutting, and bisects it
+    along that axis, until the errors sum to less than the tolerance.
+
+    With ``extrapolate=True`` the same subdivision runs, but the sequence of running
+    totals it produces is also fed to Wynn's epsilon algorithm, and the limit that
+    infers may be returned in place of the sum over the mesh. That changes which region
+    to cut: the sequence is only extrapolate-able if its terms keep coming from the same
+    process, so once the mesh has localized onto the difficulty the loop stops refining
+    there and works on the rest of the box instead, feeding the table a term each time
+    it does. See ``_acceleration`` for the table itself, ``_accelerate_full`` for the
+    control flow that decides all this, and ``_accept_extrapolation`` for the choice
+    between the two answers at the end.
 
     ``norm`` replaces the one the rule was built with, for a caller that measures a
     vector other than the integrand's output. ``None``, the primal's case, keeps the
@@ -439,12 +548,29 @@ def _cubature_solve(
     # "Too narrow" is per axis, and only meaningful against the span being subdivided.
     halfspan = jnp.abs(hi - lo) / 2
 
-    state = _init_cubature_state(interval, shape, xtype, ytype, etype, max_nregion)
+    state = _init_cubature_state(
+        interval, shape, xtype, ytype, etype, max_nregion, extrapolate
+    )
 
     def init_body(i, state):
         a = state["a_arr"][i]
         b = state["b_arr"][i]
-        result, abserr, intabs, _, split = intfun(vfunc, a, b, ())
+        result, abserr, intabs, intmmn, split = intfun(vfunc, a, b, ())
+
+        if extrapolate:
+            # A cell of the initial grid whose error estimate reached the saturation
+            # value (the whole variation of the integrand over it) told the rule nothing
+            # about it at all. Those are promoted to the head of the error ordering
+            # below, so that the pieces the caller flagged as difficult by putting a
+            # breakpoint at them are the first ones cut. The test is ``>=`` and not
+            # equality because a rule may add to the saturated value. An integrand with
+            # no variation to saturate against is excluded rather than counted as
+            # unresolved, the estimate then being a roundoff floor sitting above a
+            # variation of zero.
+            variation = _norm(intmmn)
+            state["ndin"] = (
+                state["ndin"].at[i].set((abserr >= variation) & (variation != 0))
+            )
 
         state["neval"] += 1
         state["r_arr"] = state["r_arr"].at[i].set(result)
@@ -468,19 +594,92 @@ def _cubature_solve(
         state["status"], STATUS.max_nregion, state["nregion"] >= max_nregion
     )
 
+    if extrapolate:
+        # Give the saturated cells the whole error estimate, which puts them at the head
+        # of the ordering however small their own contribution was. This comes after the
+        # roundoff check on purpose: that check asks whether the honest sum of the local
+        # error estimates has already bottomed out at the arithmetic's floor, and
+        # inflating one of them first would hide that.
+        state["e_arr"] = jnp.where(
+            state["ndin"], jnp.sum(state["e_arr"]), state["e_arr"]
+        )
+        state["err_sum"] = jnp.sum(state["e_arr"])
+        # Total integral of |f| over the whole box, as the initial grid sees it. Only
+        # used for the divergence test at the end, and deliberately the *initial* value:
+        # it is the scale the answer is compared against, not a running quantity.
+        abs_total = _norm(jnp.sum(state["f_arr"], axis=0))
+        # False says the integral came out far smaller than the integral of |f|, ie the
+        # answer is the residue of heavy cancellation, which makes the ratio test at the
+        # end meaningless on a value near zero. True says the integrand did not change
+        # sign, to within roundoff, so the two are the same size and the ratio means
+        # something. The slack is the same roundoff level the error estimates use.
+        state["sign_known"] = (
+            _norm(state["area"]) >= (1 - _ROUNDOFF_FLOOR * epmach) * abs_total
+        )
+        state["abs_total"] = abs_total
+        state["bisect_next"] = jnp.argmax(state["e_arr"])
+        state["err_accel_target"] = state["err_bnd"]
+        state["err_unlocalized"] = state["err_sum"]
+        # The total over the initial grid is the first term of the sequence. It seeds
+        # the table directly, with no extrapolation performed on it, so it must not
+        # count towards `n_calls`, and it is the value the next reading is judged to
+        # have moved from.
+        state["accel_table"] = _acceleration.append(state["accel_table"], state["area"])
+        state["area_fed"] = state["area"]
+        state["err_fed"] = state["err_sum"]
+
     def condfun(state):
-        return (
+        keep_going = (
             (state["status"] == STATUS.normal)
             & (0 <= state["err_sum"])
             & (state["err_bnd"] <= state["err_sum"])
         )
+        if extrapolate:
+            # The extrapolation block has its own two exits: an extrapolated value that
+            # meets the tolerance, and a table that has stopped improving.
+            keep_going &= ~state["accel_done"]
+        return keep_going
 
     def bodyfun(state):
-        # Cut the region with the largest error estimate, along whichever of its axes
+        if extrapolate:
+            # Whether the last reading told the table anything, which is what says the
+            # sequence being fed has stagnated. QUADPACK counts instead the *bisections*
+            # that moved neither the value nor its error, and that counter does not
+            # transfer to a box: a symmetric integrand has up to ``2**ndim * ndim!``
+            # regions carrying identical error estimates, the ordering walks them one
+            # after another, and one fact about the integrand is recorded once per
+            # equivalent region, saturating any such counter while the total is still
+            # coming down. Counting readings instead is one event per term fed to the
+            # table however many regions are equivalent, so multiplicity cannot reach
+            # it. `n_append` is bumped whenever a term is fed, so comparing it against
+            # what was seen last iteration says a reading has happened since, and
+            # `area` is then the term that was fed.
+            #
+            # Both halves of QUADPACK's test are kept, at this granularity: the total
+            # did not move, *and* its error estimate did not come down. The first alone
+            # fires on any problem the mesh is already resolving, where successive
+            # totals agree to well inside the threshold while the run is making
+            # perfectly good progress.
+            stagnant = max(_STAGNANT_RTOL, _ROUNDOFF_FLOOR * epmach)
+            fed = state["n_append"] > state["n_append_seen"]
+            moved = _norm(state["area"] - state["area_fed"]) > stagnant * _norm(
+                state["area"]
+            )
+            progressed = state["err_sum"] < _NO_PROGRESS * state["err_fed"]
+            state["roundoff_accel"] += fed & ~moved & ~progressed
+            state["roundoff_in_table"] |= (
+                state["roundoff_accel"] >= _ROUNDOFF_ACCEL_LIMIT
+            )
+            state["area_fed"] = jnp.where(fed, state["area"], state["area_fed"])
+            state["err_fed"] = jnp.where(fed, state["err_sum"], state["err_fed"])
+            state["n_append_seen"] = state["n_append"]
+
+        # Cut the region the extrapolation control flow selected, which without it is
+        # always the one with the largest error estimate, along whichever of its axes
         # the local rule reported as worth cutting. `d_arr` is only ordinally
         # meaningful and local rules may build it differently, so `argmax` is all
         # that may be read from it.
-        i = jnp.argmax(state["e_arr"])
+        i = state["bisect_next"] if extrapolate else jnp.argmax(state["e_arr"])
         k = jnp.argmax(state["d_arr"][i])
         # The cut turns one region into two, so the extra one goes in the first free
         # slot, which is the current region count, before incrementing it.
@@ -493,6 +692,10 @@ def _cubature_solve(
         a2, b2 = a_i.at[k].set(mid), b_i
 
         r_i = state["r_arr"][i]
+        # The parent's error estimate, read before it is overwritten below. The
+        # extrapolation's accounting of how much error is still worth subdividing
+        # compares the two halves against the parent, so it has to be captured here.
+        err_i = state["e_arr"][i]
         area1, error1, intabs1, _, split1 = intfun(vfunc, a1, b1, ())
         state["neval"] += 1
         area2, error2, intabs2, _, split2 = intfun(vfunc, a2, b2, ())
@@ -518,6 +721,10 @@ def _cubature_solve(
         share = jnp.where(total > 0, error1 / safe, 0.5)
         error1 = error1 + share * disagreement
         error2 = error2 + (1 - share) * disagreement
+        # What the two halves contribute to the running total, which is what leaves the
+        # unlocalized error when they are localized. Taken after the handout so that it
+        # matches the estimates actually recorded, and so `err_sum`.
+        erro12 = error1 + error2
 
         # Which half keeps slot `i` and which takes the new slot `n`: the larger error
         # goes into `i`, the slot the ordering was already pointing at, so that the two
@@ -554,6 +761,22 @@ def _cubature_solve(
         state["owner"] = place(state["owner"], owner_i, owner_i)
         state["frac_a"] = place(state["frac_a"], frac_a1, frac_a2)
         state["frac_b"] = place(state["frac_b"], frac_b1, frac_b2)
+
+        if extrapolate:
+            # Both halves sit one level deeper than the region they came from.
+            levcur = state["level"][i] + 1
+            state["level"] = state["level"].at[i].set(levcur).at[n].set(levcur)
+            # Record the region this step consumed, and when the three regions involved
+            # entered the running total. Together with the final subdivision this is
+            # every region that ever existed, which is what `_replay_solve` needs to
+            # rebuild the sequence the table was fed. None of it depends on which half
+            # ends up in which slot: the two halves are born together and are only ever
+            # summed.
+            state["p_owner"] = state["p_owner"].at[n].set(owner_i)
+            state["p_frac_a"] = state["p_frac_a"].at[n].set(frac_a_i)
+            state["p_frac_b"] = state["p_frac_b"].at[n].set(frac_b_i)
+            state["p_birth"] = state["p_birth"].at[n].set(state["birth"][i])
+            state["birth"] = state["birth"].at[i].set(n + 1).at[n].set(n + 1)
 
         # Both running totals are summed afresh from the per-region contributions rather
         # than carried forward as `total += new - old`. Accumulating discards ~eps times
@@ -608,8 +831,26 @@ def _cubature_solve(
             STATUS.bad_integrand,
             ~converged & ((b1[k] - a1[k]) <= (_MIN_WIDTH * epmach_x * halfspan[k])),
         )
+
+        if extrapolate:
+            state = _accelerate(
+                state,
+                i,
+                erro12,
+                err_i,
+                converged,
+                _norm,
+                epsabs,
+                epsrel,
+                epmach,
+                state["nregion"],
+                max_nregion,
+            )
         return state
 
     state = bounded_while_loop(condfun, bodyfun, state, max_nregion + 1)
 
-    return jnp.sum(state["r_arr"], axis=0), state
+    y = jnp.sum(state["r_arr"], axis=0)
+    if extrapolate:
+        state, y = _accept_extrapolation(state, y, _norm)
+    return y, state

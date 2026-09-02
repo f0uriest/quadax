@@ -1,6 +1,7 @@
 """Adjoint methods controlling how derivatives of quadrature are computed."""
 
 import abc
+import math
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import NamedTuple
@@ -392,8 +393,8 @@ class _ReplayRecord(NamedTuple):
     carried under its own name in the integrator state.
 
     ``mesh`` is the final subdivision, as for a plain solve. ``parents`` describes the
-    sub-intervals that no longer exist -- each was bisected, so each is the *parent* of
-    one step -- and the birth times record when every sub-interval entered and left the
+    regions that no longer exist -- each was bisected, so each is the *parent* of
+    one step -- and the birth times record when every region entered and left the
     running total, which is what lets the whole sequence of running totals be rebuilt.
     Both the parent arrays and the birth times are indexed by the slot the bisection
     created, which is unique to that step, so the step needs no separate counter.
@@ -413,12 +414,12 @@ class _ReplayRecord(NamedTuple):
 
     @property
     def mesh(self):
-        """Frozen description of the final subdivision, for ``_rebuild_mesh``."""
+        """Frozen description of the final subdivision, for the mesh rebuild."""
         return (self.owner, self.frac_a, self.frac_b)
 
     @property
     def parents(self):
-        """Frozen description of the bisected sub-intervals, for ``_rebuild_mesh``."""
+        """Frozen description of the bisected regions, for the mesh rebuild."""
         return (self.p_owner, self.p_frac_a, self.p_frac_b)
 
 
@@ -427,31 +428,52 @@ def _frozen_replay(state):
     return _ReplayRecord(**{name: state[name] for name in _ReplayRecord._fields})
 
 
+def _n_initial(interval):
+    """How many pieces the breakpoints cut the domain into before any subdivision.
+
+    ``interval`` is a single array of breakpoints in one dimension and one such array
+    per axis over a box, the same two forms the solves themselves take, so the count is
+    the number of sub-intervals in the first case and the size of their grid in the
+    second.
+    """
+    if isinstance(interval, (jax.Array, np.ndarray)):
+        return interval.shape[0] - 1
+    return math.prod(len(axis) - 1 for axis in interval)
+
+
 def _replay_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
+    rule,
+    vfunc,
+    interval,
+    frozen,
+    kwargs,
+    *,
+    rebuild=_rebuild_mesh,
+    checkpoint=False,
+    chunk_size=_CHUNK,
 ):
     """Re-run an accelerated quadrature on the decisions the primal settled on.
 
     An accelerated solve may return an extrapolated value rather than the sum over the
     subdivision, so differentiating it means differentiating the extrapolation as well
-    as the mesh. Everything the acceleration decided -- which sub-interval to bisect,
+    as the mesh. Everything the acceleration decided -- which region to bisect,
     when to feed the table, which extrapolation to keep -- was settled on error
     estimates and is integer or boolean, so freezing it leaves a fixed, ordinary
     function of the limits and the integrand: rebuild the subdivision, rebuild the
     sequence of running totals, and run the epsilon algorithm over it again.
 
     Rebuilding the running totals is the part that is not simply a mesh sum. The total
-    at the point where ``t`` sub-intervals exist is the sum over those alive then, and a
-    coarse sub-interval's value is not the sum of the values of the two halves it was
+    at the point where ``t`` regions exist is the sum over those alive then, and a
+    coarse region's value is not the sum of the values of the two halves it was
     cut into, so it is not a prefix sum of the final subdivision. Recording
-    when each sub-interval entered the total and when it left turns it into one instead:
+    when each region entered the total and when it left turns it into one instead:
     add each value at its birth, subtract it again at its death, and the running totals
-    are the cumulative sum. Every sub-interval that ever existed is either in the final
+    are the cumulative sum. Every region that ever existed is either in the final
     subdivision or was bisected, so evaluating the final subdivision and the parents
     covers all of them, and costs the same number of rule evaluations as the primal.
     """
-    mesh = _rebuild_mesh(interval, frozen.mesh)
-    parents = _rebuild_mesh(interval, frozen.parents)
+    mesh = rebuild(interval, frozen.mesh)
+    parents = rebuild(interval, frozen.parents)
     values = _values_on_mesh(
         rule,
         vfunc,
@@ -466,10 +488,10 @@ def _replay_solve(
     shape, ytype = values.shape[1:], values.dtype
 
     # Births and deaths, as a signed contribution at each point on the timeline. A
-    # sub-interval of the final subdivision never dies. A parent dies at the step that
+    # region of the final subdivision never dies. A parent dies at the step that
     # bisected it, which is the step that created slot `n`, so at `n + 1`. Unused slots
     # carry a zero value and cannot disturb either sum.
-    n_init = interval.shape[0] - 1
+    n_init = _n_initial(interval)
     timeline = jnp.zeros((nslot + 2, *shape), ytype)
     timeline = timeline.at[frozen.birth].add(v_mesh)
     timeline = timeline.at[frozen.p_birth].add(v_parent)

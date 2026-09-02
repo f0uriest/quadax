@@ -162,6 +162,116 @@ class TestSubdivision:
         assert width[:, 0].min() < width[:, 1].min()
 
 
+# Problems where the subdivision can only ever bisect towards the difficulty, so that
+# the sequence of running totals it produces has a limit worth inferring: an algebraic
+# singularity at a corner of the box, and a kink the mesh has to find for itself.
+RESOLVED_BY_ACCELERATION = [
+    i
+    for i, p in enumerate(pnd.PROBLEMS)
+    if p["name"] in ("corner-sqrt", "kink-unmarked")
+]
+
+
+class TestExtrapolation:
+    """The epsilon table on the sequence of running totals the subdivision produces."""
+
+    @pytest.mark.parametrize("i", RESOLVED_BY_ACCELERATION, ids=pnd.problem_id)
+    def test_a_difficulty_the_mesh_can_only_approach(self, i):
+        """Acceleration reaches at least as far on a coarser mesh.
+
+        The two problems buy different things, which is why both are here: on
+        `corner-sqrt` the gain is cost, the same accuracy with fewer regions, and on
+        `kink-unmarked` it is accuracy, nearly three orders of it, because the totals
+        converge to a limit the table can name exactly.
+        """
+        prob = pnd.PROBLEMS[i]
+        tol = 1e-12
+        y_off, off = solve("genz-malik", prob, tol, extrapolate=False)
+        y_on, on = solve("genz-malik", prob, tol, extrapolate=True)
+        assert bool(on.info["used_accel"]), (
+            "the extrapolated value was not the one kept"
+        )
+        exact = np.asarray(prob["val"])
+        scale = np.max(np.abs(exact))
+        err_off = np.max(np.abs(np.asarray(y_off) - exact)) / scale
+        err_on = np.max(np.abs(np.asarray(y_on) - exact)) / scale
+        assert err_on <= err_off, f"{prob['name']}: {err_off:.2e} -> {err_on:.2e}"
+        # Measured gains run from 2.7x on `corner-sqrt` to 6.2x on `kink-unmarked`.
+        assert int(on.info["nregion"]) < 0.75 * int(off.info["nregion"])
+        pnd.assert_honest(y_on, on, prob, tol)
+
+    def test_a_divergent_integral_is_flagged(self):
+        """A divergent integrand must not come back looking converged.
+
+        The epsilon algorithm sums a divergent series the way Pade approximants do and
+        is indifferent to whether the limit it infers exists, so it returns the analytic
+        continuation of the convergent case. What keeps that from being silently wrong
+        is the flag, not the value.
+        """
+        # int_0^1 int_0^1 (u + v)**-s = (2**(2-s) - 2) / ((1-s)(2-s)), which
+        # continues to -3/4 at s = 3, where the integral itself diverges at the
+        # origin.
+        y, info = cubgm(
+            lambda u: (u[0] + u[1]) ** -3.0,
+            [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])],
+            epsabs=1e-10,
+            epsrel=1e-10,
+            max_nregion=500,
+            extrapolate=True,
+        )
+        np.testing.assert_allclose(float(y), -0.75, rtol=1e-6)
+        assert int(info.status) == STATUS.divergent
+
+    @pytest.mark.parametrize("i", pnd.SMOOTH, ids=pnd.problem_id)
+    def test_a_smooth_problem_still_gets_what_it_asked_for(self, request, i):
+        """Turning it on where there is nothing to accelerate must not cost accuracy.
+
+        Unlike the one dimensional routines, a run over a box may return an extrapolated
+        value on a smooth integrand: the initial mesh is a single cell, so the depth
+        budget is reached after one cut and the table is fed while the subdivision is
+        still coarse. That is allowed, the run stopping as soon as what it holds meets
+        the tolerance whichever of the two supplied it, but what comes back still has to
+        be inside the tolerance it claims.
+        """
+        prob = pnd.PROBLEMS[i]
+        tol = 1e-8
+        pnd.xfail_if_known(request, "genz-malik", prob, tol)
+        y, info = solve("genz-malik", prob, tol, extrapolate=True)
+        pnd.assert_converged(y, info, prob, tol)
+        pnd.assert_honest(y, info, prob, tol)
+
+    @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
+    )
+    def test_an_accelerated_solve_is_differentiable(self, adjoint, transform):
+        """The value differentiated has to be the one returned.
+
+        An accelerated solve returns the limit the table inferred rather than the sum
+        over the mesh, so ``DirectAdjoint`` cannot take its derivative on the mesh
+        alone: it replays the whole sequence of running totals on a subdivision rebuilt
+        from the limits, and extrapolates that again. ``LeibnizAdjoint`` runs its own
+        solve and needs none of it, which is what makes the two a check on each other.
+        The run has to have kept an extrapolation for any of this to be under test.
+        """
+        fun = lambda u: 1 / jnp.sqrt(u[0] + u[1])  # noqa: E731
+        run = lambda z, **kw: cubgm(  # noqa: E731
+            fun,
+            [jnp.stack([jnp.zeros_like(z), z]), jnp.array([0.0, 1.0])],
+            epsabs=1e-10,
+            epsrel=1e-10,
+            max_nregion=300,
+            extrapolate=True,
+            **kw,
+        )
+        b = jnp.asarray(0.7)
+        assert bool(run(b, full_output=True)[1].info["used_accel"]), "none was kept"
+        f = lambda z: run(z, adjoint=adjoint)[0]  # noqa: E731
+        # d/db int_0^b int_0^1 (u + v)**-0.5 = int_0^1 (b + v)**-0.5 dv
+        want = 2 * (np.sqrt(1.7) - np.sqrt(0.7))
+        np.testing.assert_allclose(float(transform(f)(b)), want, rtol=1e-8)
+
+
 class TestOneDimension:
     """A box of one axis, where the cubature and the one dimensional routines meet."""
 
@@ -181,9 +291,6 @@ class TestOneDimension:
         estimates need not: the cubature loop adds a term for the disagreement between
         a region and the two it is cut into that the one dimensional loop has no
         counterpart for, so they agree only to within it.
-
-        Acceleration is off on the one dimensional side because the cubature loop has
-        none, which is the substantive difference between the two.
         """
         rule = GaussKronrodRule(15)
         tol = 1e-10
@@ -203,7 +310,6 @@ class TestOneDimension:
             full_output=True,
             epsabs=tol,
             epsrel=tol,
-            extrapolate=False,
             max_ninter=500,
         )
         assert nd.status == STATUS.normal and one.status == STATUS.normal
@@ -268,6 +374,14 @@ class TestStatus:
         it until the corners of a region can no longer be told apart. The companion
         case is the point: ``1/(x0 + x1)`` looks just as singular at the same corner and
         is integrable, and there the mesh reaches the tolerance instead of the floor.
+
+        The floor is something the subdivision runs into, so the acceleration has to be
+        off for it to be what the run stops on. With it on the loop stops refining the
+        singular region once it is deep enough and spends the budget elsewhere, so at
+        this budget it exhausts that first and reports it instead. Both are honest, the
+        reported error being the size of the answer either way, but only one names the
+        difficulty; what the accelerating run has to promise is that it does not call
+        this converged.
         """
         limits = [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])]
         _, divergent = cubgm(
@@ -276,8 +390,17 @@ class TestStatus:
             epsabs=1e-10,
             epsrel=1e-10,
             max_nregion=2000,
+            extrapolate=False,
         )
         assert divergent.status == STATUS.bad_integrand
+        _, accelerated = cubgm(
+            lambda x: 1 / jnp.sum(x**2),
+            limits,
+            epsabs=1e-10,
+            epsrel=1e-10,
+            max_nregion=2000,
+        )
+        assert accelerated.status != STATUS.normal
         _, integrable = cubgm(
             lambda x: 1 / jnp.sum(x),
             limits,
