@@ -173,12 +173,6 @@ def quadgk(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -186,6 +180,12 @@ def quadgk(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -322,12 +322,6 @@ def quadcc(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -335,6 +329,12 @@ def quadcc(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -472,6 +472,13 @@ def quadts(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
         sequence of running totals, off by default. Unlike the other adaptive routines
@@ -480,13 +487,6 @@ def quadts(
         Where a tanh-sinh integration is inaccurate the limit is generally the
         resolution of the abscissas near the endpoints, which acceleration cannot
         recover.
-    adjoint : AbstractAdjoint, optional
-        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
-        derivative its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
-        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -605,12 +605,6 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -618,6 +612,12 @@ def adaptive_quadrature(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
