@@ -910,7 +910,6 @@ def quadcc_open(*args, **kwargs):
 # Marked entries are still worth fixing, but they are evidence about the method and not
 # a defect report.
 KNOWN_FAILURES = {
-    ("quadcc", "decay-line"): {1e-4, 1e-8},
     ("quadcc", "interior-marked"): {1e-4, 1e-8},
     ("quadcc", "loglog"): {1e-4, 1e-8},  # scipy too
     ("quadcc", "loglog-cube"): {1e-8},  # scipy too
@@ -934,6 +933,7 @@ KNOWN_FAILURES = {
     ("quadts", "beta-both-ends"): {1e-8},  # scipy too
     ("quadts", "decay-1.01"): {1e-4, 1e-8},  # scipy too
     ("quadts", "decay-1.1"): {1e-4, 1e-8},
+    ("quadts", "decay-line"): {1e-8},
     ("quadts", "interior-marked"): {1e-8},  # unaccelerated
     ("quadts", "interior-unmarked"): {1e-8},  # unaccelerated
     ("quadts", "loglog"): {1e-4, 1e-8},  # scipy too
@@ -994,7 +994,6 @@ KNOWN_DISHONEST: dict[tuple[str, str], set[float]] = {
     ("quadcc_open", "loglog-cube"): {1e-4},  # scipy too
     ("quadgk", "loglog"): {1e-4},  # host dependent
     ("quadgk", "loglog-cube"): {1e-4},  # scipy too
-    ("quadts", "decay-line"): {1e-8},  # 1.07x, the tail estimate has no margin
     ("tanhsinh", "osc-tail"): {1e-4},  # 1.6x
     ("tanhsinh", "sin-inverse"): {1e-4},  # 1.6x
 }

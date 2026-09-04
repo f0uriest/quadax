@@ -772,11 +772,14 @@ class TestInfiniteBox:
     def test_genz_malik_over_an_unbounded_box(self, ndim):
         """The fully symmetric rules go through the same map as the tensor product.
 
-        The map concentrates a Gaussian against the ends of the reference box, which a
-        single application of a fixed rule resolves only to a few percent. So what is
-        asserted is that the answer is the right one to that accuracy and that the
-        error estimate covers the distance to it, not a tight tolerance a fixed rule
-        has no way to meet.
+        The map concentrates a Gaussian near the centre of the reference box, which a
+        single application of a fixed rule resolves only to of order ten percent. So
+        what is asserted is that the answer is the right one to that accuracy and that
+        the error estimate covers the distance to it, not a tight tolerance a fixed
+        rule has no way to meet. The bound is a sanity check on the composition of a
+        rule with a map and says nothing about either alone: how widely a map spreads
+        this particular integrand across the reference box moves it by several times
+        over, while subdividing removes the whole effect.
         """
         fun = lambda x: jnp.exp(-jnp.sum(x**2))  # noqa: E731
         limits = jnp.tile(jnp.array([-jnp.inf, jnp.inf]), (ndim, 1))
@@ -785,7 +788,7 @@ class TestInfiniteBox:
             fun_t, *box_corners(interval_t), ()
         )
         exact = np.pi ** (ndim / 2)
-        np.testing.assert_allclose(float(y), exact, rtol=5e-2, atol=0)
+        np.testing.assert_allclose(float(y), exact, rtol=1.5e-1, atol=0)
         assert float(err) >= abs(float(y) - exact)
 
 

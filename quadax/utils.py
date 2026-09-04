@@ -112,7 +112,7 @@ def resolve_dtypes(
         xtype = jnp.asarray(interval).dtype
     # `jnp.zeros((), xtype)` rather than `jnp.array(0.0)`: the latter is *weakly* typed,
     # which both hides the requested precision and lets different expressions involving
-    # it settle on different dtypes. See the note on `MAPFUNS`.
+    # it settle on different dtypes. See the note on `TS_MAPFUNS`.
     xprobe = jnp.zeros(() if ndim is None else (ndim,), xtype)
     f = jax.eval_shape(fun, xprobe, *args)
     ytype = jnp.result_type(xtype, f.dtype)
@@ -120,81 +120,220 @@ def resolve_dtypes(
     return DTypes(xtype, ytype, etype, _coarser_dtype(xtype, etype))
 
 
-def _map_identity(t: jax.Array, a: jax.Array, b: jax.Array):
-    """For finite intervals no mapping is needed.
+## Coordinate mapping
+# In all cases a finite (sub)interval stays where it is. An infinite interval
+# without breakpoints is mapped to a reference interval of [-1, 1]. An infinite
+# interval with finite breakpoints is done piecewise: The finite parts are left
+# alone, while the infinite parts are mapped to a finite length and joined at
+# ``junctions`` (the largest and smallest finite points in the interval). The size
+# the infinite part is mapped to is determined by the largest finite sub-interval,
+# or 1 when there is none, given by ``width``.
 
-    Mapping twice introduces extra roundoff error.
+
+def _map_scale(interval: jax.Array) -> jax.Array:
+    """The characteristic scale for the domain.
+
+    The scale is taken to be the size of the largest finite sub-interval from the user
+    supplied interval with possible breakpoints. If the domain is infinite without any
+    breakpoints, we fall back to a scale of 1.
     """
-    del a, b
-    return t.squeeze(), jnp.ones_like(t).squeeze()
+    # interval is already sorted so these are non-negative
+    gaps = jnp.diff(interval)
+    # An infinite gap is the unbounded end and says nothing about scale; a nan one comes
+    # from two infinite limits landing on top of each other after the clamp.
+    gaps = jnp.where(jnp.isfinite(gaps), gaps, 0)
+    widest = jnp.max(gaps, initial=jnp.zeros((), interval.dtype))
+    return jnp.where(widest > 0, widest, 1).astype(interval.dtype)
 
 
-def _map_identity_inv(x: jax.Array, a: jax.Array, b: jax.Array):
-    """Leave a point in [a, b] where it is."""
-    del a, b
-    return x.squeeze()
+def _map_width(scale: jax.Array, anchored: jax.Array) -> jax.Array:
+    """How much reference coordinate one unbounded end is given.
+
+    An unbounded sub-interval is mapped to a finite stretch of the reference
+    coordinate, and this is how big that stretch is. It is set by asking that the
+    halfway point of a tail's reference span sit one ``scale`` out along the real axis
+    from the nearest finite breakpoint.
+    """
+    return jnp.where(anchored, scale, 3 * scale / 2)
 
 
-def _map_ninfinf(t: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point t in [-1, 1] to x in [-inf, inf]."""
-    x = jnp.tan(t * jnp.pi / 2)
-    w = jnp.pi / 2 / jnp.cos(jnp.pi * t / 2) ** 2
+def _map_tail(
+    offset: jax.Array, rest: jax.Array, width: jax.Array, anchored: jax.Array
+):
+    """One unbounded end, as the physical distance from the point it hangs off.
+
+    Takes the reference distance from the junction (``offset``) and the distance from
+    the far end of the tail's span (``rest``), which sum to ``width`` in exact math.
+    Both are passed rather than one derived from the other because each is exact only
+    at its own end: near the far end the distance from the junction is a number of order
+    ``width`` and cannot record how far the node still is from the boundary, which is
+    precisely the distance that decides where the outermost node lands and how much of
+    the tail the rule ever sees.
+
+    The reference distance runs over ``[0, width]`` and the physical one over
+    ``[0, inf)``. Two properties are what let this one function cover every case:
+
+    - It divides by an exact zero at ``width``, so an unbounded limit comes back as a
+      true infinity that the inf/nan mask and the rules' own boundary tests recognize.
+    - Its derivative at the junction is that of the identity, so a tail joins the
+      part the map leaves alone without a kink.
+
+    ``anchored`` selects between two profiles, and says whether the junction this
+    tail hangs off is a point of the interval or one fabricated for want of any finite
+    point at all. Anchored, it is a Mobius function of the reference coordinate, whose
+    only singularity is the pole at ``width`` carrying the unbounded end: an integrand
+    decaying like a power of the abscissa then composes with it to give an exact power
+    of the distance from the reference boundary times a factor analytic across the whole
+    span, which is the form the rules and the extrapolation resolve best. Its second
+    derivative at the junction is not that of the identity, so the join carries a break
+    in curvature -- which costs nothing, an anchored junction being a point of the mesh
+    that no sub-interval straddles.
+
+    Unanchored, the junction is interior to a sub-interval and that break would sit
+    where two tails meet, at the centre of the reference domain, where a symmetric rule
+    mis-estimates it symmetrically and a nested pair agrees on a value neither has
+    resolved. Squaring the denominator matches the second derivative as well, making the
+    two tails one analytic map of the whole line.
+    """
+    grow = width / rest
+    # `1 + offset/width` folded into the denominator turns the Mobius profile into the
+    # odd rational one, `offset / (1 - s**2)`, without forming either separately.
+    spread = jnp.where(anchored, 1, (width + offset) / width)
+    rise = jnp.where(anchored, 1, 1 + (offset / width) ** 2)
+    grow = grow / spread
+    return offset * grow, rise * grow * grow
+
+
+def _map_tail_inv(offset: jax.Array, width: jax.Array, anchored: jax.Array):
+    """The reference distance from a junction, given the physical one."""
+    # Over the ratio `width / offset` rather than as `width * offset` over their sum, so
+    # that an infinite offset gives the width exactly instead of `inf / inf`.
+    q = width / offset
+    # The Mobius root of `offset = d / (1 - d/width)`, and the odd rational one of
+    # `offset = d / (1 - (d/width)**2)`, the latter being the root of `q s**2 + s - q`
+    # in [0, 1]. Both denominators are bounded away from zero for every offset the map
+    # can produce, so this needs no branch and no masking.
+    return width * jnp.where(anchored, 1 / (1 + q), 2 / (q + jnp.sqrt(q * q + 4)))
+
+
+def _map(
+    t: jax.Array,
+    scale: jax.Array,
+    shift: jax.Array,
+    anchored: jax.Array,
+    lo: jax.Array,
+    hi: jax.Array,
+):
+    """Map the reference coordinate to x, transforming only the unbounded ends.
+
+    Between ``lo`` and ``hi``, the outermost finite points of the interval, this is the
+    identity, and each unbounded end is a tail hanging off the finite point next to it.
+    Only the part of the interval that actually needs bringing into a finite domain is
+    transformed, so a sub-interval far from the origin, or one carrying a singularity,
+    keeps its own coordinate instead of being compressed against a reference boundary
+    along with everything else.
+    """
+    width = _map_width(scale, anchored)
+    # The junctions as the reference coordinate sees them. A node's distance from one is
+    # formed against these rather than by translating the node back first: the whole
+    # point of placing the domain is that its ends are small, and an intermediate at the
+    # junction's own magnitude would round the distance to an eps of that instead.
+    jlo, jhi = lo + shift, hi + shift
+    t_lo, t_hi = jlo - width, jhi + width
+    # below, above are false for a finite interval, true only when a point t lies in
+    # the part of the reference domain that maps to the semi-infinite x domain.
+    below, above = t < jlo, t > jhi
+    # A branch that is not selected is handed the junction itself, so that the pole a
+    # tail carries at its far end is never reached by one about to be discarded: an
+    # infinity in a discarded branch is still a nan in reverse mode.
+    left, wleft = _map_tail(
+        jnp.where(below, jlo - t, 0), jnp.where(below, t - t_lo, width), width, anchored
+    )
+    right, wright = _map_tail(
+        jnp.where(above, t - jhi, 0), jnp.where(above, t_hi - t, width), width, anchored
+    )
+    x = jnp.where(below, lo - left, jnp.where(above, hi + right, t - shift))
+    w = jnp.where(below, wleft, jnp.where(above, wright, jnp.ones_like(t)))
     return x.squeeze(), w.squeeze()
 
 
-def _map_ninfinf_inv(x: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point x in [-inf, inf] to t in [-1, 1]."""
-    t = jnp.arctan(x) / (jnp.pi / 2)
+def _map_inv(
+    x: jax.Array,
+    scale: jax.Array,
+    shift: jax.Array,
+    anchored: jax.Array,
+    lo: jax.Array,
+    hi: jax.Array,
+):
+    """Map x back to the reference coordinate, inverting :func:`_map`."""
+    width = _map_width(scale, anchored)
+    jlo, jhi = lo + shift, hi + shift
+    below, above = x < lo, x > hi
+    t = jnp.where(
+        below,
+        jlo - _map_tail_inv(lo - x, width, anchored),
+        jnp.where(above, jhi + _map_tail_inv(x - hi, width, anchored), x + shift),
+    )
     return t.squeeze()
 
 
-def _map_ainf(t: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point t in [-1, 1] to x in [a, inf]."""
-    # The distance from the finite endpoint is (1+t)/(1-t), and writing it that way
-    # keeps every bit `t` has: `1+t` is exact for `t` near -1. The algebraically equal
-    # `a - 1 + 2/(1-t)` instead forms it as the difference of two numbers near 1 and
-    # keeps only `d/eps` of it, so the nodes closest to the endpoint, ie the ones that
-    # decide the answer when the integrand is singular there, come out wrong by a factor
-    # of two at the last of them.
-    x = a + (1 + t) / (1 - t)
-    w = 2 / (1 - t) ** 2
-    return x.squeeze(), w.squeeze()
+def _map_junctions(
+    interval: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """The outermost finite points of an interval, which its tails hang off.
+
+    An end that is already finite is its own junction and grows no tail. Limits that are
+    both infinite leave nothing to anchor to and fall back to the origin, which is
+    reported alongside them: a junction taken from the interval is a point of the mesh
+    and a fabricated one is not, and that is what decides the profile of the tails
+    hanging off it.
+    """
+    finite = jnp.isfinite(interval)
+    inf = jnp.array(jnp.inf, interval.dtype)
+    lo = jnp.min(jnp.where(finite, interval, inf))
+    hi = jnp.max(jnp.where(finite, interval, -inf))
+    anchored = jnp.any(finite)
+    zero = jnp.zeros((), interval.dtype)
+    return jnp.where(anchored, lo, zero), jnp.where(anchored, hi, zero), anchored
 
 
-def _map_ainf_inv(x: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point x in [a, inf] to t in [-1, 1]."""
-    t = (a - x + 1) / (a - x - 1)
-    return t.squeeze()
+def _map_bounds(interval: jax.Array):
+    """Everything :func:`_map` needs, and where the reference domain ends.
 
-
-def _map_ninfb(t: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point t in [-1, 1] to x in [-inf, b]."""
-    # Distance from the finite endpoint as (1-t)/(1+t) rather than 1 - 2/(t+1); see
-    # ``_map_ainf``, which this mirrors.
-    x = b - (1 - t) / (1 + t)
-    w = 2 / (t + 1) ** 2
-    return x.squeeze(), w.squeeze()
-
-
-def _map_ninfb_inv(x: jax.Array, a: jax.Array, b: jax.Array):
-    """Map a point x in [-inf, b] to t in [-1, 1]."""
-    t = (x - b + 1) / (b - x + 1)
-    return t.squeeze()
-
-
-# A finite interval stays where it is; the three infinite cases have to be brought into
-# [-1, 1] because there is no other way to subdivide them.
-MAPFUNS = [_map_identity, _map_ninfb, _map_ainf, _map_ninfinf]
-MAPFUNS_INV = [_map_identity_inv, _map_ninfb_inv, _map_ainf_inv, _map_ninfinf_inv]
-
-# These are the branches of a `lax.switch`, so all four have to return the same dtypes,
-# and they only do so if `t`, `a` and `b` agree. Note in particular that they must not
-# be given a *weakly* typed `t`: the four differ in which of `a`/`b` they use, and a
-# weak `t` lets each branch settle on whichever of the two is present. `_map_ainf`'s
-# `a + (1 + t) / (1 - t)` would follow a strong float32 `a`, while `_map_ninfinf`'s
-# `jnp.tan(t * jnp.pi / 2)` would stay at the weak default, and the switch would not
-# build.
-# This is why the integrand is probed with `jnp.zeros((), xtype)`, not `jnp.array(0.0)`.
+    Returns
+    -------
+    scale : jax.Array
+        Characteristic size of the domain (largest finite sub-interval)
+    shift : jax.Array
+        How much the domain is shifted relative to the reference domain
+    anchored : jax.Array
+        Whether the original domain had any finite points to anchor the reference domain
+    lo, hi : jax.Array
+        Smallest and largest finite points of original domain.
+    t_lo, t_hi : jax.Array
+        Endpoints of mapped domain
+    """
+    scale = _map_scale(interval)
+    lo, hi, anchored = _map_junctions(interval)
+    width = _map_width(scale, anchored)
+    # A tail is grown only where the limit on that side is unbounded; a finite one is
+    # its own image, up to where the domain is placed.
+    unbounded_lo = interval[0] == -jnp.inf
+    unbounded_hi = interval[-1] == jnp.inf
+    end_lo = jnp.where(unbounded_lo, lo - width, lo)
+    end_hi = jnp.where(unbounded_hi, hi + width, hi)
+    # shift is zero except in the case of a semi-infinite domain with no interior
+    # breakpoints, in which case we shift the finite end to the origin. This avoids
+    # some roundoff error in abscissae near the endpoint. We could shift all domains
+    # to the origin, but we want to keep finite breakpoints in place since we need to
+    # compare direct equality in places, and (x+y)-y may not equal x in floating point
+    shift = jnp.where(lo == hi, -(end_lo + end_hi) / 2, jnp.zeros_like(lo))
+    # Formed exactly as :func:`_map` forms them, so that the boundary it returns an
+    # infinity at is the same float the mesh is built out of.
+    jlo, jhi = lo + shift, hi + shift
+    t_lo = jnp.where(unbounded_lo, jlo - width, jlo)
+    t_hi = jnp.where(unbounded_hi, jhi + width, jhi)
+    return scale, shift, anchored, lo, hi, t_lo, t_hi
 
 
 def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
@@ -237,23 +376,20 @@ def map_interval(fun: Callable[..., jax.Array], interval: ArrayLike):
     interval = jnp.where(interval > b, b, interval)
     interval = jnp.sort(interval)
 
-    # bit mask to select mapping case
-    # 0 : both sides finite
-    # 1 : a = -inf, b finite
-    # 2 : a finite, b = inf
-    # 3 : both infinite
-    bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
+    scale, shift, anchored, lo, hi, t_lo, t_hi = _map_bounds(interval)
 
-    fun_mapped = _MappedFunction(fun, bitmask, sgn, a, b)
-    # map original breakpoints to new domain
-    # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
-    # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
-    # where type trick to avoid nan in reverse mode.
-    finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
-    interval_finite = jnp.where(jnp.isinf(interval), finite, interval)
-    interval_t: jax.Array = jax.lax.switch(bitmask, MAPFUNS_INV, interval_finite, a, b)
-    interval_t = jnp.where(interval == jnp.inf, 1, interval_t)
-    interval_t = jnp.where(interval == -jnp.inf, -1, interval_t)
+    fun_mapped = _MappedFunction(
+        fun, sgn, a, b, scale, shift, anchored, lo, hi, t_lo, t_hi
+    )
+    # Map the original breakpoints to the new domain. A finite one lies between the
+    # junctions by construction and keeps its own coordinate up to where the domain has
+    # been placed, and an infinite limit goes to the end of the reference domain, which
+    # the map reaches only as a limit.
+    interval_t = jnp.where(
+        interval == jnp.inf,
+        t_hi,
+        jnp.where(interval == -jnp.inf, t_lo, interval + shift),
+    )
     return fun_mapped, interval_t
 
 
@@ -261,14 +397,20 @@ class _MappedFunction(eqx.Module):
     """Function mapped to an interval a fixed rule can be applied over."""
 
     fun: Callable[..., jax.Array]
-    bitmask: jax.Array
     sgn: jax.Array
     a: jax.Array
     b: jax.Array
+    scale: jax.Array
+    shift: jax.Array
+    anchored: jax.Array
+    lo: jax.Array
+    hi: jax.Array
+    t_lo: jax.Array
+    t_hi: jax.Array
 
     @eqx.filter_jit
     def __call__(self, t: jax.Array, *args):
-        x, w = jax.lax.switch(self.bitmask, MAPFUNS, t, self.a, self.b)
+        x, w = _map(t, self.scale, self.shift, self.anchored, self.lo, self.hi)
         return self.sgn * w * self.fun(x, *args)
 
 
@@ -389,8 +531,9 @@ def map_box(fun: Callable[..., jax.Array], interval):
     limited by this rather than by the rule applied afterwards.
     """
     intervals = _as_box_intervals(interval)
-    # One dtype across the axes, so the per axis branches below cannot disagree on the
-    # dtype they return; see the note above on why `t` must not be weakly typed.
+    # One dtype across the axes, so that the per axis bounds can be stacked: each axis
+    # derives its own junctions and unit, and a box mixing a bounded axis with an
+    # unbounded one would otherwise settle on a different dtype for each.
     xtype = jnp.result_type(*intervals)
     intervals = [axis.astype(xtype) for axis in intervals]
 
@@ -403,44 +546,50 @@ def map_box(fun: Callable[..., jax.Array], interval):
     # boxes of zero width for whatever subdivides the box to ignore.
     intervals = [jnp.sort(jnp.clip(v, a[k], b[k])) for k, v in enumerate(intervals)]
 
-    # bit mask to select the mapping case for each axis, as in `map_interval`
-    bitmask = jnp.isinf(a) + 2 * jnp.isinf(b)
+    # One set of junctions and one unit per axis, each from that axis's own
+    # breakpoints, since the axes are mapped independently and need not share a scale.
+    # The loop is over a static number of axes, so it unrolls at trace time.
+    bounds = [_map_bounds(v) for v in intervals]
+    scale, shift, anchored, lo, hi, t_lo, t_hi = (
+        jnp.stack([bd[k] for bd in bounds]) for k in range(7)
+    )
 
-    fun_mapped = _MappedBoxFunction(fun, bitmask, sgn, a, b)
+    fun_mapped = _MappedBoxFunction(fun, sgn, a, b, scale, shift, anchored, lo, hi)
 
-    # An infinite limit gets mapped to +/-1, which the inverse maps reach only as a
-    # limit: the arithmetic there is inf/inf and evaluates to nan, so needs a double
-    # where type trick to avoid nan in reverse mode.
-    finite = jnp.where(jnp.isinf(a), jnp.where(jnp.isinf(b), 0.0, b), a)
-    interval_t = []
-    for k, v in enumerate(intervals):
-        v_finite = jnp.where(jnp.isinf(v), finite[k], v)
-        # One `switch` per axis rather than a `vmap` of one over a batched index, which
-        # would become a select over *every* branch, evaluated. The branches disagree on
-        # which endpoint they use, so on an infinite axis the unselected ones return
-        # nan, and a nan that is merely discarded still poisons the reverse mode
-        # derivative. The loop is over a static number of axes, so it unrolls at
-        # trace time.
-        v_t = jax.lax.switch(bitmask[k], MAPFUNS_INV, v_finite, a[k], b[k])
-        v_t = jnp.where(v == jnp.inf, 1, jnp.where(v == -jnp.inf, -1, v_t))
-        interval_t.append(v_t)
-    return fun_mapped, tuple(interval_t)
+    interval_t = tuple(
+        jnp.where(
+            v == jnp.inf, t_hi[k], jnp.where(v == -jnp.inf, t_lo[k], v + shift[k])
+        )
+        for k, v in enumerate(intervals)
+    )
+    return fun_mapped, interval_t
 
 
 class _MappedBoxFunction(eqx.Module):
     """Function mapped to a box a fixed cubature rule can be applied over."""
 
     fun: Callable[..., jax.Array]
-    bitmask: jax.Array
     sgn: jax.Array
     a: jax.Array
     b: jax.Array
+    scale: jax.Array
+    shift: jax.Array
+    anchored: jax.Array
+    lo: jax.Array
+    hi: jax.Array
 
     @eqx.filter_jit
     def __call__(self, t: jax.Array, *args):
         ndim = self.a.shape[0]
         xw = [
-            jax.lax.switch(self.bitmask[k], MAPFUNS, t[k], self.a[k], self.b[k])
+            _map(
+                t[k],
+                self.scale[k],
+                self.shift[k],
+                self.anchored[k],
+                self.lo[k],
+                self.hi[k],
+            )
             for k in range(ndim)
         ]
         x = jnp.stack([p[0] for p in xw])
@@ -536,6 +685,57 @@ def tanhsinh_complement(t: jax.Array) -> jax.Array:
     return 1 / (jnp.exp(z) * jnp.cosh(z))
 
 
+def mapping_of(fun):
+    """The :class:`_MappedFunction` inside ``fun``, or None if it is not mapped.
+
+    A rule is handed an integrand that ``map_interval`` has already composed with its
+    change of variable, so the abscissae it sees are the reference ones and not the
+    caller's. Almost every rule is right to ignore that. One that is not -- because it
+    carries something of its own expressed in the caller's coordinate, such as the
+    location of a weight's singularity -- needs to know which map was applied, and this
+    is how it asks.
+    """
+    seen = set()
+    while fun is not None and id(fun) not in seen:
+        if isinstance(fun, _MappedFunction):
+            return fun
+        seen.add(id(fun))
+        fun = getattr(fun, "fun", None)
+    return None
+
+
+def apply_mapping(mapping, t: jax.Array):
+    """Send reference abscissae back to the caller's coordinate.
+
+    Returns the caller's ``x`` and the map's Jacobian ``dx/dt`` there. ``mapping`` of
+    ``None`` means no map was applied, which is the case when a rule is called directly
+    rather than through a routine, and the two coordinates are the same thing.
+
+    Used by the rules that carry something declared in the caller's coordinate -- a
+    weight's singular point, an oscillator's phase -- and so cannot simply take the
+    abscissa they are handed at face value. See :func:`mapping_of`.
+    """
+    if mapping is None:
+        return t, jnp.ones_like(t)
+    return _map(
+        t, mapping.scale, mapping.shift, mapping.anchored, mapping.lo, mapping.hi
+    )
+
+
+def invert_mapping(mapping, x: jax.Array):
+    """Send points of the caller's coordinate to the reference one.
+
+    The counterpart of :func:`apply_mapping`, and the same function ``map_interval``
+    puts the breakpoints through, so a point declared in the caller's coordinate and a
+    breakpoint spliced in beside it land on the same float.
+    """
+    if mapping is None:
+        return x
+    return _map_inv(
+        x, mapping.scale, mapping.shift, mapping.anchored, mapping.lo, mapping.hi
+    )
+
+
 def _saturated(w: jax.Array, inside: jax.Array):
     """Drop the weight of a node whose offset from the endpoint has rounded away.
 
@@ -607,13 +807,20 @@ def _ts_ninfinf(t: jax.Array, c: jax.Array, a: jax.Array, b: jax.Array):
     return x.squeeze(), w.squeeze()
 
 
-# The four cases of ``MAPFUNS``, each composed with the tanh-sinh substitution and
-# rewritten in terms of the node's distance from the end of [-1, 1] it clusters against.
-# Composing them rather than applying one after the other is what keeps the outermost
-# nodes: the substitution reaches far closer to an endpoint than a node written down as
-# a position can record, and the two Jacobians have factors that cancel and would
-# otherwise leave the range on their own. Being branches of a ``switch``, these carry
-# the same dtype requirement as ``MAPFUNS``.
+# The four cases a limit can fall into, each composed with the tanh-sinh substitution
+# and rewritten in terms of the node's distance from the end of [-1, 1] it clusters
+# against. Composing them rather than applying one after the other is what keeps the
+# outermost nodes: the substitution reaches far closer to an endpoint than a node
+# written down as a position can record, and the two Jacobians have factors that cancel
+# and would otherwise leave the range on their own.
+#
+# These are the branches of a `lax.switch`, so all four have to return the same dtypes,
+# and they only do so if `t`, `a` and `b` agree. Note in particular that they must not
+# be given a *weakly* typed `t`: the four differ in which of `a`/`b` they use, and a
+# weak `t` lets each branch settle on whichever of the two is present. `_ts_ainf`'s
+# `a + offset` would follow a strong float32 `a`, while `_ts_ninfinf` touches neither
+# limit and would stay at the weak default, and the switch would not build.
+# This is why the integrand is probed with `jnp.zeros((), xtype)`, not `jnp.array(0.0)`.
 TS_MAPFUNS = [_ts_finite, _ts_ninfb, _ts_ainf, _ts_ninfinf]
 
 
@@ -748,7 +955,8 @@ def wrap_func(
     """Vectorize, jit, and mask out inf/nan.
 
     ``xtype`` is the dtype the integrand will be called at, and the integrand is probed
-    at that dtype rather than at a weakly typed default. See the note on ``MAPFUNS``.
+    at that dtype rather than at a weakly typed default. See the note on
+    ``TS_MAPFUNS``.
 
     ``ndim`` says what one abscissa looks like. ``None`` is a scalar, the 1D case. An
     int is the length of the vector a cubature rule hands the integrand, which becomes
