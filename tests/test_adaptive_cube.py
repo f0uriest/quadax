@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.special
+from packaging.version import Version
 
 from quadax import (
     STATUS,
@@ -24,6 +25,21 @@ from quadax.adaptive_cube import adaptive_cubature, cubegm
 from quadax.fixed_cubature import AbstractCubatureRule, GenzMalikRule, TensorProductRule
 
 from . import problems_nd as pnd
+
+# XLA before jax 0.7.0 compiles the boundary term over a box to something that returns
+# NaN when it is differentiated twice with a reverse pass on the outside. The program
+# itself is right: on those versions the same call with `jit` disabled returns the
+# correct value, and every nesting whose outer pass is forward is correct with it on.
+# Only the box meets this, because there the boundary term is an integral over a face
+# and runs a nested solve, where in one dimension a face is a point and there is no
+# solve to compile.
+_XLA_MISCOMPILES_THE_FACE_TERM = Version(jax.__version__) < Version("0.7.0")
+
+
+def _grad_of_grad(f):
+    """Reverse over reverse: the nesting whose outer pass transposes the inner one."""
+    return jax.grad(jax.grad(f))
+
 
 # Two rules with quite different characters: a Genz-Malik rule pays a handful of nodes
 # per region and refines a lot, a tensor product rule pays many and refines little. A
@@ -488,11 +504,11 @@ class TestTransformations:
         [
             lambda f: jax.jacfwd(jax.jacfwd(f)),
             jax.hessian,
-            lambda f: jax.grad(jax.grad(f)),
+            _grad_of_grad,
         ],
         ids=["jacfwd^2", "hessian", "grad^2"],
     )
-    def test_second_derivatives(self, second, adjoint):
+    def test_second_derivatives(self, request, second, adjoint):
         """Both adjoints survive being differentiated twice, in every nesting.
 
         One parameter reaches the answer by every route at once: through an argument of
@@ -501,6 +517,17 @@ class TestTransformations:
         outer face and of a jump between two faces together, and the exact answer is
         wrong if any one of them is.
         """
+        if (
+            _XLA_MISCOMPILES_THE_FACE_TERM
+            and second is _grad_of_grad
+            and isinstance(adjoint, LeibnizAdjoint)
+        ):
+            request.applymarker(
+                pytest.mark.xfail(
+                    reason=f"jax {jax.__version__} compiles the boundary term to NaN",
+                    strict=False,
+                )
+            )
         fun = lambda x, z: jnp.where(x[0] > z[0], 5.0, 1.0) * jnp.exp(-z[0] * x[1])
         f = lambda s: cubegm(  # noqa: E731
             fun,
