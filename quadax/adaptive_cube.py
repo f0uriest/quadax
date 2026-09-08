@@ -41,6 +41,7 @@ from .utils import (
     _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _as_box_intervals,
+    _box_reference_intervals,
     _real_dtype,
     bounded_while_loop,
     box_corners,
@@ -52,7 +53,7 @@ from .utils import (
 @eqx.filter_jit
 def cubgm(
     fun: Callable[..., jax.Array],
-    interval: ArrayLike | Sequence[ArrayLike],
+    interval: ArrayLike | Sequence[ArrayLike | Callable],
     args: tuple = (),
     full_output: bool = False,
     epsabs: Any = None,
@@ -85,9 +86,9 @@ def cubgm(
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array, where ``x`` has shape ``(ndim,)``. Should be
         JAX transformable.
-    interval : array-like or sequence of array-like
+    interval : array-like or sequence of array-like or callable
         Limits of integration. Either an array of shape ``(ndim, 2)``, row ``k`` giving
-        the two limits of axis ``k``, or a list or tuple of one array per axis, each
+        the two limits of axis ``k``, or a list or tuple of one entry per axis, each
         holding that axis' two limits with any breakpoints between them. The second
         form is what carries breakpoints, and the axes may carry different numbers of
         them. ``ndim`` is taken from the length of either. Use np.inf to denote
@@ -95,8 +96,16 @@ def cubgm(
         with an ``x`` of this dtype, and the result follows it unless the integrand
         upcasts. Integer types or python floats fall back to the JAX default. Must be
         real; complex integrands are supported, complex limits are not.
+
+        An entry of the list or tuple form may instead be a callable
+        ``lim(x_prev, *args)`` returning those same limits, where ``x_prev`` has shape
+        ``(k,)`` and holds the coordinates of the axes before it, so that the region
+        need not be a box. Axis ``k`` may depend only on axes ``0`` to ``k-1``, which
+        makes the order of the axes significant. Any breakpoints the callable returns
+        may move with the coordinates too, which is how a feature lying along a curve
+        is marked.
     args : tuple, optional
-        Extra arguments passed to fun.
+        Extra arguments passed to fun and any callable interval limit.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
@@ -171,6 +180,16 @@ def cubgm(
     one side, is not affected. No breakpoint helps, the difficulty lying at a point the
     map sends to infinity.
 
+    An axis whose limits are given as a callable is integrated over a fixed interval
+    instead, and the map onto the limits it returns is folded into the integrand along
+    with its Jacobian. The region is then a box again, and everything above applies to
+    it unchanged; a limit the callable returns may be unbounded like any other. What
+    such a region costs is smoothness: a curved boundary moves its curvature into the
+    axes before it, so a disc costs far more subdivision than a triangle of the same
+    area does, and no breakpoint helps there either, the difficulty being a square root
+    rather than a kink. The limit functions are evaluated once per node per axis they
+    govern.
+
     """
     ndim = len(_as_box_intervals(interval))
     rule = GenzMalikRule(ndim, degree, norm, batch_size)
@@ -197,7 +216,7 @@ def cubgm(
 def adaptive_cubature(
     rule: AbstractCubatureRule,
     fun: Callable[..., jax.Array],
-    interval: ArrayLike | Sequence[ArrayLike],
+    interval: ArrayLike | Sequence[ArrayLike | Callable],
     args: tuple = (),
     full_output: bool = False,
     epsabs: Any = None,
@@ -223,9 +242,9 @@ def adaptive_cubature(
         Function to integrate, should have a signature of the form
         ``fun(x, *args)`` -> float, Array, where ``x`` has shape ``(ndim,)``. Should be
         JAX transformable.
-    interval : array-like or sequence of array-like
+    interval : array-like or sequence of array-like or callable
         Limits of integration. Either an array of shape ``(ndim, 2)``, row ``k`` giving
-        the two limits of axis ``k``, or a list or tuple of one array per axis, each
+        the two limits of axis ``k``, or a list or tuple of one entry per axis, each
         holding that axis' two limits with any breakpoints between them. The second
         form is what carries breakpoints, and the axes may carry different numbers of
         them. ``ndim`` is taken from the length of either. Use np.inf to denote
@@ -233,8 +252,16 @@ def adaptive_cubature(
         with an ``x`` of this dtype, and the result follows it unless the integrand
         upcasts. Integer types or python floats fall back to the JAX default. Must be
         real; complex integrands are supported, complex limits are not.
+
+        An entry of the list or tuple form may instead be a callable
+        ``lim(x_prev, *args)`` returning those same limits, where ``x_prev`` has shape
+        ``(k,)`` and holds the coordinates of the axes before it, so that the region
+        need not be a box. Axis ``k`` may depend only on axes ``0`` to ``k-1``, which
+        makes the order of the axes significant. Any breakpoints the callable returns
+        may move with the coordinates too, which is how a feature lying along a curve
+        is marked.
     args : tuple, optional
-        Extra arguments passed to fun.
+        Extra arguments passed to fun and any callable interval limit.
     full_output : bool, optional
         If True, return the full state of the integrator. See below for more
         information.
@@ -308,13 +335,17 @@ def adaptive_cubature(
         f"dimension {rule.ndim - 1} as options_face={{'rule': ...}} on the adjoint, or "
         "use DirectAdjoint.",
     )
-    intervals = _as_box_intervals(interval)
+    axes = _as_box_intervals(interval)
     errorif(
-        len(intervals) != rule.ndim,
+        len(axes) != rule.ndim,
         ValueError,
         f"rule integrates over {rule.ndim} dimensions but interval gives limits for "
-        f"{len(intervals)}.",
+        f"{len(axes)}.",
     )
+    # An axis whose limits are a callable is integrated over a fixed reference interval,
+    # so that is what the mesh, the tolerances and the adjoints work in; the map onto
+    # the limits it returns is folded into the integrand by `map_box`.
+    intervals = _box_reference_intervals(axes, args)
     n_init = math.prod(len(axis) - 1 for axis in intervals)
     errorif(
         max_nregion < n_init,
@@ -330,7 +361,20 @@ def adaptive_cubature(
     epsabs = jnp.asarray(epsabs, dtypes.etype)
     epsrel = jnp.asarray(epsrel, dtypes.etype)
 
+    # The limit callables close over traced values exactly as the integrand does, and a
+    # raw callable crossing into an adjoint would be static, so each is converted here
+    # alongside it and its consts join the ones the adjoint differentiates.
     f_conv, consts = closure_convert(fun, args, dtypes.xtype, ndim=rule.ndim)
+    lims: list = []
+    all_consts = [consts]
+    for k, axis in enumerate(axes):
+        if not callable(axis):
+            lims.append(None)
+            continue
+        lim_conv, lim_consts = closure_convert(axis, args, dtypes.xtype, ndim=k)
+        lims.append(lim_conv)
+        all_consts.append(lim_consts)
+    consts = tuple(all_consts)
 
     # The options an adjoint may run its own solve with.
     opts = {
@@ -341,7 +385,9 @@ def adaptive_cubature(
         "extrapolate": extrapolate,
     }
     ops = QuadratureOps(
-        build=partial(build_box_integrand, f_conv=f_conv, ndim=rule.ndim),
+        build=partial(
+            build_box_integrand, f_conv=f_conv, ndim=rule.ndim, lims=tuple(lims)
+        ),
         solve=_cubature_solve,
         rebuild=_rebuild_box_mesh,
         on_mesh=_quad_on_mesh,

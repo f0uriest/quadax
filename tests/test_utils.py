@@ -14,10 +14,12 @@ import pytest
 from jax import config
 
 from quadax.utils import (
-    _map_ainf,
+    _map_tail,
+    apply_mapping,
     box_corners,
     map_box,
     map_interval,
+    mapping_of,
     resolve_dtypes,
     wrap_func,
 )
@@ -33,30 +35,86 @@ class TestMapping:
         _, interval_t = map_interval(lambda x: x, jnp.array([2.0, 3.5, 5.0]))
         np.testing.assert_array_equal(np.asarray(interval_t), [2.0, 3.5, 5.0])
 
-    def test_an_infinite_interval_is_mapped(self):
-        """There is no way to subdivide an unbounded interval in place."""
-        for iv in ([0.0, jnp.inf], [-jnp.inf, 0.0], [-jnp.inf, jnp.inf]):
-            _, interval_t = map_interval(lambda x: x, jnp.array(iv))
-            np.testing.assert_allclose(np.asarray(interval_t), [-1.0, 1.0], atol=0)
+    @pytest.mark.parametrize(
+        "iv, want",
+        [
+            ([0.0, jnp.inf], [-0.5, 0.5]),
+            ([-jnp.inf, 0.0], [-0.5, 0.5]),
+            ([-jnp.inf, jnp.inf], [-1.5, 1.5]),
+        ],
+        ids=["a_inf", "ninf_b", "ninf_inf"],
+    )
+    def test_an_infinite_interval_is_mapped(self, iv, want):
+        """There is no way to subdivide an unbounded interval in place.
 
-    def test_the_infinite_map_keeps_the_distance_from_its_finite_end(self):
-        """``_map_ainf`` must not form that distance out of a cancellation.
+        Each unbounded end is given a fixed stretch of reference coordinate to fit into,
+        measured in the unit the map works in, which without breakpoints is one. A
+        single tail is given that unit and a pair sharing a junction gets half as much
+        again, the two profiles reaching one unit along the axis at different widths.
 
-        ``a - 1 + 2/(1-t)`` is the difference of two numbers near 1, so a distance ``d``
-        survives it with only ``d/eps`` of its value - the outermost node came out a
-        factor of two wrong. The algebraically equal ``(1+t)/(1-t)`` comes back
-        correctly rounded at every scale.
+        None of these has a finite stretch to keep a coordinate for, so the domain is
+        placed on the origin rather than on the caller's limits.
         """
-        d = np.array([2.0**-k for k in (10, 20, 30, 40, 52)])
-        t = np.float64(-1.0) + d
-        x, _ = _map_ainf(jnp.asarray(t), jnp.asarray(0.0), jnp.asarray(jnp.inf))
-        ref = (1 + np.longdouble(t)) / (1 - np.longdouble(t))
-        np.testing.assert_allclose(
-            np.asarray(x, dtype=np.float64),
-            np.asarray(ref, dtype=np.float64),
-            rtol=np.finfo(np.float64).eps,
-            atol=0,
+        _, interval_t = map_interval(lambda x: x, jnp.array(iv))
+        np.testing.assert_allclose(np.asarray(interval_t), want, atol=0)
+
+    @pytest.mark.parametrize("anchored", [True, False], ids=["anchored", "unanchored"])
+    def test_a_tail_keeps_both_of_its_distances(self, anchored):
+        """Neither end of a tail may be formed out of a cancellation.
+
+        A tail spans the junction it hangs off and the boundary carrying the infinity,
+        and the two distances that locate a node between them sum to the width, so
+        either could be derived from the other. Neither may be: each is the one that
+        keeps its bits where the other has run out of them, and a node placed by
+        subtracting a distance of order the width off the width keeps only ``d/eps`` of
+        a small ``d``. The end that decides the answer is the far one, an integrand
+        reached through a tail being singular there and nowhere else, and a node there
+        would come out a factor of two wrong or land on the boundary itself.
+        """
+        w = np.float64(1.5 if not anchored else 1.0)
+        anc = jnp.asarray(anchored)
+        scales = np.array([2.0**-k for k in (10, 20, 30, 40, 52)])
+
+        def reference(d, rest):
+            s = np.longdouble(d) / np.longdouble(w)
+            grow = np.longdouble(w) / np.longdouble(rest)
+            return np.longdouble(d) * (grow if anchored else grow / (1 + s))
+
+        for d, rest in ((w * scales, w * (1 - scales)), (w * (1 - scales), w * scales)):
+            got, _ = _map_tail(jnp.asarray(d), jnp.asarray(rest), jnp.asarray(w), anc)
+            np.testing.assert_allclose(
+                np.asarray(got, dtype=np.float64),
+                np.asarray(reference(d, rest), dtype=np.float64),
+                rtol=4 * np.finfo(np.float64).eps,
+                atol=0,
+            )
+
+    def test_only_the_unbounded_ends_are_mapped(self):
+        """A breakpoint beside an infinite limit leaves the bounded part alone.
+
+        The junctions are the outermost finite points and each tail is one unit of the
+        map's own scale beyond, so the bounded sub-intervals arrive at the rule in the
+        coordinate they were written in. The tail is glued on with unit derivative, so
+        the mapped integrand has no break at the junction to be resolved - and the
+        junction is a point of ``interval`` anyway, so no sub-interval straddles it.
+        """
+        fun, interval_t = map_interval(lambda x: x, jnp.array([0.0, 1.0, jnp.inf]))
+        np.testing.assert_array_equal(np.asarray(interval_t), [0.0, 1.0, 2.0])
+        # x is its own image below the junction and pulls away from it above
+        mapping = mapping_of(fun)
+        inside = jnp.array([0.25, 0.5, 1.0])
+        np.testing.assert_array_equal(
+            np.asarray(apply_mapping(mapping, inside)[0]), np.asarray(inside)
         )
+        # halfway along the tail's reference span is exactly one unit past the junction,
+        # which is what ties the node placement to the widest sub-interval
+        assert float(apply_mapping(mapping, jnp.asarray(1.5))[0]) == 2.0
+        assert not np.isfinite(float(apply_mapping(mapping, jnp.asarray(2.0))[0]))
+        # the Jacobian either side of the junction, which the glue makes continuous
+        eps = 1e-8
+        below = float(apply_mapping(mapping, jnp.asarray(1.0 - eps))[1])
+        above = float(apply_mapping(mapping, jnp.asarray(1.0 + eps))[1])
+        np.testing.assert_allclose([below, above], 1.0, rtol=1e-7)
 
     @pytest.mark.parametrize(
         "iv",
@@ -95,8 +153,10 @@ class TestMapBox:
         )
         _, interval_t = map_box(lambda x: x, interval)
         a_t, b_t = box_corners(interval_t)
-        np.testing.assert_array_equal(np.asarray(a_t), [2.0, -1.0, -1.0, -1.0])
-        np.testing.assert_array_equal(np.asarray(b_t), [3.5, 1.0, 1.0, 1.0])
+        # the finite axis where it was, and each unbounded axis given its own tails and
+        # placed on the origin, having no finite stretch of its own to keep
+        np.testing.assert_array_equal(np.asarray(a_t), [2.0, -0.5, -0.5, -1.5])
+        np.testing.assert_array_equal(np.asarray(b_t), [3.5, 0.5, 0.5, 1.5])
 
     def test_an_array_means_what_iterating_it_means(self):
         """The convenience form must not be able to denote a different box.
@@ -147,7 +207,9 @@ class TestMapBox:
         interval = jnp.array(
             [[0.0, jnp.inf], [-jnp.inf, 2.0], [-jnp.inf, jnp.inf], [1.0, 4.0]]
         )
-        t = jnp.array([0.3, -0.5, 0.7, 2.0])
+        # Interior to every axis's own reference domain: the boundary itself is where
+        # the map is meant to return an infinity, which is not what is under test here.
+        t = jnp.array([0.3, -0.25, 0.7, 2.0])
         fun = lambda x: jnp.prod(jnp.exp(-jnp.abs(x)))  # noqa: E731
         fun_t, _ = map_box(fun, interval)
         ref = 1.0
@@ -178,7 +240,9 @@ class TestMapBox:
         interval = jnp.array(
             [[0.0, jnp.inf], [-jnp.inf, 2.0], [-jnp.inf, jnp.inf], [1.0, 4.0]]
         )
-        t = jnp.array([0.3, -0.5, 0.7, 2.0])
+        # Interior to every axis's own reference domain: the boundary itself is where
+        # the map is meant to return an infinity, which is not what is under test here.
+        t = jnp.array([0.3, -0.25, 0.7, 2.0])
 
         def value(limits):
             fun_t, interval_t = map_box(lambda x: jnp.sum(x**2), limits)
@@ -186,7 +250,13 @@ class TestMapBox:
 
         rev = np.asarray(jax.jacrev(value)(interval))
         assert np.isfinite(rev).all()
-        np.testing.assert_array_equal(rev, np.asarray(jax.jacfwd(value)(interval)))
+        # The two modes accumulate the same products in opposite orders, so they agree
+        # to rounding rather than bit for bit, and the tail's derivative is large enough
+        # near a boundary to make that a few ulp. What is under test is that neither
+        # picks up a nan from a region of the map it is not in.
+        np.testing.assert_allclose(
+            rev, np.asarray(jax.jacfwd(value)(interval)), rtol=1e-13, atol=0
+        )
 
     def test_limits_that_are_not_a_box_are_rejected(self):
         """The two forms are told apart by type, so each can say what it wanted."""
