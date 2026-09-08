@@ -1193,7 +1193,8 @@ def _accept_extrapolation(state, mesh_y, norm):
     # be gained by replacing it with a heuristic. Without this a table fed early, while
     # the mesh was still coarse, can displace a converged answer with a much worse one
     # and still report success.
-    have_accel = jnp.isfinite(state["accel_err"]) & (mesh_err > state["err_bnd"])
+    table_spoke = jnp.isfinite(state["accel_err"])
+    have_accel = table_spoke & (mesh_err > state["err_bnd"])
     # Where the table was running on a sequence that had stopped improving, its own
     # estimate understates the error by whatever was still outstanding in the
     # regions it had passed over, since the extrapolation assumed that outstanding
@@ -1242,7 +1243,14 @@ def _accept_extrapolation(state, mesh_y, norm):
     testable = state["sign_known"] | (
         jnp.maximum(scale_accel, scale_mesh) > _CANCELLATION_FRAC * state["abs_total"]
     )
-    divergent = have_accel & ~use_mesh & ~untestable & testable & diverging
+    # Whether the table is believed enough to *return* its value is `have_accel`, and it
+    # rightly says no on a run the mesh converged by itself. Whether the table has
+    # anything to *say* is a different question with a different answer: a divergent
+    # integral makes the running total and its error estimate run away together, so
+    # their ratio comes back inside any relative tolerance long before the value means
+    # anything, and the run exits reporting success. The verdict is therefore read off
+    # whenever the table produced one, and only the choice of value is gated.
+    divergent = table_spoke & ~untestable & testable & diverging
 
     # Roundoff detected inside the table, where the subdivision itself reported nothing.
     state["status"] = escalate(
@@ -1735,4 +1743,14 @@ def _adaptive_solve(
     y = jnp.sum(state["r_arr"], axis=0)
     if extrapolate:
         state, y = _accept_extrapolation(state, y, _norm)
+
+    # A total or an error estimate that has left the range of the arithmetic. The mask
+    # already replaces a non-finite *integrand* value, so what is left is the sum itself
+    # running away, which no tolerance test can see: an infinite total satisfies any
+    # relative bound and a nan satisfies none of the tests that would raise a flag, so
+    # either way the run reports success over a number that is not one. This route needs
+    # no extrapolation, which is what makes it the one that covers the routines that do
+    # not extrapolate.
+    overflowed = ~(jnp.all(jnp.isfinite(y)) & jnp.all(jnp.isfinite(state["err_sum"])))
+    state["status"] = escalate(state["status"], STATUS.divergent, overflowed)
     return y, state

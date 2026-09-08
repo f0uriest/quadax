@@ -133,8 +133,9 @@ class STATUS(IntEnum, metaclass=_StatusMeta):
 
     divergent = (
         8,
-        "The integral is suspected to be divergent. The extrapolated value bears no "
-        "relation to the running total it was built from. A finite value may still be "
+        "The integral is suspected to be divergent, either because the extrapolated "
+        "value bears no relation to the running total it was built from, or because "
+        "that total left the range of the arithmetic. A finite value may still be "
         "returned, but do not use it without establishing that the integral converges.",
     )
 
