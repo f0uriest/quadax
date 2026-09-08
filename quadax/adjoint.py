@@ -70,14 +70,26 @@ def build_integrand(interval, args, consts, *, f_conv, safe=False):
     return wrap_func(fun_mapped, (), interval_t.dtype, safe=safe), interval_t
 
 
-def build_box_integrand(interval, args, consts, *, f_conv, ndim, safe=False):
-    """Map the integrand over a box to the reference cube and wrap it.
+def build_box_integrand(interval, args, consts, *, f_conv, ndim, lims, safe=False):
+    """Map the integrand over a region to the reference cube and wrap it.
 
     The n dimensional counterpart of ``build_integrand``. ``interval`` is one array of
     limits per axis, and so is the ``interval_t`` returned, each carrying whatever
     breakpoints that axis was given.
+
+    ``lims`` is one entry per axis: ``None`` where the axis' limits are the constants
+    ``interval`` holds for it, and a closure converted callable where they are instead a
+    function of the coordinates before it, in which case ``interval`` holds the
+    reference interval that axis is integrated over. Each of those callables carries
+    consts of its own, so ``consts`` is one group per function -- the integrand's first,
+    then the callables' in axis order.
     """
-    fun = _ConvertedFunction(f_conv, args, consts)
+    fun = _ConvertedFunction(f_conv, args, consts[0])
+    lim_consts = iter(consts[1:])
+    interval = tuple(
+        axis if lim is None else _ConvertedFunction(lim, args, next(lim_consts))
+        for axis, lim in zip(interval, lims)
+    )
     fun_mapped, interval_t = map_box(fun, interval)
     xtype = jnp.result_type(*interval_t)
     return wrap_func(fun_mapped, (), xtype, safe=safe, ndim=ndim), interval_t

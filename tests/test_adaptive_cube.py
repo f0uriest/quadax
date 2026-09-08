@@ -766,6 +766,158 @@ class TestPlumbing:
         assert float(info.err) >= float(np.max(np.abs(np.asarray(y) - prob["val"])))
 
 
+class TestVariableLimits:
+    """Regions that are not boxes, given as limits that depend on the outer axes."""
+
+    # One region per thing none of the others reaches: the triangle for a boundary that
+    # closes to zero width at an apex, the disc for a curved one whose square root costs
+    # the subdivision far more than its area suggests, the simplex for limits that
+    # depend on limits, and the last for a dependent limit that is unbounded.
+    REGIONS = [
+        (
+            "triangle",
+            lambda x: x[0] * x[1],
+            [jnp.array([0.0, 1.0]), lambda xp: jnp.array([0.0, 1.0 - xp[0]])],
+            1 / 24,
+        ),
+        (
+            "disc",
+            lambda x: jnp.ones_like(x[0]),
+            [
+                jnp.array([-1.0, 1.0]),
+                lambda xp: jnp.sqrt(1 - xp[0] ** 2) * jnp.array([-1.0, 1.0]),
+            ],
+            np.pi,
+        ),
+        (
+            "simplex",
+            lambda x: x[0] * x[1] * x[2],
+            [
+                jnp.array([0.0, 1.0]),
+                lambda xp: jnp.array([0.0, 1.0 - xp[0]]),
+                lambda xp: jnp.array([0.0, 1.0 - xp[0] - xp[1]]),
+            ],
+            1 / 720,
+        ),
+        (
+            "unbounded-above-a-line",
+            lambda x: jnp.exp(-x[1]),
+            [jnp.array([0.0, 1.0]), lambda xp: jnp.array([xp[0], jnp.inf])],
+            1 - np.exp(-1.0),
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        "fun,interval,val", [r[1:] for r in REGIONS], ids=[r[0] for r in REGIONS]
+    )
+    def test_it_integrates_over_the_region(self, fun, interval, val):
+        y, info = cubgm(
+            fun,
+            interval,
+            full_output=True,
+            epsabs=jnp.asarray(1e-10),
+            epsrel=jnp.asarray(1e-10),
+            max_nregion=2000,
+        )
+        assert info.status == STATUS.normal
+        np.testing.assert_allclose(y, val, rtol=1e-9)
+        assert float(info.err) >= abs(float(y) - val)
+
+    def test_constant_limits_mean_the_same_either_way(self):
+        """A callable that ignores its argument is the axis it returns.
+
+        The reduction the whole transform rests on: over constant limits the piecewise
+        affine map and the tail map are both the identity, so the two spellings of the
+        same box have to agree to roundoff rather than merely to the tolerance.
+        """
+        fun = lambda x: jnp.exp(-jnp.sum(x**2))
+        axis = jnp.array([2.0, 4.0, 7.0])
+        ya, _ = cubgm(fun, [jnp.array([0.0, 1.0]), axis])
+        yc, _ = cubgm(fun, [jnp.array([0.0, 1.0]), lambda xp: axis])
+        np.testing.assert_allclose(ya, yc, rtol=1e-14)
+
+    def test_a_moving_breakpoint_straightens_a_curved_kink(self):
+        """A breakpoint the limits carry is worth what an axis aligned one is worth.
+
+        The kink lies along a curve, which no entry of a constant ``interval`` can mark.
+        Returned as a breakpoint of the dependent axis it becomes a plane of the mapped
+        box, and the pair measures what that is worth: the two runs share an integrand
+        and a region and differ only in whether the curve is given.
+        """
+        c = lambda x: 0.3 + 0.4 * x**2
+        fun = lambda x: jnp.abs(x[1] - c(x[0]))
+        marked = [jnp.array([0.0, 1.0]), lambda xp: jnp.array([0.0, c(xp[0]), 1.0])]
+        plain = [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])]
+        ym, im = cubgm(
+            fun, marked, full_output=True, epsabs=1e-10, epsrel=1e-10, max_nregion=4000
+        )
+        _, iu = cubgm(
+            fun, plain, full_output=True, epsabs=1e-10, epsrel=1e-10, max_nregion=4000
+        )
+        # int_0^1 int_0^1 |y - c(x)| dy dx = int_0^1 (c**2 - c + 1/2) dx
+        np.testing.assert_allclose(ym, 0.09 + 0.08 + 0.032 - (0.3 + 0.4 / 3) + 0.5)
+        assert im.status == STATUS.normal
+        assert int(im.info["nregion"]) * 100 < int(iu.info["nregion"])
+
+    @pytest.mark.parametrize(
+        "adjoint", [DirectAdjoint(), LeibnizAdjoint()], ids=["direct", "leibniz"]
+    )
+    def test_it_is_differentiable_in_both_modes(self, adjoint):
+        """A parameter in the limits is an ordinary parameter of the integrand.
+
+        The three cases are the three ways one can reach the answer: through a finite
+        dependent limit, through the finite end of an unbounded one, and through a
+        breakpoint the dependent axis carries. The last is the one a constant
+        ``interval`` cannot get right in more than one dimension, there being no term
+        for a breakpoint plane that moves; straightened, the plane does not move and
+        there is nothing extra to compute.
+        """
+        zero, one, inf = (jnp.zeros(()), jnp.ones(()), jnp.array(jnp.inf))
+
+        def area(k):  # {0<=x<=1, 0<=y<=k(1-x)} has area k/2
+            interval = [
+                jnp.array([0.0, 1.0]),
+                lambda xp: jnp.stack([zero, k * (1 - xp[0])]),
+            ]
+            return cubgm(lambda x: one, interval, adjoint=adjoint)[0]
+
+        def tail(k):  # int_0^1 int_{kx}^inf exp(-y) dy dx = (1 - exp(-k)) / k
+            interval = [jnp.array([0.0, 1.0]), lambda xp: jnp.stack([k * xp[0], inf])]
+            return cubgm(
+                lambda x: jnp.exp(-x[1]),
+                interval,
+                adjoint=adjoint,
+                epsabs=1e-11,
+                epsrel=1e-11,
+                max_nregion=2000,
+            )[0]
+
+        def kink(k):  # int_0^1 int_0^1 |y - (0.3 + k x**2)| dy dx
+            c = lambda x: 0.3 + k * x**2
+            interval = [
+                jnp.array([0.0, 1.0]),
+                lambda xp: jnp.stack([zero, c(xp[0]), one]),
+            ]
+            return cubgm(
+                lambda x: jnp.abs(x[1] - c(x[0])),
+                interval,
+                adjoint=adjoint,
+                epsabs=1e-11,
+                epsrel=1e-11,
+                max_nregion=2000,
+            )[0]
+
+        cases = [
+            (area, lambda k: k / 2, 0.8),
+            (tail, lambda k: (1 - jnp.exp(-k)) / k, 1.0),
+            (kink, lambda k: 0.09 + 0.2 * k + k**2 / 5 - 0.3 - k / 3 + 0.5, 0.4),
+        ]
+        for f, exact, k in cases:
+            fwd, rev = float(jax.jacfwd(f)(k)), float(jax.jacrev(f)(k))
+            np.testing.assert_allclose(fwd, rev, rtol=1e-13)
+            np.testing.assert_allclose(fwd, float(jax.jacfwd(exact)(k)), rtol=1e-6)
+
+
 class TestConstruction:
     """Everything the routine refuses, and the reason it gives."""
 
@@ -839,6 +991,20 @@ class TestConstruction:
         # however far past it the routine happens to land: what is under test is that
         # the integer form is accepted at all.
         np.testing.assert_allclose(y, np.sin(1.0) ** 2, rtol=1e-8)
+
+    @pytest.mark.parametrize(
+        "lim,err,match",
+        [
+            (lambda xp: jnp.zeros(()), ValueError, "one dimensional"),
+            (lambda xp: jnp.zeros(1), ValueError, "one dimensional"),
+            (lambda xp: jnp.zeros(2, dtype=complex), TypeError, "must be real"),
+        ],
+        ids=["scalar", "one-limit", "complex"],
+    )
+    def test_what_a_limit_callable_may_return_is_checked(self, lim, err, match):
+        """A callable is probed for its limits, and told what they have to look like."""
+        with pytest.raises(err, match=match):
+            cubgm(lambda x: jnp.sum(x), [jnp.array([0.0, 1.0]), lim])
 
     def test_the_two_forms_of_interval_agree(self):
         """An ``(ndim, 2)`` array means what iterating over it means."""

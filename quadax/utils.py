@@ -414,14 +414,19 @@ class _MappedFunction(eqx.Module):
         return self.sgn * w * self.fun(x, *args)
 
 
-def _as_box_intervals(interval) -> tuple[jax.Array, ...]:
-    """Normalize either accepted form of ``interval`` to one array per axis.
+def _as_box_intervals(interval) -> tuple[jax.Array | Callable, ...]:
+    """Normalize either accepted form of ``interval`` to one entry per axis.
 
     An array is the corners and nothing else, a non-array sequence is one interval per
     axis and may carry breakpoints. Dispatching on the type rather than the shape is
     what keeps the two unambiguous: an ``(ndim, 2)`` array and the sequence obtained by
     iterating over it mean the same thing, so the convenience form cannot silently
     denote a different box than the general one.
+
+    An entry of the sequence form may instead be a callable giving that axis' limits as
+    a function of the coordinates before it, and comes back as it was given: what it
+    denotes is known only once it is called, so it is checked where it is probed, in
+    :func:`_box_axis_knots`.
     """
     if isinstance(interval, (jax.Array, np.ndarray)):
         errorif(
@@ -440,13 +445,17 @@ def _as_box_intervals(interval) -> tuple[jax.Array, ...]:
             f"limits must be an array of shape (ndim, 2) or a list or tuple of one "
             f"array per axis, got {type(interval).__name__}.",
         )
-        intervals = tuple(jnp.asarray(axis) for axis in interval)
+        intervals = tuple(
+            axis if callable(axis) else jnp.asarray(axis) for axis in interval
+        )
     errorif(
         len(intervals) == 0,
         ValueError,
         "limits must cover at least one axis, but got an empty sequence.",
     )
     for k, axis in enumerate(intervals):
+        if callable(axis):
+            continue
         errorif(
             axis.ndim != 1 or axis.shape[0] < 2,
             ValueError,
@@ -465,9 +474,67 @@ def _as_box_intervals(interval) -> tuple[jax.Array, ...]:
     # become inexact here rather than being left for AD to treat as static metadata.
     return tuple(
         axis
-        if jnp.issubdtype(axis.dtype, jnp.inexact)
+        if callable(axis) or jnp.issubdtype(axis.dtype, jnp.inexact)
         else axis.astype(jnp.result_type(float))
         for axis in intervals
+    )
+
+
+def _box_axis_knots(intervals: Sequence, args: tuple = ()) -> tuple[tuple, Any]:
+    """How many knots each axis carries, and the dtype they are carried at.
+
+    A fixed axis states both outright. A variable one has to be probed for them, its
+    limits being whatever its callable returns, which :func:`jax.eval_shape` reads off
+    without evaluating anything. The probe needs a dtype to form the preceding
+    coordinates at, so the fixed axes settle one first and the variable ones may only
+    widen it afterwards.
+    """
+    fixed = [axis for axis in intervals if not callable(axis)]
+    xtype = jnp.result_type(*fixed) if fixed else jnp.result_type(float)
+    lengths, dtypes = [], []
+    for k, axis in enumerate(intervals):
+        if not callable(axis):
+            lengths.append(axis.shape[0])
+            continue
+        # Probed through the same `asarray` the map applies, so that a callable
+        # returning a list of limits is read here as it is read there.
+        out = jax.eval_shape(
+            lambda *a: jnp.asarray(axis(*a)), jnp.zeros((k,), xtype), *args
+        )
+        errorif(
+            len(out.shape) != 1 or out.shape[0] < 2,
+            ValueError,
+            f"the limits of axis {k} must be a one dimensional array holding at least "
+            f"its two endpoints, with any breakpoints between them, but the callable "
+            f"given for it returns shape {out.shape}.",
+        )
+        errorif(
+            jnp.issubdtype(out.dtype, jnp.complexfloating),
+            TypeError,
+            f"integration limits must be real, but the callable given for axis {k} "
+            f"returns dtype {out.dtype}. The subdivision has to order the breakpoints, "
+            "which complex numbers do not admit.",
+        )
+        lengths.append(out.shape[0])
+        dtypes.append(out.dtype)
+    return tuple(lengths), jnp.result_type(xtype, *dtypes) if dtypes else xtype
+
+
+def _box_reference_intervals(
+    intervals: Sequence, args: tuple = ()
+) -> tuple[jax.Array, ...]:
+    """Constant limits for every axis, standing in for the ones a callable gives.
+
+    A variable axis is integrated over a fixed reference interval and mapped onto its
+    real limits inside the integrand, where the coordinates those limits depend on are
+    known. So what the mesh, the tolerances and the adjoints see for such an axis is
+    this: ``[0, 1]``, with one interior knot for each breakpoint its callable returns. A
+    fixed axis is its own reference.
+    """
+    lengths, xtype = _box_axis_knots(intervals, args)
+    return tuple(
+        jnp.linspace(0, 1, m, dtype=xtype) if callable(axis) else axis.astype(xtype)
+        for axis, m in zip(intervals, lengths)
     )
 
 
@@ -490,23 +557,30 @@ def box_corners(interval: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
     )
 
 
-def map_box(fun: Callable[..., jax.Array], interval):
+def map_box(fun: Callable[..., jax.Array], interval, args: tuple = ()):
     """Map a function over an arbitrary box to one that can be subdivided.
 
-    Transform a function such that the integral of ``fun`` over the box given by
+    Transform a function such that the integral of ``fun`` over the region given by
     ``interval`` is the same as the integral of ``fun_t`` over ``interval_t``, which is
-    finite along every axis whatever ``interval`` was.
+    a box, finite along every axis, whatever ``interval`` was.
 
     Parameters
     ----------
     fun : callable
         Integrand to transform, with signature ``fun(x, *args)`` where ``x`` has shape
         ``(ndim,)``.
-    interval : Array, shape(ndim, 2), or sequence of array-like
+    interval : Array, shape(ndim, 2), or sequence of array-like or callable
         Limits of integration. An array gives the two limits of each axis and no
-        breakpoints. A list or tuple gives one array per axis, each holding that axis'
+        breakpoints. A list or tuple gives one entry per axis, each holding that axis'
         limits with any breakpoints between them, so the axes may carry different
         numbers of them. Use np.inf to denote infinite extent along an axis.
+
+        An entry of the list or tuple form may instead be a callable
+        ``lim(x_prev, *args)`` returning those limits, where ``x_prev`` has shape
+        ``(k,)`` and holds the coordinates of the axes before it. The region is then no
+        longer a box, and axis ``k`` may depend only on axes ``0`` to ``k-1``.
+    args : tuple
+        The extra arguments ``fun`` and any limit callables will be called with.
 
     Returns
     -------
@@ -523,6 +597,15 @@ def map_box(fun: Callable[..., jax.Array], interval):
     are carried through it so that whatever subdivides the box afterwards can start
     from them.
 
+    An axis whose limits are a callable is integrated over ``[0, 1]`` instead, and the
+    map onto the limits it returns is folded into the integrand along with its Jacobian.
+    A breakpoint the callable moves therefore sits at a fixed coordinate of the mapped
+    box, which is what lets a curved feature be marked and cut along like an axis
+    aligned one. The transform is exact, but the integrand it produces is only as smooth
+    as the limit functions are: a curved boundary moves its curvature into the axes
+    before it, so a region bounded by a square root costs far more subdivision than one
+    bounded by a straight line.
+
     The map is separable, so its Jacobian is the product of the one dimensional ones and
     reaches the ``ndim`` th power of the magnitude a single axis would give. On a
     low precision dtype that product can overflow at the nodes furthest out, where the
@@ -531,11 +614,13 @@ def map_box(fun: Callable[..., jax.Array], interval):
     limited by this rather than by the rule applied afterwards.
     """
     intervals = _as_box_intervals(interval)
+    lims = tuple(axis if callable(axis) else None for axis in intervals)
     # One dtype across the axes, so that the per axis bounds can be stacked: each axis
     # derives its own junctions and unit, and a box mixing a bounded axis with an
-    # unbounded one would otherwise settle on a different dtype for each.
+    # unbounded one would otherwise settle on a different dtype for each. A variable
+    # axis stands in as the reference interval it is integrated over.
+    intervals = list(_box_reference_intervals(intervals, args))
     xtype = jnp.result_type(*intervals)
-    intervals = [axis.astype(xtype) for axis in intervals]
 
     a, b = box_corners(intervals)
     # Reversing an axis flips the sign of the integral, so every axis is put in
@@ -554,7 +639,9 @@ def map_box(fun: Callable[..., jax.Array], interval):
         jnp.stack([bd[k] for bd in bounds]) for k in range(7)
     )
 
-    fun_mapped = _MappedBoxFunction(fun, sgn, a, b, scale, shift, anchored, lo, hi)
+    fun_mapped = _MappedBoxFunction(
+        fun, sgn, a, b, scale, shift, anchored, lo, hi, lims, tuple(intervals)
+    )
 
     interval_t = tuple(
         jnp.where(
@@ -563,6 +650,44 @@ def map_box(fun: Callable[..., jax.Array], interval):
         for k, v in enumerate(intervals)
     )
     return fun_mapped, interval_t
+
+
+def _map_variable_axis(
+    u: jax.Array, knots: jax.Array, lim: Callable, x_prev: jax.Array, args: tuple
+):
+    """One axis whose limits are a function of the coordinates before it.
+
+    ``u`` is the axis' coordinate in the reference interval it is integrated over,
+    ``knots`` the points of that interval, and ``lim`` the callable giving the axis'
+    real limits at the coordinates ``x_prev``. The two are joined by the piecewise
+    affine map that sends knot to knot, so a breakpoint the callable moves keeps a fixed
+    reference coordinate however far it moves, and the mesh can be cut along it like an
+    axis aligned one. Beyond that the axis is mapped exactly as a fixed one is, which is
+    what lets the limits a callable returns be unbounded.
+
+    Returns the abscissa, the derivative of the whole composition, and the sign, which
+    unlike a fixed axis' is a property of the point: only the callable knows which way
+    round its limits come out, and it need not come out the same way everywhere.
+    """
+    iv = jnp.asarray(lim(x_prev, *args))
+    sgn = jnp.where(iv[-1] < iv[0], -1, 1).astype(iv.dtype)
+    a, b = jnp.minimum(iv[0], iv[-1]), jnp.maximum(iv[0], iv[-1])
+    # Breakpoints outside their axis are pulled to its endpoints, as they are for a
+    # fixed axis, which leaves pieces of zero width contributing nothing.
+    iv = jnp.sort(jnp.clip(iv, a, b))
+    scale, shift, anchored, lo, hi, t_lo, t_hi = _map_bounds(iv)
+    # Where each knot has to land, formed exactly as `map_box` forms the limits it
+    # returns, so that an unbounded limit lands on the boundary the tail map reaches
+    # only as a limit rather than on some other float near it.
+    t_knots = jnp.where(
+        iv == jnp.inf, t_hi, jnp.where(iv == -jnp.inf, t_lo, iv + shift)
+    )
+    # The last knot belongs to the piece below it, so that the top of the interval maps
+    # to the top rather than off the end of the table.
+    j = jnp.clip(jnp.searchsorted(knots, u, side="right") - 1, 0, knots.shape[0] - 2)
+    slope = (t_knots[j + 1] - t_knots[j]) / (knots[j + 1] - knots[j])
+    x, w = _map(t_knots[j] + (u - knots[j]) * slope, scale, shift, anchored, lo, hi)
+    return x, slope * w, sgn
 
 
 class _MappedBoxFunction(eqx.Module):
@@ -577,6 +702,8 @@ class _MappedBoxFunction(eqx.Module):
     anchored: jax.Array
     lo: jax.Array
     hi: jax.Array
+    lims: tuple
+    knots: tuple
 
     @eqx.filter_jit
     def __call__(self, t: jax.Array, *args):
@@ -592,11 +719,24 @@ class _MappedBoxFunction(eqx.Module):
             )
             for k in range(ndim)
         ]
-        x = jnp.stack([p[0] for p in xw])
+        x = [p[0] for p in xw]
         # The map acts on each axis alone, so its Jacobian is diagonal and the volume
         # element is the product of the per axis derivatives.
         w = jnp.prod(jnp.stack([p[1] for p in xw]))
-        return self.sgn * w * self.fun(x, *args)
+        sgn = self.sgn
+        # An axis whose limits are a callable is still in its reference coordinate; it
+        # is mapped onto its real limits here, after the axes those limits depend on
+        # have their own coordinates. Only such axes are ordered against each other, and
+        # a box of constant limits has none, so this loop is empty and costs nothing.
+        for k, lim in enumerate(self.lims):
+            if lim is None:
+                continue
+            x_prev = jnp.stack(x[:k]) if k else jnp.zeros((0,), self.a.dtype)
+            x[k], w_k, sgn_k = _map_variable_axis(
+                x[k], self.knots[k], lim, x_prev, args
+            )
+            w, sgn = w * w_k, sgn * sgn_k
+        return sgn * w * self.fun(jnp.stack(x), *args)
 
 
 def tanhsinh_tmax(dtype, order: int | None = None) -> float:
