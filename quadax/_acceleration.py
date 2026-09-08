@@ -400,6 +400,9 @@ def _record(
 ) -> EpsilonTable:
     """Store the extrapolation and estimate how far it still is from the limit.
 
+    An extrapolation that has not moved from the last one stored is not stored, so
+    that the three kept are values the table actually moved through.
+
     QUADPACK [2] reports the spread of the three most recent extrapolated values. That
     says how far the sequence has recently *moved*, which is not the same as how far it
     still has to *go*, and using it as if it were is optimistic by exactly the amount
@@ -456,6 +459,20 @@ def _record(
     est = jnp.where(have_three & signal, jnp.maximum(est, tail), est)
     est = jnp.maximum(est, ERR_FLOOR * epmach * norm(result))
 
+    # An extrapolation that has not moved from the last one recorded says nothing new
+    # about the limit, and does not join them. The recursion returns an entry it already
+    # holds whenever it finds three of them equal to machine accuracy, so a table that
+    # has saturated will answer with the same value for every term it is fed afterwards.
+    # Rolling those in fills all three slots with one value, whose spread is zero
+    # however far that value still is from the limit, and the error estimate would then
+    # fall to the floor below on a run that had not converged at all. Keeping the last
+    # three values the table actually moved through leaves the spread measuring movement
+    # that happened. The threshold is the floor itself, since movement under it is not
+    # resolved by the estimate either way, and it is measured against the newest stored
+    # value rather than the previous call's, so that a drift of a fraction of it per
+    # call accumulates and is eventually recorded instead of being discarded forever.
+    moved = d2 > ERR_FLOOR * epmach * norm(result)
+    keep = have_three & ~moved
     # Roll the newest in and the oldest out.
     last = jnp.where(
         have_three,
@@ -463,5 +480,8 @@ def _record(
         state.last_results.at[jnp.minimum(state.n_calls - 1, 2)].set(result),
     )
     return state._replace(
-        last_results=last, result=result, abserr=est, abserr_sharp=sharp
+        last_results=jnp.where(keep, state.last_results, last),
+        result=result,
+        abserr=jnp.where(keep, state.abserr, est),
+        abserr_sharp=jnp.where(keep, state.abserr_sharp, sharp),
     )
