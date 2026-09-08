@@ -51,7 +51,7 @@ from .utils import (
 
 
 @eqx.filter_jit
-def cubgm(
+def cubegm(
     fun: Callable[..., jax.Array],
     interval: ArrayLike | Sequence[ArrayLike | Callable],
     args: tuple = (),
@@ -230,7 +230,7 @@ def adaptive_cubature(
     """Global adaptive cubature with user specified local rule.
 
     This is a lower level routine allowing for custom local cubature rules. For most
-    applications :func:`~quadax.cubgm` is preferable; this is the way to reach a
+    applications :func:`~quadax.cubegm` is preferable; this is the way to reach a
     :class:`~quadax.TensorProductRule`, which is worth its cost mainly in two or three
     dimensions or where one axis is far harder than the others.
 

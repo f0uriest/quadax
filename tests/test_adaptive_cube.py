@@ -20,7 +20,7 @@ from quadax import (
     LeibnizAdjoint,
     adaptive_quadrature,
 )
-from quadax.adaptive_cube import adaptive_cubature, cubgm
+from quadax.adaptive_cube import adaptive_cubature, cubegm
 from quadax.fixed_cubature import AbstractCubatureRule, GenzMalikRule, TensorProductRule
 
 from . import problems_nd as pnd
@@ -211,7 +211,7 @@ class TestExtrapolation:
         # int_0^1 int_0^1 (u + v)**-s = (2**(2-s) - 2) / ((1-s)(2-s)), which
         # continues to -3/4 at s = 3, where the integral itself diverges at the
         # origin.
-        y, info = cubgm(
+        y, info = cubegm(
             lambda u: (u[0] + u[1]) ** -3.0,
             [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])],
             epsabs=1e-10,
@@ -255,7 +255,7 @@ class TestExtrapolation:
         The run has to have kept an extrapolation for any of this to be under test.
         """
         fun = lambda u: 1 / jnp.sqrt(u[0] + u[1])  # noqa: E731
-        run = lambda z, **kw: cubgm(  # noqa: E731
+        run = lambda z, **kw: cubegm(  # noqa: E731
             fun,
             [jnp.stack([jnp.zeros_like(z), z]), jnp.array([0.0, 1.0])],
             epsabs=1e-10,
@@ -384,7 +384,7 @@ class TestStatus:
         this converged.
         """
         limits = [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])]
-        _, divergent = cubgm(
+        _, divergent = cubegm(
             lambda x: 1 / jnp.sum(x**2),
             limits,
             epsabs=1e-10,
@@ -393,7 +393,7 @@ class TestStatus:
             extrapolate=False,
         )
         assert divergent.status == STATUS.bad_integrand
-        _, accelerated = cubgm(
+        _, accelerated = cubegm(
             lambda x: 1 / jnp.sum(x**2),
             limits,
             epsabs=1e-10,
@@ -401,7 +401,7 @@ class TestStatus:
             max_nregion=2000,
         )
         assert accelerated.status != STATUS.normal
-        _, integrable = cubgm(
+        _, integrable = cubegm(
             lambda x: 1 / jnp.sum(x),
             limits,
             epsabs=1e-10,
@@ -423,7 +423,7 @@ class TestTransformations:
     def test_it_is_batched_over_the_limits(self):
         """`vmap` over the corners of the box matches the loop over them."""
         fun = lambda x: jnp.exp(-jnp.sum(x**2))
-        run = lambda b: cubgm(fun, jnp.stack([jnp.zeros(2), b], axis=-1))[0]
+        run = lambda b: cubegm(fun, jnp.stack([jnp.zeros(2), b], axis=-1))[0]
         bs = jnp.array([[1.0, 1.0], [2.0, 0.5], [0.3, 3.0]])
         np.testing.assert_allclose(
             jax.vmap(run)(bs), jnp.stack([run(b) for b in bs]), rtol=1e-13, atol=1e-15
@@ -432,7 +432,7 @@ class TestTransformations:
     def test_it_is_batched_over_args(self):
         """`vmap` over an extra argument matches the loop over it."""
         fun = lambda x, p: jnp.exp(-p * jnp.sum(x))
-        run = lambda p: cubgm(
+        run = lambda p: cubegm(
             fun, [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])], args=(p,)
         )[0]
         ps = jnp.array([0.5, 1.0, 2.0])
@@ -449,7 +449,7 @@ class TestTransformations:
         third the grid of regions the breakpoints seed the mesh with.
         """
         fun = lambda x, p: jnp.exp(-p * jnp.sum(x))
-        by_arg = lambda p: cubgm(
+        by_arg = lambda p: cubegm(
             fun, [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])], args=(p,)
         )[0]
         exact_arg = lambda p: ((1 - jnp.exp(-p)) / p) ** 2
@@ -457,7 +457,7 @@ class TestTransformations:
             (by_arg, exact_arg, 1.3),
             # d/db of int_0^b int_0^1 cos(u)cos(v) = cos(b) sin(1)
             (
-                lambda b: cubgm(
+                lambda b: cubegm(
                     lambda u: jnp.cos(u[0]) * jnp.cos(u[1]),
                     [jnp.array([0.0, b]), jnp.array([0.0, 1.0])],
                 )[0],
@@ -468,7 +468,7 @@ class TestTransformations:
             # from the breakpoints, so the derivative is only right if it moves with
             # them; a mesh frozen at the primal's `c` would miss the whole term.
             (
-                lambda c: cubgm(
+                lambda c: cubegm(
                     lambda u: jnp.abs(u[0] - c) * u[1],
                     [jnp.array([0.0, c, 1.0]), jnp.array([0.0, 1.0])],
                 )[0],
@@ -502,7 +502,7 @@ class TestTransformations:
         wrong if any one of them is.
         """
         fun = lambda x, z: jnp.where(x[0] > z[0], 5.0, 1.0) * jnp.exp(-z[0] * x[1])
-        f = lambda s: cubgm(  # noqa: E731
+        f = lambda s: cubegm(  # noqa: E731
             fun,
             [
                 jnp.stack([jnp.zeros_like(s), s, jnp.ones_like(s)]),
@@ -531,7 +531,7 @@ class TestTransformations:
         """
         fun = lambda x, p: jnp.exp(-p * jnp.sum(x**2))
         run = lambda adjoint: transform(
-            lambda z: cubgm(
+            lambda z: cubegm(
                 fun,
                 [jnp.array([0.0, z]), jnp.array([0.0, 1.0])],
                 args=(1.3,),
@@ -557,7 +557,7 @@ class TestLeibnizAdjoint:
     JUMP = staticmethod(lambda x, z: jnp.where(x[0] > z[0], 5.0, 1.0) * jnp.cos(x[1]))
 
     def _jump_problem(self, adjoint, **kwargs):
-        return lambda s: cubgm(
+        return lambda s: cubegm(
             self.JUMP,
             [
                 jnp.stack([jnp.zeros_like(s), s, jnp.ones_like(s)]),
@@ -603,7 +603,7 @@ class TestLeibnizAdjoint:
         fun = lambda x, z: (  # noqa: E731
             jnp.where(x[1] > z[0], 5.0, 1.0) * jnp.exp(-jnp.sum(x[::2] ** 2))
         )
-        f = lambda s: cubgm(  # noqa: E731
+        f = lambda s: cubegm(  # noqa: E731
             fun,
             [
                 jnp.array([0.0, 1.0]),
@@ -627,7 +627,7 @@ class TestLeibnizAdjoint:
         right hand side being exactly the integral over the face `u = b` that the
         boundary term has to produce.
         """
-        f = lambda b: cubgm(  # noqa: E731
+        f = lambda b: cubegm(  # noqa: E731
             lambda u: jnp.cos(u[0]) * jnp.cos(u[1]) * jnp.cos(u[2]),
             [jnp.array([0.0, b]), jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])],
             adjoint=LeibnizAdjoint(),
@@ -648,7 +648,7 @@ class TestLeibnizAdjoint:
         skip, and it has to agree with the column of the full Jacobian that it is.
         """
         fun = lambda x, p: jnp.exp(-p * jnp.sum(x**2))  # noqa: E731
-        f = lambda z: cubgm(  # noqa: E731
+        f = lambda z: cubegm(  # noqa: E731
             fun,
             [
                 jnp.stack([jnp.zeros_like(z[0]), z[0]]),
@@ -728,8 +728,8 @@ class TestPlumbing:
     def test_batch_size_does_not_change_the_answer(self, batch_size):
         """Splitting the rule's evaluation up leaves the result and the mesh alone."""
         prob = next(p for p in pnd.PROBLEMS if p["name"] == "corner-sqrt")
-        ref = cubgm(prob["fun"], limits(prob), full_output=True, max_nregion=200)
-        got = cubgm(
+        ref = cubegm(prob["fun"], limits(prob), full_output=True, max_nregion=200)
+        got = cubegm(
             prob["fun"],
             limits(prob),
             full_output=True,
@@ -740,13 +740,13 @@ class TestPlumbing:
         assert int(got[1].info["nregion"]) == int(ref[1].info["nregion"])
 
     def test_neval_counts_integrand_evaluations(self):
-        """`cubgm` reports evaluations; the low level routine reports rule calls."""
+        """`cubegm` reports evaluations; the low level routine reports rule calls."""
         prob = next(p for p in pnd.PROBLEMS if p["name"] == "cos-product")
         # the degree is pinned on both sides: what is under test is the conversion
-        # between the two counts, not whichever degree `cubgm` defaults to.
+        # between the two counts, not whichever degree `cubegm` defaults to.
         rule = GenzMalikRule(2, 7)
         _, low = adaptive_cubature(rule, prob["fun"], limits(prob), max_nregion=200)
-        _, high = cubgm(prob["fun"], limits(prob), max_nregion=200, degree=7)
+        _, high = cubegm(prob["fun"], limits(prob), max_nregion=200, degree=7)
         assert int(high.neval) == int(low.neval) * rule.nodes_per_call
 
     def test_a_norm_charges_the_worst_component(self):
@@ -811,7 +811,7 @@ class TestVariableLimits:
         "fun,interval,val", [r[1:] for r in REGIONS], ids=[r[0] for r in REGIONS]
     )
     def test_it_integrates_over_the_region(self, fun, interval, val):
-        y, info = cubgm(
+        y, info = cubegm(
             fun,
             interval,
             full_output=True,
@@ -832,8 +832,8 @@ class TestVariableLimits:
         """
         fun = lambda x: jnp.exp(-jnp.sum(x**2))
         axis = jnp.array([2.0, 4.0, 7.0])
-        ya, _ = cubgm(fun, [jnp.array([0.0, 1.0]), axis])
-        yc, _ = cubgm(fun, [jnp.array([0.0, 1.0]), lambda xp: axis])
+        ya, _ = cubegm(fun, [jnp.array([0.0, 1.0]), axis])
+        yc, _ = cubegm(fun, [jnp.array([0.0, 1.0]), lambda xp: axis])
         np.testing.assert_allclose(ya, yc, rtol=1e-14)
 
     def test_a_moving_breakpoint_straightens_a_curved_kink(self):
@@ -848,10 +848,10 @@ class TestVariableLimits:
         fun = lambda x: jnp.abs(x[1] - c(x[0]))
         marked = [jnp.array([0.0, 1.0]), lambda xp: jnp.array([0.0, c(xp[0]), 1.0])]
         plain = [jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])]
-        ym, im = cubgm(
+        ym, im = cubegm(
             fun, marked, full_output=True, epsabs=1e-10, epsrel=1e-10, max_nregion=4000
         )
-        _, iu = cubgm(
+        _, iu = cubegm(
             fun, plain, full_output=True, epsabs=1e-10, epsrel=1e-10, max_nregion=4000
         )
         # int_0^1 int_0^1 |y - c(x)| dy dx = int_0^1 (c**2 - c + 1/2) dx
@@ -879,11 +879,11 @@ class TestVariableLimits:
                 jnp.array([0.0, 1.0]),
                 lambda xp: jnp.stack([zero, k * (1 - xp[0])]),
             ]
-            return cubgm(lambda x: one, interval, adjoint=adjoint)[0]
+            return cubegm(lambda x: one, interval, adjoint=adjoint)[0]
 
         def tail(k):  # int_0^1 int_{kx}^inf exp(-y) dy dx = (1 - exp(-k)) / k
             interval = [jnp.array([0.0, 1.0]), lambda xp: jnp.stack([k * xp[0], inf])]
-            return cubgm(
+            return cubegm(
                 lambda x: jnp.exp(-x[1]),
                 interval,
                 adjoint=adjoint,
@@ -898,7 +898,7 @@ class TestVariableLimits:
                 jnp.array([0.0, 1.0]),
                 lambda xp: jnp.stack([zero, c(xp[0]), one]),
             ]
-            return cubgm(
+            return cubegm(
                 lambda x: jnp.abs(x[1] - c(x[0])),
                 interval,
                 adjoint=adjoint,
@@ -944,7 +944,7 @@ class TestConstruction:
 
     def test_a_budget_below_the_breakpoint_grid_is_rejected(self):
         with pytest.raises(ValueError, match="max_nregion"):
-            cubgm(
+            cubegm(
                 lambda x: jnp.sum(x),
                 [jnp.array([0.0, 0.3, 0.6, 1.0]), jnp.array([0.0, 0.5, 1.0])],
                 max_nregion=4,
@@ -977,14 +977,14 @@ class TestConstruction:
         )
 
     def test_the_direct_adjoint_is_the_default(self):
-        y, _ = cubgm(
+        y, _ = cubegm(
             lambda x: jnp.sum(x), jnp.array([[0.0, 1.0]] * 2), adjoint=DirectAdjoint()
         )
         np.testing.assert_allclose(y, 1.0, rtol=1e-13)
 
     def test_integer_limits_are_promoted(self):
         """The form a caller writes first, ``[[0, 1], [0, 1]]``, is accepted."""
-        y, _ = cubgm(
+        y, _ = cubegm(
             lambda x: jnp.cos(x[0]) * jnp.cos(x[1]), jnp.array([[0, 1], [0, 1]])
         )
         # Against the default tolerance the call was made at, rather than against
@@ -1004,12 +1004,12 @@ class TestConstruction:
     def test_what_a_limit_callable_may_return_is_checked(self, lim, err, match):
         """A callable is probed for its limits, and told what they have to look like."""
         with pytest.raises(err, match=match):
-            cubgm(lambda x: jnp.sum(x), [jnp.array([0.0, 1.0]), lim])
+            cubegm(lambda x: jnp.sum(x), [jnp.array([0.0, 1.0]), lim])
 
     def test_the_two_forms_of_interval_agree(self):
         """An ``(ndim, 2)`` array means what iterating over it means."""
         fun = lambda x: jnp.exp(-jnp.sum(x**2))
         arr = jnp.array([[0.0, 1.0], [-1.0, 2.0]])
-        ya, _ = cubgm(fun, arr)
-        yl, _ = cubgm(fun, [arr[0], arr[1]])
+        ya, _ = cubegm(fun, arr)
+        yl, _ = cubegm(fun, [arr[0], arr[1]])
         np.testing.assert_allclose(ya, yl, rtol=1e-14, atol=1e-16)

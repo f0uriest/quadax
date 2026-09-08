@@ -279,7 +279,7 @@ KNOWN_FAILURES: dict[tuple[str, str], set[float]] = {
 # against an unmarked cusp it refines away from it, the estimate falls while the true
 # error does not, and the run reports success having understated by some three orders of
 # magnitude. Giving the cusp coordinates as breakpoints fixes it completely, which is
-# what the `cubgm` docstring recommends, but a caller who does not know where the cusp
+# what the `cubegm` docstring recommends, but a caller who does not know where the cusp
 # is gets no warning. The parameters are the ones a search over draws found worst;
 # nearby ones are honest, so the entry records a reachable failure rather than the
 # typical case.

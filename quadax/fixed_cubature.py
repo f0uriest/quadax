@@ -762,10 +762,11 @@ class TensorProductRule(NestedCubatureRule):
     -----
     The cost is the product of the axes' node counts, so it grows exponentially in
     ``ndim``: a 15 point Gauss-Kronrod rule costs 225 evaluations in two dimensions,
-    3375 in three, and 50625 in four. A Genz-Malik rule of comparable degree costs 65,
-    239 and 697. Tensor products earn their cost where the integrand is smooth enough
-    for a high order rule to pay off along each axis, or where the axes differ enough to
-    be worth giving different rules, and are a poor choice in high dimensions.
+    3375 in three, and 50625 in four. A Genz-Malik rule of the highest degree costs 69,
+    245 and 705, and of the default degree 33, 77 and 153. Tensor products earn their
+    cost where the integrand is smooth enough for a high order rule to pay off along
+    each axis, or where the axes differ enough to be worth giving different rules, and
+    are a poor choice in high dimensions.
 
     Examples
     --------
