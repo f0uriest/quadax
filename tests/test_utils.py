@@ -294,17 +294,24 @@ class TestWrapFunc:
     def test_a_vector_abscissa_batches_along_the_looped_axis(self, ndim, batch_size):
         """Only the leading axis is split into batches; the point stays whole.
 
-        Compared against the unbatched wrapper rather than against ``vmap``: batching
-        regroups the points without touching how any one of them is evaluated, so it
-        has to agree bit for bit, where ``vmap`` reduces a point's own axis in a
-        different order and lands an ulp away.
+        Splitting the point's own axis instead would reduce over the wrong thing, and
+        both comparisons below would be out by the size of the point rather than by
+        rounding.
         """
         x = jnp.asarray(np.random.default_rng(0).normal(size=(23, ndim)))
         f = lambda p: jnp.sum(p**2)  # noqa: E731
         ref = wrap_func(f, (), x.dtype, ndim=ndim)(x)
         got = wrap_func(f, (), x.dtype, batch_size=batch_size, ndim=ndim)(x)
         assert ref.shape == got.shape == (23,)
-        np.testing.assert_array_equal(np.asarray(got), np.asarray(ref))
+        # Batching regroups the points without touching how any one of them is
+        # evaluated, so the arithmetic per point is the same sum of ``ndim`` terms. It
+        # is not the same *program* though: a batch is a differently shaped call, and
+        # the compiler is free to associate the sum differently in it, which is worth
+        # an ulp per term summed and no more.
+        eps = float(np.finfo(x.dtype).eps)
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(ref), rtol=ndim * eps, atol=0
+        )
         # and the values are right, to within that reordering
         np.testing.assert_allclose(
             np.asarray(got), np.asarray(jax.vmap(f)(x)), rtol=1e-15, atol=0
