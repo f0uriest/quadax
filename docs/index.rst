@@ -11,6 +11,7 @@ quadax
    :caption: User Guide
 
    choosing
+   cubature
    precision
    differentiation
    performance

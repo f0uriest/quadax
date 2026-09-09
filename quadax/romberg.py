@@ -16,6 +16,7 @@ from .adjoint import (
     DirectAdjoint,
     QuadratureOps,
     _ConvertedFunction,
+    _endpoint_term,
     build_integrand,
     closure_convert,
 )
@@ -280,6 +281,7 @@ def _romberg(
             batch_size=batch_size,
             divmin=divmin,
         ),
+        boundary=_endpoint_term,
     )
     y, state = adjoint.quadrature(ops, interval, args, consts, {}, opts)
     info = state["table"] if full_output else None

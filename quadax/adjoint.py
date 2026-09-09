@@ -1,6 +1,7 @@
 """Adjoint methods controlling how derivatives of quadrature are computed."""
 
 import abc
+import math
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import NamedTuple
@@ -19,6 +20,7 @@ from . import _acceleration
 from .utils import (
     _real_dtype,
     check_size,
+    map_box,
     map_interval,
     tree_where,
     wrap_func,
@@ -36,21 +38,22 @@ class _ConvertedFunction(eqx.Module):
         return self.f_conv(x, self.args, *self.consts)
 
 
-def closure_convert(fun, args, xtype):
+def closure_convert(fun, args, xtype, ndim=None):
     """Hoist values closed over by ``fun`` so that they are visible to AD.
 
     Custom derivative rules only see their explicit arguments. Anything ``fun`` closes
     over would otherwise silently get a zero gradient, so pull it out into ``consts``
     and pass it in explicitly.
 
-    ``xtype`` is the dtype the abscissa will be carried at. It matters here rather
-    than only downstream because ``closure_convert`` traces ``fun`` to a jaxpr at the
-    dtype it is given, and that jaxpr is what every later evaluation of the integrand
-    goes through.
+    ``xtype`` is the dtype the abscissa will be carried at, and ``ndim`` its shape:
+    ``None`` for the scalar abscissa of a 1D quadrature, an int for the length of the
+    vector a cubature rule hands the integrand. Both matter here rather than only
+    downstream because ``closure_convert`` traces ``fun`` to a jaxpr at the abscissa it
+    is given, and that jaxpr is what every later evaluation of the integrand goes
+    through.
     """
-    f_conv, consts = jax.closure_convert(
-        lambda x, args_: fun(x, *args_), jnp.zeros((), xtype), args
-    )
+    xprobe = jnp.zeros(() if ndim is None else (ndim,), xtype)
+    f_conv, consts = jax.closure_convert(lambda x, args_: fun(x, *args_), xprobe, args)
     return f_conv, tuple(consts)
 
 
@@ -65,6 +68,31 @@ def build_integrand(interval, args, consts, *, f_conv, safe=False):
     fun = _ConvertedFunction(f_conv, args, consts)
     fun_mapped, interval_t = map_interval(fun, interval)
     return wrap_func(fun_mapped, (), interval_t.dtype, safe=safe), interval_t
+
+
+def build_box_integrand(interval, args, consts, *, f_conv, ndim, lims, safe=False):
+    """Map the integrand over a region to the reference cube and wrap it.
+
+    The n dimensional counterpart of ``build_integrand``. ``interval`` is one array of
+    limits per axis, and so is the ``interval_t`` returned, each carrying whatever
+    breakpoints that axis was given.
+
+    ``lims`` is one entry per axis: ``None`` where the axis' limits are the constants
+    ``interval`` holds for it, and a closure converted callable where they are instead a
+    function of the coordinates before it, in which case ``interval`` holds the
+    reference interval that axis is integrated over. Each of those callables carries
+    consts of its own, so ``consts`` is one group per function -- the integrand's first,
+    then the callables' in axis order.
+    """
+    fun = _ConvertedFunction(f_conv, args, consts[0])
+    lim_consts = iter(consts[1:])
+    interval = tuple(
+        axis if lim is None else _ConvertedFunction(lim, args, next(lim_consts))
+        for axis, lim in zip(interval, lims)
+    )
+    fun_mapped, interval_t = map_box(fun, interval)
+    xtype = jnp.result_type(*interval_t)
+    return wrap_func(fun_mapped, (), xtype, safe=safe, ndim=ndim), interval_t
 
 
 class QuadratureOps(NamedTuple):
@@ -104,6 +132,12 @@ class QuadratureOps(NamedTuple):
     frozen_solve : callable or None
         ``frozen_solve(rule, vfunc, interval_t, discretization, kwargs) -> y``.
         Evaluates the quadrature on a fixed discretization.
+    boundary : callable or None
+        ``boundary(vfunc, interval_t, ops=, static=, opts_face=, kwargs=,
+        interval_live=, limits_t=) -> term``, where ``term(dyn) -> array`` is the
+        boundary half of the Leibniz rule as a function of the primals. ``None`` for a
+        routine that has no boundary term to give, which makes ``LeibnizAdjoint``
+        unusable with it.
     mesh_is_primal : bool
         Whether the value the solve returns is the sum over the subdivision. False when
         convergence acceleration may return an extrapolated value instead; the
@@ -117,6 +151,7 @@ class QuadratureOps(NamedTuple):
     on_mesh: Callable | None = None
     frozen: Callable | None = None
     frozen_solve: Callable | None = None
+    boundary: Callable | None = None
     mesh_is_primal: bool = True
 
 
@@ -193,6 +228,23 @@ def _rebuild_mesh(interval, frozen):
     return lo + frac_a * width, lo + frac_b * width
 
 
+def _rebuild_box_mesh(interval, frozen):
+    """Rebuild a box subdivision from `interval`, as a function of the limits.
+
+    The n dimensional counterpart of ``_rebuild_mesh``. Cutting a region cuts one of its
+    axes, so along every axis independently the same invariant holds as in one
+    dimension: the region stays inside whichever cell of that axis' breakpoints it was
+    carved out of, at fixed dyadic fractions of the way along it. ``interval`` gives one
+    array of breakpoints per axis and the owner and fractions have one column per axis,
+    so this is the one dimensional gather and rescale done axis by axis.
+    """
+    owner, frac_a, frac_b = frozen
+    lo = jnp.stack([axis[owner[:, k]] for k, axis in enumerate(interval)], axis=-1)
+    hi = jnp.stack([axis[owner[:, k] + 1] for k, axis in enumerate(interval)], axis=-1)
+    width = hi - lo
+    return lo + frac_a * width, lo + frac_b * width
+
+
 # Default for the adjoints' ``chunk_size``: how many sub-intervals of a fixed
 # subdivision are evaluated at once. Evaluating them all together is fastest but makes
 # peak memory scale with ``max_ninter``, which is a safety bound users tend to set
@@ -206,11 +258,12 @@ _CHUNK = 8
 
 
 def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
-    """Group a fixed subdivision into blocks of sub-intervals ready for evaluation.
+    """Group a fixed subdivision into blocks ready for evaluation.
 
     Returns the blocked endpoints and mask to scan over, a function evaluating one
     block, the shape and dtype of one sub-interval's contribution, and how many slots
-    the subdivision has.
+    the subdivision has. An endpoint is a scalar for a one dimensional subdivision and
+    a row of corner coordinates for a box, and the two are handled alike throughout.
     """
     # Sub-intervals are independent, so they are evaluated in blocks: ``vmap`` within a
     # block, ``scan`` across blocks. A plain ``scan`` over every sub-interval would make
@@ -234,16 +287,23 @@ def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
     # that is singular somewhere in the mapped domain from poisoning the unused slots
     # with a NaN that the mask would then propagate. So the granularity of the skip is
     # ``chunk_size``.
-    used = a_arr != b_arr
-    a_safe = jnp.where(used, a_arr, a_arr[0])
-    b_safe = jnp.where(used, b_arr, b_arr[0])
+    # Over a box an endpoint is a row of corner coordinates rather than a scalar, and a
+    # region with no extent along any one axis contributes nothing, so the emptiness
+    # test reduces over the axes.
+    used = (a_arr != b_arr).reshape(a_arr.shape[0], -1).any(axis=-1)
+    keep = used.reshape((-1,) + (1,) * (a_arr.ndim - 1))
+    a_safe = jnp.where(keep, a_arr, a_arr[0])
+    b_safe = jnp.where(keep, b_arr, b_arr[0])
 
     nslot = a_arr.shape[0]
     chunk = min(chunk_size, nslot)
     pad = -nslot % chunk
-    reshape = lambda x, fill: jnp.pad(x, (0, pad), constant_values=fill).reshape(
-        -1, chunk
-    )
+
+    def blocked(x, fill):
+        """Pad the slot axis out to whole blocks, then group it into them."""
+        fill = jnp.broadcast_to(jnp.asarray(fill, x.dtype), (pad, *x.shape[1:]))
+        x = jnp.concatenate([x, fill])
+        return x.reshape(-1, chunk, *x.shape[1:])
 
     apply1 = lambda a, b: rule._apply(vfunc, a, b, ())
     sds = jax.eval_shape(apply1, a_arr[0], b_arr[0])
@@ -251,9 +311,9 @@ def _block_mesh(rule, vfunc, a_arr, b_arr, chunk_size):
     # mesh's. With the mesh at float64 and the values at float32 the latter would
     # otherwise be promoted straight back to float64 here.
     blocks = (
-        reshape(a_safe, a_arr[0]),
-        reshape(b_safe, b_arr[0]),
-        reshape(used.astype(_real_dtype(sds.dtype)), 0.0),
+        blocked(a_safe, a_arr[0]),
+        blocked(b_safe, b_arr[0]),
+        blocked(used.astype(_real_dtype(sds.dtype)), 0.0),
     )
 
     def evaluate(block):
@@ -345,8 +405,8 @@ class _ReplayRecord(NamedTuple):
     carried under its own name in the integrator state.
 
     ``mesh`` is the final subdivision, as for a plain solve. ``parents`` describes the
-    sub-intervals that no longer exist -- each was bisected, so each is the *parent* of
-    one step -- and the birth times record when every sub-interval entered and left the
+    regions that no longer exist -- each was bisected, so each is the *parent* of
+    one step -- and the birth times record when every region entered and left the
     running total, which is what lets the whole sequence of running totals be rebuilt.
     Both the parent arrays and the birth times are indexed by the slot the bisection
     created, which is unique to that step, so the step needs no separate counter.
@@ -366,12 +426,12 @@ class _ReplayRecord(NamedTuple):
 
     @property
     def mesh(self):
-        """Frozen description of the final subdivision, for ``_rebuild_mesh``."""
+        """Frozen description of the final subdivision, for the mesh rebuild."""
         return (self.owner, self.frac_a, self.frac_b)
 
     @property
     def parents(self):
-        """Frozen description of the bisected sub-intervals, for ``_rebuild_mesh``."""
+        """Frozen description of the bisected regions, for the mesh rebuild."""
         return (self.p_owner, self.p_frac_a, self.p_frac_b)
 
 
@@ -380,31 +440,52 @@ def _frozen_replay(state):
     return _ReplayRecord(**{name: state[name] for name in _ReplayRecord._fields})
 
 
+def _n_initial(interval):
+    """How many pieces the breakpoints cut the domain into before any subdivision.
+
+    ``interval`` is a single array of breakpoints in one dimension and one such array
+    per axis over a box, the same two forms the solves themselves take, so the count is
+    the number of sub-intervals in the first case and the size of their grid in the
+    second.
+    """
+    if isinstance(interval, (jax.Array, np.ndarray)):
+        return interval.shape[0] - 1
+    return math.prod(len(axis) - 1 for axis in interval)
+
+
 def _replay_solve(
-    rule, vfunc, interval, frozen, kwargs, *, checkpoint=False, chunk_size=_CHUNK
+    rule,
+    vfunc,
+    interval,
+    frozen,
+    kwargs,
+    *,
+    rebuild=_rebuild_mesh,
+    checkpoint=False,
+    chunk_size=_CHUNK,
 ):
     """Re-run an accelerated quadrature on the decisions the primal settled on.
 
     An accelerated solve may return an extrapolated value rather than the sum over the
     subdivision, so differentiating it means differentiating the extrapolation as well
-    as the mesh. Everything the acceleration decided -- which sub-interval to bisect,
+    as the mesh. Everything the acceleration decided -- which region to bisect,
     when to feed the table, which extrapolation to keep -- was settled on error
     estimates and is integer or boolean, so freezing it leaves a fixed, ordinary
     function of the limits and the integrand: rebuild the subdivision, rebuild the
     sequence of running totals, and run the epsilon algorithm over it again.
 
     Rebuilding the running totals is the part that is not simply a mesh sum. The total
-    at the point where ``t`` sub-intervals exist is the sum over those alive then, and a
-    coarse sub-interval's value is not the sum of the values of the two halves it was
+    at the point where ``t`` regions exist is the sum over those alive then, and a
+    coarse region's value is not the sum of the values of the two halves it was
     cut into, so it is not a prefix sum of the final subdivision. Recording
-    when each sub-interval entered the total and when it left turns it into one instead:
+    when each region entered the total and when it left turns it into one instead:
     add each value at its birth, subtract it again at its death, and the running totals
-    are the cumulative sum. Every sub-interval that ever existed is either in the final
+    are the cumulative sum. Every region that ever existed is either in the final
     subdivision or was bisected, so evaluating the final subdivision and the parents
     covers all of them, and costs the same number of rule evaluations as the primal.
     """
-    mesh = _rebuild_mesh(interval, frozen.mesh)
-    parents = _rebuild_mesh(interval, frozen.parents)
+    mesh = rebuild(interval, frozen.mesh)
+    parents = rebuild(interval, frozen.parents)
     values = _values_on_mesh(
         rule,
         vfunc,
@@ -419,10 +500,10 @@ def _replay_solve(
     shape, ytype = values.shape[1:], values.dtype
 
     # Births and deaths, as a signed contribution at each point on the timeline. A
-    # sub-interval of the final subdivision never dies. A parent dies at the step that
+    # region of the final subdivision never dies. A parent dies at the step that
     # bisected it, which is the step that created slot `n`, so at `n + 1`. Unused slots
     # carry a zero value and cannot disturb either sum.
-    n_init = interval.shape[0] - 1
+    n_init = _n_initial(interval)
     timeline = jnp.zeros((nslot + 2, *shape), ytype)
     timeline = timeline.at[frozen.birth].add(v_mesh)
     timeline = timeline.at[frozen.p_birth].add(v_parent)
@@ -502,7 +583,7 @@ class AbstractAdjoint(eqx.Module):
     def quadrature(
         self,
         ops: QuadratureOps,
-        interval: jax.Array,
+        interval: jax.Array | tuple[jax.Array, ...],
         args: tuple,
         consts: tuple,
         kwargs: dict,
@@ -514,9 +595,10 @@ class AbstractAdjoint(eqx.Module):
         ----------
         ops : QuadratureOps
             Primitive operations for this quadrature method.
-        interval : jax.Array
+        interval : jax.Array or tuple of jax.Array
             Limits of integration with possible breakpoints, in the original
-            (unmapped) coordinates.
+            (unmapped) coordinates. One array for a one dimensional quadrature, one
+            per axis for a cubature over a box.
         args : tuple
             Extra arguments to the integrand.
         consts : tuple
@@ -667,6 +749,7 @@ class DirectAdjoint(AbstractAdjoint):
                     _items(opts),
                     _items(opts),
                     _items(opts),
+                    _items(opts),
                     kwargs,
                     ops=ops,
                     freeze=True,
@@ -795,6 +878,8 @@ def _run_solve(ops, integrand, interval_t, kwargs, opts, frozen):
 # about 1e12 in double precision for a jump of order one, and about 1e4 in single.
 _JUMP_RATIO = 16
 _JUMP_RTOL = 1e-3
+# Where the three probes on one side of a breakpoint sit, in units of the offset.
+_PROBE_STEPS = (1, _JUMP_RATIO, _JUMP_RATIO**2)
 
 
 def _side_limit(probes: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
@@ -818,6 +903,46 @@ def _side_limit(probes: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
         & (jnp.abs(first - second) <= _JUMP_RTOL * scale)
     )
     return first, converged
+
+
+def _probe_offset(c, span):
+    """How far either side of ``c`` to read the integrand, frozen against AD.
+
+    One ulp of the breakpoint, computed arithmetically rather than with ``nextafter``.
+    Two reasons: ``nextafter`` has no differentiation rule in JAX, so it breaks second
+    derivatives with respect to the limits outright, the primal still having to be
+    traced through it; and it steps by the true spacing, which is asymmetric at a binade
+    boundary, where the ulp below is half the ulp above. The span floors it so that a
+    breakpoint at zero still gets an offset on the scale of the domain.
+
+    Frozen: the width of a probe that exists to be infinitesimal is a property of the
+    arithmetic, not of the problem, and carries no meaningful derivative. The probe
+    points are still built from ``c``, so they move with the breakpoint and the jump
+    keeps its dependence on where the breakpoint sits.
+    """
+    eps = float(jnp.finfo(c.dtype).eps)
+    return jax.lax.stop_gradient(eps * jnp.maximum(jnp.abs(c), span))
+
+
+def _jump_from_probes(below, above):
+    """The jump between two sets of one-sided probes, or zero where there is none.
+
+    ``below`` and ``above`` are the integrand at the three offsets of ``_PROBE_STEPS``
+    either side of a breakpoint, innermost first. See :func:`_breakpoint_jumps` for why
+    the reading is taken three deep on each side and what the three cases below are for.
+    """
+    left, left_ok = _side_limit(below)
+    right, right_ok = _side_limit(above)
+    # A side with no limit contributes nothing, which is what a singularity pinned to an
+    # outer limit does as well: the solve returns the finite part and the boundary term
+    # that was regularized away must not be added back. The other side still counts, so
+    # the two are taken separately rather than as one difference.
+    separate = jnp.where(left_ok, left, 0.0) - jnp.where(right_ok, right, 0.0)
+    # Only when *neither* side has a limit is the difference the sole hope: a jump
+    # sitting on a symmetric singularity has unbounded one-sided values whose singular
+    # parts are equal, so they cancel in the difference and leave the jump behind.
+    joint, joint_ok = _side_limit([lo - hi for lo, hi in zip(below, above)])
+    return jnp.where(left_ok | right_ok, separate, jnp.where(joint_ok, joint, 0.0))
 
 
 def _breakpoint_jumps(vfunc, interval_t):
@@ -854,39 +979,15 @@ def _breakpoint_jumps(vfunc, interval_t):
     c = interval_t[1:-1]
     if c.shape[0] == 0:
         return None
-    # The probe width is one ulp of the breakpoint, computed arithmetically rather than
-    # with `nextafter`. Two reasons: `nextafter` has no differentiation rule in JAX, so
-    # it breaks second derivatives with respect to the limits outright, the primal still
-    # having to be traced through it; and it steps by the true spacing, which is
-    # asymmetric at a binade boundary, where the ulp below is half the ulp above. The
-    # span floors it so that a breakpoint at zero still gets an offset on the scale of
-    # the domain.
-    #
-    # Frozen: the width of a probe that exists to be infinitesimal is a property of the
-    # arithmetic, not of the problem, and carries no meaningful derivative. The probe
-    # points are still built from ``c``, so they move with the breakpoint and the jump
-    # keeps its dependence on where the breakpoint sits.
-    eps = float(jnp.finfo(c.dtype).eps)
-    span = jnp.abs(interval_t[-1] - interval_t[0])
-    h = jax.lax.stop_gradient(eps * jnp.maximum(jnp.abs(c), span))
-    offsets = (1, _JUMP_RATIO, _JUMP_RATIO**2)
-    below = [vfunc(c - m * h) for m in offsets]
-    above = [vfunc(c + m * h) for m in offsets]
-    left, left_ok = _side_limit(below)
-    right, right_ok = _side_limit(above)
-    # A side with no limit contributes nothing, which is what a singularity pinned to an
-    # outer limit does as well: the solve returns the finite part and the boundary term
-    # that was regularized away must not be added back. The other side still counts, so
-    # the two are taken separately rather than as one difference.
-    separate = jnp.where(left_ok, left, 0.0) - jnp.where(right_ok, right, 0.0)
-    # Only when *neither* side has a limit is the difference the sole hope: a jump
-    # sitting on a symmetric singularity has unbounded one-sided values whose singular
-    # parts are equal, so they cancel in the difference and leave the jump behind.
-    joint, joint_ok = _side_limit([lo - hi for lo, hi in zip(below, above)])
-    return jnp.where(left_ok | right_ok, separate, jnp.where(joint_ok, joint, 0.0))
+    h = _probe_offset(c, jnp.abs(interval_t[-1] - interval_t[0]))
+    below = [vfunc(c - m * h) for m in _PROBE_STEPS]
+    above = [vfunc(c + m * h) for m in _PROBE_STEPS]
+    return _jump_from_probes(below, above)
 
 
-def _endpoint_term(vfunc, interval_t, *, ops, static):
+def _endpoint_term(
+    vfunc, interval_t, *, ops, static, opts_face, kwargs, interval_live, limits_t
+):
     """The boundary half of the Leibniz rule, as a function of the primals.
 
     Differentiating ``int_a^b f`` gives an integral of ``df``, plus the boundary term
@@ -918,16 +1019,160 @@ def _endpoint_term(vfunc, interval_t, *, ops, static):
     differentiated and the term comes out as the ``f(b) db - f(a) da`` above. Whatever
     is left of the chain rule (how ``interval_t`` depends on the original limits,
     including the reordering ``map_interval`` does for reversed ones) is left to AD.
+
+    The last four arguments are what :func:`_box_boundary_term` needs and this does not.
+    A boundary in one dimension is a point, so there is no face to run a solve over,
+    nothing to configure, and nothing whose cost would repay being skipped: the whole
+    term is two evaluations of the integrand plus six per breakpoint.
     """
+    del opts_face, kwargs, interval_live, limits_t
     lo, hi = vfunc(interval_t[0]), vfunc(interval_t[-1])
     jumps = _breakpoint_jumps(vfunc, interval_t)
 
     def term(dyn_):
-        interval, args, consts, _, _, _ = eqx.combine(dyn_, static)
+        interval, args, consts, *_ = eqx.combine(dyn_, static)
         _, limits = ops.build(interval, args, consts)
         out = hi * limits[-1] - lo * limits[0]
         if jumps is not None:
             out = out + jnp.tensordot(limits[1:-1], jumps, axes=(0, 0))
+        return out
+
+    return term
+
+
+def _at_face(u, axis, t):
+    """A point of a face lifted back into the box, by putting ``t`` back at ``axis``."""
+    return jnp.concatenate([u[:axis], jnp.atleast_1d(t), u[axis:]])
+
+
+def _face_solve(ops, opts_face, kwargs, interval_t, axis, integrand):
+    """Integrate over a face of the box.
+
+    At ``ndim == 1`` a face is a single point and its "integral" is one evaluation of
+    the integrand there, at the empty abscissa.
+
+    The face rule is derived from the box rule per axis, which matters because a tensor
+    product may carry a different rule on each of them. A rule handed in through
+    ``options_face`` is already of the face's dimension and is taken as it stands.
+    """
+    if len(interval_t) == 1:
+        return integrand(jnp.zeros((0,), interval_t[0].dtype))
+    opts = dict(opts_face)
+    if opts["rule"].ndim == len(interval_t):
+        opts["rule"] = opts["rule"]._drop_axis(axis)
+    face = interval_t[:axis] + interval_t[axis + 1 :]
+    return ops.solve(integrand, face, kwargs, **opts)[0]
+
+
+def _gated(moves, run, shape, dtype):
+    """``run()``, or zeros when nothing the face would be multiplied by is moving.
+
+    Skipping a face whose multiplier is zero leaves the boundary term exactly
+    unchanged, not approximately, so this is free of any accuracy question. ``moves``
+    is ``True`` when there is nothing to gate on, which is the reverse mode case: the
+    cotangent of every entry of a live axis is owed to the caller, and which of them the
+    caller keeps is decided outside this primitive.
+
+    ``unvmap_any`` keeps the predicate a scalar under ``vmap``, so the face is skipped
+    only when no batch element needs it, instead of degrading to a select that runs both
+    branches anyway.
+    """
+    if moves is True:  # known at trace time, note this is NOT ``if moves:``
+        return run()
+    return jax.lax.cond(
+        unvmap_any(moves),  # only known at runtime
+        lambda _: run(),
+        lambda _: jnp.zeros(shape, dtype),
+        None,
+    )
+
+
+def _box_boundary_term(
+    vfunc, interval_t, *, ops, static, opts_face, kwargs, interval_live, limits_t
+):
+    """The boundary half of the Leibniz rule over a box, as a function of the primals.
+
+    The ``n`` dimensional counterpart of :func:`_endpoint_term`. Each of the point
+    evaluations there becomes an integral over the face the point has grown into::
+
+        d/dp int_box f  =  int_box df
+                        +  sum_k [ int_{x_k=b_k} f dS b_k'  -  int_{x_k=a_k} f dS a_k' ]
+                        +  sum_k sum_j int_{x_k=c_kj} (f(c-) - f(c+)) dS c_kj'
+
+    Everything that made the one dimensional version work survives. The face values are
+    computed here rather than inside ``term``, so they are held at their primal values
+    and only the limits are differentiated, which is what makes the two directions of
+    the derivative integrate the identical faces. And ``map_box`` is separable, so a
+    face of the mapped box is the mapped face and ``vfunc`` already carries every axis'
+    Jacobian, this one included -- which is right, since what is being differentiated is
+    the mapped limit. An axis mapped from an infinite one has its limits pinned to +-1,
+    which carry no derivative, so it contributes nothing and drops out on its own.
+
+    Only axis aligned features can be marked, breakpoints being per axis, so a
+    discontinuity that runs across the box at an angle carries no boundary term. That is
+    a limitation of what an interval can express rather than of this.
+    """
+    ndim = len(interval_t)
+    xtype = jnp.result_type(*interval_t)
+    ysds = jax.eval_shape(vfunc, jnp.zeros((ndim,), xtype))
+    faces = {}
+
+    for k, live in enumerate(interval_live):
+        if not live:  # known at trace time
+            continue
+        axis = interval_t[k]
+
+        def outer(t, k=k):
+            return _face_solve(
+                ops,
+                opts_face,
+                kwargs,
+                interval_t,
+                k,
+                lambda u: vfunc(_at_face(u, k, t)),
+            )
+
+        ends = jnp.stack([axis[0], axis[-1]])
+        ends_t = None if limits_t is None else limits_t[k][:: axis.shape[0] - 1]
+        moves = True if ends_t is None else jnp.any(ends_t != 0)
+        lo, hi = _gated(
+            moves,
+            lambda ends=ends, outer=outer: jax.vmap(outer)(ends),
+            (2, *ysds.shape),
+            ysds.dtype,
+        )
+
+        jumps = None
+        if axis.shape[0] > 2:
+            span = jnp.abs(axis[-1] - axis[0])
+
+            def jump(c, k=k, span=span):
+                h = _probe_offset(c, span)
+
+                def integrand(u):
+                    below = [vfunc(_at_face(u, k, c - m * h)) for m in _PROBE_STEPS]
+                    above = [vfunc(_at_face(u, k, c + m * h)) for m in _PROBE_STEPS]
+                    return _jump_from_probes(below, above)
+
+                return _face_solve(ops, opts_face, kwargs, interval_t, k, integrand)
+
+            moves = True if limits_t is None else jnp.any(limits_t[k][1:-1] != 0)
+            jumps = _gated(
+                moves,
+                lambda axis=axis, jump=jump: jax.vmap(jump)(axis[1:-1]),
+                (axis.shape[0] - 2, *ysds.shape),
+                ysds.dtype,
+            )
+        faces[k] = (lo, hi, jumps)
+
+    def term(dyn_):
+        interval, args, consts, *_ = eqx.combine(dyn_, static)
+        _, limits = ops.build(interval, args, consts)
+        out = jnp.zeros(ysds.shape, ysds.dtype)
+        for k, (lo, hi, jumps) in faces.items():
+            out = out + hi * limits[k][-1] - lo * limits[k][0]
+            if jumps is not None:
+                out = out + jnp.tensordot(limits[k][1:-1], jumps, axes=(0, 0))
         return out
 
     return term
@@ -941,9 +1186,27 @@ def _integrand_at(dyn_, *, t, ops, static):
     differentiate this: forward mode pushes a tangent through it, reverse mode pulls a
     cotangent back.
     """
-    interval, args, consts, _, _, _ = eqx.combine(dyn_, static)
+    interval, args, consts, *_ = eqx.combine(dyn_, static)
     vf, _ = ops.build(interval, args, consts, safe=True)
     return vf(t)
+
+
+def _mapped_limits_tangent(dyn, dyn_t, *, ops, static):
+    """How fast the mapped limits are moving, one array per leaf of ``interval``.
+
+    The boundary term multiplies each face by one of these, so a face whose entry is
+    zero contributes nothing and need not be evaluated at all. It is the mapped limits
+    rather than the given ones because that is what the term is written against: an
+    axis mapped from an infinite one lands on fixed limits, which come out zero here.
+    This is correct, as a convergent primal integral means that the integrand decays to
+    zero at infinity, so the derivative wrt the infinite boundary is also zero.
+    """
+
+    def limits(dyn_):
+        interval, args, consts, *_ = eqx.combine(dyn_, static)
+        return ops.build(interval, args, consts)[1]
+
+    return jax.jvp(limits, (dyn,), (dyn_t,))[1]
 
 
 def _tangent_integrand(dyn, dyn_t, *, ops, static):
@@ -1003,7 +1266,7 @@ def _leibniz_impl(
     frozen_treedef,
     freeze,
     live,
-    interval_from_solve,
+    interval_live,
     out_sds,
 ):
     """Forward direction: integrate the tangent of the mapped integrand."""
@@ -1011,7 +1274,7 @@ def _leibniz_impl(
     dyn_t, dyn, primals, frozen = _leibniz_unpack(
         flat, n, treedef, static, frozen_treedef
     )
-    interval, args, consts, _, opts_fwd, _ = primals
+    interval, args, consts, _, opts_fwd, _, opts_face = primals
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
 
@@ -1024,11 +1287,27 @@ def _leibniz_impl(
         opts_fwd,
         frozen if freeze else None,
     )
-    if interval_from_solve:
+    if any(interval_live):
         # Integrating the tangent between fixed limits misses the boundary term whenever
         # the limits themselves carry a derivative, which is exactly when the solve is
         # the thing that has to produce it.
-        term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
+        #
+        # A leaf of `interval` is one array, so a limit written as an expression that
+        # mentions the parameter without depending on it (which is how you tie a
+        # breakpoint to a moving feature) is live at trace time with a tangent that is
+        # zero at run time. Handing the mapped limits' tangent down lets the boundary
+        # term skip whatever it would only multiply by zero. It costs one
+        # differentiation of the mapping and no evaluation of the integrand.
+        term = ops.boundary(
+            vfunc,
+            interval_t,
+            ops=ops,
+            static=static,
+            opts_face=dict(opts_face),
+            kwargs=kwargs,
+            interval_live=interval_live,
+            limits_t=_mapped_limits_tangent(dyn, dyn_t, ops=ops, static=static),
+        )
         y_dot = y_dot + jax.jvp(term, (dyn,), (dyn_t,))[1]
     return y_dot
 
@@ -1044,7 +1323,7 @@ def _leibniz_transpose(
     frozen_treedef,
     freeze,
     live,
-    interval_from_solve,
+    interval_live,
     out_sds,
 ):
     """Reverse direction: integrate the cotangent of the mapped integrand."""
@@ -1056,7 +1335,7 @@ def _leibniz_transpose(
         # fed to `jax.vjp` below, which requires an array and rejects the symbolic form.
         return (None,) * len(flat)
     _, dyn, primals, frozen = _leibniz_unpack(flat, n, treedef, static, frozen_treedef)
-    interval, args, consts, _, _, opts_rev = primals
+    interval, args, consts, _, _, opts_rev, opts_face = primals
     kwargs = dict(kwargs_items)
     vfunc, interval_t = ops.build(interval, args, consts)
     # Only the arguments actually being differentiated reach the solve. Integrating the
@@ -1083,10 +1362,24 @@ def _leibniz_transpose(
         frozen if freeze else None,
     )
     ct_tree = unravel(flat_ct)
-    if interval_from_solve:
+    if any(interval_live):
         # The adjoint integrand carries the limits' cotangent only through the
         # integrand, so the boundary term is added here, as in forward mode.
-        term = _endpoint_term(vfunc, interval_t, ops=ops, static=static)
+        #
+        # `limits_t` is the tangent, which is the operand being transposed and so is an
+        # undefined primal here. Nothing can be gated on it: a cotangent is owed for
+        # every entry of every live axis, and which of them the caller keeps is decided
+        # outside this primitive. Passing `None` says to build every face.
+        term = ops.boundary(
+            vfunc,
+            interval_t,
+            ops=ops,
+            static=static,
+            opts_face=dict(opts_face),
+            kwargs=kwargs,
+            interval_live=interval_live,
+            limits_t=None,
+        )
         ct_tree = _add_live(ct_tree, jax.vjp(term, dyn)[1](ct)[0])
     # One cotangent per linear operand, in the order they were bound: the solved ones
     # in tree order, and `None` (the symbolic zero JAX expects for an operand that was
@@ -1133,6 +1426,15 @@ class LeibnizAdjoint(AbstractAdjoint):
         The same, for one direction alone, taking precedence over ``options``. Which
         vector is being measured differs between the two directions, so ``norm`` is the
         option most likely to want this; see the note below.
+    options_face : dict, optional
+        Options for the boundary term's own solves, taking precedence over ``options``
+        and applying to both directions. Over a box the boundary term is an integral
+        over a face rather than a value at a point, and these configure it; in one
+        dimension a face is a point and this does nothing. There is deliberately no
+        forward and reverse pair, see the note below. Default is to solve for the faces
+        with the same options as the integral, and with a rule derived from the
+        integral's, one axis shorter. ``rule`` may be given here to override that, and
+        must then be of dimension ``ndim - 1``.
 
     Notes
     -----
@@ -1153,6 +1455,20 @@ class LeibnizAdjoint(AbstractAdjoint):
     A ``norm`` weighted per parameter is written against that layout, and belongs in
     ``options_rev`` so that it is never handed a tangent instead, which the two vectors
     being the same length by coincidence would otherwise hide.
+
+    The boundary term is the other way round, which is why ``options_face`` has no
+    forward and reverse halves. It is built from the integrand at its primal values,
+    the limits alone being differentiated, so both directions integrate the identical
+    faces and a vector of the integrand's own shape. For the same reason
+    ``options_face`` is merged over the options the quadrature was called with and
+    never over ``options_fwd`` or ``options_rev``, so a ``norm`` written for the
+    reverse direction's parameter layout cannot reach a face.
+
+    Over a box the boundary term costs up to two adaptive solves per axis whose limits
+    are being differentiated, each one dimension shorter than the integral, and each
+    direction builds its own. Forward mode skips the faces of an axis that is not
+    actually moving; reverse mode owes a cotangent for every limit of a live axis and
+    so cannot. :class:`DirectAdjoint` remains the cheaper default for cubature.
 
     When differentiating a moving jump or singularity, mark the jump or singularity
     with a breakpoint, and build that breakpoint from the same parameter that positions
@@ -1203,6 +1519,7 @@ class LeibnizAdjoint(AbstractAdjoint):
     options: dict = eqx.field(default_factory=dict)
     options_fwd: dict = eqx.field(default_factory=dict)
     options_rev: dict = eqx.field(default_factory=dict)
+    options_face: dict = eqx.field(default_factory=dict)
 
     def quadrature(self, ops, interval, args, consts, kwargs, opts):
         """Evaluate the quadrature, differentiating it by the Leibniz rule."""
@@ -1213,6 +1530,7 @@ class LeibnizAdjoint(AbstractAdjoint):
             _items(opts),
             _items(_merge(opts, self.options, self.options_fwd)),
             _items(_merge(opts, self.options, self.options_rev)),
+            _items(_merge(opts, self.options, self.options_face)),
             kwargs,
             ops=ops,
             freeze=False,
@@ -1221,9 +1539,19 @@ class LeibnizAdjoint(AbstractAdjoint):
 
 @eqx.filter_custom_jvp
 def _leibniz(
-    interval, args, consts, opts, opts_fwd, opts_rev, kwargs, *, ops, freeze=False
+    interval,
+    args,
+    consts,
+    opts,
+    opts_fwd,
+    opts_rev,
+    opts_face,
+    kwargs,
+    *,
+    ops,
+    freeze=False,
 ):
-    del freeze, opts_fwd, opts_rev
+    del freeze, opts_fwd, opts_rev, opts_face
     vfunc, interval_t = ops.build(interval, args, consts)
     return ops.solve(vfunc, interval_t, kwargs, **dict(opts))
 
@@ -1239,10 +1567,15 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
 
     lin_leaves, treedef = jax.tree.flatten(dyn_t)
     res_leaves = jax.tree.flatten(dyn)[0]
-    # Whether the solve is the thing that has to produce the limits' cotangent, which it
-    # is whenever they are being differentiated at all. `filter_custom_jvp` tells us at
-    # trace time by handing us a `None` tangent for anything that is not.
-    interval_from_solve = any(t is not None for t in jax.tree.leaves(tangents[0]))
+    # Whether the solve is the thing that has to produce the limits' cotangent, one
+    # flag per leaf of `interval`: a single one in one dimension, one per axis for a
+    # box, which is the granularity at which a face integral can be skipped outright.
+    # `None` marks a leaf that is not being differentiated and is a valid pytree in its
+    # own right, so it has to be kept as a leaf here or the flags lose their alignment
+    # with the axes.
+    interval_live = tuple(
+        t is not None for t in jax.tree.leaves(tangents[0], is_leaf=lambda x: x is None)
+    )
     # The same statement for every argument rather than for the limits alone: which
     # cotangents the reverse solve has to carry, and so what the vector its `norm`
     # measures is made of.
@@ -1265,7 +1598,7 @@ def _leibniz_jvp(primals, tangents, *, ops, freeze=False):
         frozen_treedef=frozen_treedef,
         freeze=freeze,
         live=live,
-        interval_from_solve=interval_from_solve,
+        interval_live=interval_live,
         out_sds=jax.ShapeDtypeStruct(jnp.shape(y), jnp.result_type(y)),
     )
     return (y, state), (y_dot, _zero_tangent(state))

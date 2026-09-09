@@ -24,6 +24,7 @@ from .adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     QuadratureOps,
+    _endpoint_term,
     _frozen_mesh,
     _frozen_replay,
     _mesh_solve,
@@ -172,12 +173,6 @@ def quadgk(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -185,6 +180,12 @@ def quadgk(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -321,12 +322,6 @@ def quadcc(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -334,6 +329,12 @@ def quadcc(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -471,6 +472,13 @@ def quadts(
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
         should be callable.
+    adjoint : AbstractAdjoint, optional
+        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
+        which gives the exact derivative of the discretized problem, and is the
+        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
+        derivative its own error control (ie, can better approximate the true continuous
+        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
+        generous; see :ref:`adjoints` for when that is worth paying for.
     extrapolate : bool, optional
         Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
         sequence of running totals, off by default. Unlike the other adaptive routines
@@ -479,13 +487,6 @@ def quadts(
         Where a tanh-sinh integration is inaccurate the limit is generally the
         resolution of the abscissas near the endpoints, which acceleration cannot
         recover.
-    adjoint : AbstractAdjoint, optional
-        How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
-        which gives the exact derivative of the discretized problem, and is the
-        cheaper option for a cheap integrand. :class:`~quadax.LeibnizAdjoint` gives the
-        derivative its own error control (ie, can better approximate the true continuous
-        derivative), and is faster when the integrand is expensive or ``max_ninter`` is
-        generous; see :ref:`adjoints` for when that is worth paying for.
     batch_size : int, optional
         Maximum number of points at which to evaluate the integrand in parallel. Default
         is all of the local rule's nodes at once, which is fastest but makes peak memory
@@ -604,12 +605,6 @@ def adaptive_quadrature(
     max_ninter : int, optional
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
-    extrapolate : bool, optional
-        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
-        sequence of running totals, on by default. Not needed for smooth integrands on
-        finite domains, but can help significantly if there are algebraic singularities
-        or infinite intervals. The additional cost is small and constant, so it is only
-        worth switching off for a very cheap integrand where performance is critical.
     adjoint : AbstractAdjoint, optional
         How to compute derivatives of the quadrature. Default is ``DirectAdjoint()``,
         which gives the exact derivative of the discretized problem, and is the
@@ -617,6 +612,12 @@ def adaptive_quadrature(
         derivative its own error control (ie, can better approximate the true continuous
         derivative), and is faster when the integrand is expensive or ``max_ninter`` is
         generous; see :ref:`adjoints` for when that is worth paying for.
+    extrapolate : bool, optional
+        Whether to accelerate convergence by applying Wynn's epsilon algorithm to the
+        sequence of running totals, on by default. Not needed for smooth integrands on
+        finite domains, but can help significantly if there are algebraic singularities
+        or infinite intervals. The additional cost is small and constant, so it is only
+        worth switching off for a very cheap integrand where performance is critical.
     throw : bool, optional
         Whether to raise an error if the routine does not converge. If True, a run
         that terminates for any reason other than reaching the requested tolerance
@@ -699,6 +700,7 @@ def adaptive_quadrature(
         # to replay the extrapolation too, not just the mesh.
         frozen=_frozen_replay if extrapolate else _frozen_mesh,
         frozen_solve=_replay_solve if extrapolate else _mesh_solve,
+        boundary=_endpoint_term,
         mesh_is_primal=not extrapolate,
     )
     y, state = adjoint.quadrature(ops, interval, args, consts, kwargs, opts)
@@ -737,31 +739,40 @@ def _at_roundoff_floor(state, epmach, norm):
 
 
 def _accelerate(
-    state, i, erro12, err_i, converged, norm, epsabs, epsrel, epmach, max_ninter
+    state,
+    i,
+    erro12,
+    err_i,
+    converged,
+    norm,
+    epsabs,
+    epsrel,
+    epmach,
+    nregion,
+    max_nregion,
 ):
     """One pass of the extrapolation control flow, skipped where it is a no-op.
 
     Most iterations of a run that extrapolates are ordinary bisection: the acceleration
     has not started, the pointer into the error ordering is at the head, and the worst
-    sub-interval can still be subdivided within the current depth budget. On those the
-    whole block below reduces to two updates: which sub-interval to bisect next, and
-    the running total of the error still sitting in sub-intervals that are not yet
+    region can still be subdivided within the current depth budget. On those the
+    whole block below reduces to two updates: which region to bisect next, and
+    the running total of the error still sitting in regions that are not yet
     localized. The ordering, the epsilon table and the acceptance tests are all
     unchanged.
     """
     # `bisect_next_err_rank == 0` says the pointer never walked down the ordering, so
-    # the sub-interval with the largest error is the one at its head and `argmax` finds
-    # it without the sort. Ties go the same way: `argsort` is stable, so its first entry
-    # and `argmax` both take the lowest index among equal errors.
+    # the region with the largest error is the one at its head, which `argmax` names
+    # directly. Ties break the same way in both paths, towards the lower index.
     bisect_next = jnp.argmax(state["e_arr"])
-    # `can_bisect` is the depth test the full pass makes on the worst sub-interval:
+    # `can_bisect` is the depth test the full pass makes on the worst region:
     # bisecting it again would keep both halves within the current depth budget, so the
     # mesh still has room to refine there and no extrapolation is called for yet.
     can_bisect = (state["level"][bisect_next] + 1) <= state["level_max"]
     # `ordinary` is the fast path itself, the three conditions under which the full pass
     # would change nothing: the acceleration has not started, the pointer into the
-    # error ordering is still at its head so `bisect_next` is the sub-interval the
-    # sorted ranking would have picked, and the depth test says to bisect it.
+    # error ordering is still at its head so `bisect_next` is the region the full
+    # ranking would have picked, and the depth test says to bisect it.
     ordinary = (
         ~state["accelerating"] & (state["bisect_next_err_rank"] == 0) & can_bisect
     )
@@ -799,14 +810,71 @@ def _accelerate(
             epsabs,
             epsrel,
             epmach,
-            max_ninter,
+            nregion,
+            max_nregion,
         )
 
     return jax.lax.cond(unvmap_any(~ordinary), run, skip, state)
 
 
+def _err_rank_of(e_arr, region):
+    """Position of `region` in the descending ordering of `e_arr`, ties by lower index.
+
+    Counting the regions that outrank it gives the same position a stable ranking
+    would, without building one.
+    """
+    e_region = e_arr[region]
+    return jnp.count_nonzero(e_arr > e_region) + jnp.count_nonzero(
+        (e_arr == e_region) & (jnp.arange(e_arr.shape[0]) < region)
+    )
+
+
+def _err_at_rank(e_arr, rank):
+    """The error estimate holding `rank` in the descending ordering of `e_arr`.
+
+    Only a handful of ranks are ever wanted per pass, so this searches for the one
+    asked rather than ranking the whole array. Error estimates are non-negative, so
+    their bit patterns are monotone as unsigned integers and ``count(e_arr >= v)`` is
+    monotone in ``v``; a bisection on the bits therefore locates the rank, at one
+    reduction over the array per bit.
+
+    The answer is snapped to an entry of `e_arr`, which the bound itself need not be:
+    the search can finish among subnormals, where flush-to-zero makes the comparisons
+    that placed it unreliable.
+    """
+    nbits = 8 * e_arr.dtype.itemsize
+    utype = jnp.dtype(f"uint{nbits}")
+    # Clamping first keeps the search inside the non-negative half of the number line,
+    # where the bits are monotone, whatever a caller's estimates happen to hold.
+    bits = jax.lax.bitcast_convert_type(jnp.maximum(e_arr, 0), utype)
+
+    def step(_, bounds):
+        lo, hi = bounds
+        mid = lo + (hi - lo) // utype.type(2)
+        value = jax.lax.bitcast_convert_type(mid, e_arr.dtype)
+        above = jnp.count_nonzero(e_arr >= value) > rank
+        return jnp.where(above, mid, lo), jnp.where(above, hi, mid)
+
+    lo, _ = jax.lax.fori_loop(
+        0, nbits, step, (utype.type(0), bits.max() + utype.type(1))
+    )
+    bound = jax.lax.bitcast_convert_type(lo, e_arr.dtype)
+    return jnp.min(jnp.where(e_arr >= bound, e_arr, jnp.inf).astype(e_arr.dtype))
+
+
 def _accelerate_full(
-    state, i, levcur, erro12, err_i, converged, norm, epsabs, epsrel, epmach, max_ninter
+    state,
+    i,
+    levcur,
+    erro12,
+    err_i,
+    converged,
+    norm,
+    epsabs,
+    epsrel,
+    epmach,
+    nregion,
+    max_nregion,
 ):
     """One pass of the extrapolation control flow.
 
@@ -829,7 +897,7 @@ def _accelerate_full(
     those has no trend in it to extrapolate.
 
     So the override runs the opposite way round to what the competition suggests. It is
-    the extrapolation that causes sub-intervals well down the error ranking to be
+    the extrapolation that causes regions well down the error ranking to be
     bisected, ones the subdivision would never choose for itself, while the difficult
     region is held frozen. It is not frozen for long (it is deepened once per round) but
     on a schedule rather than whenever it happens to carry the largest error, and that
@@ -840,18 +908,18 @@ def _accelerate_full(
     stages advance across those visits.
 
     1. *Has the mesh localized?* Let the subdivision home in. While the worst
-       sub-interval is still within the depth budget this is the ordinary adaptive loop
+       region is still within the depth budget this is the ordinary adaptive loop
        and nothing else happens. Once it reaches the budget the difficult region is
        resolved as tightly as this round allows, and is frozen.
 
     2. *Is anything else worth bisecting first?* Clean up elsewhere, which is what earns
-       the coming reading the right to be taken. A sub-interval further down the ranking
+       the coming reading the right to be taken. A region further down the ranking
        that still has depth left is bisected in preference to feeding the table, for as
-       long as enough error remains in such sub-intervals to be worth collecting.
+       long as enough error remains in such regions to be worth collecting.
 
        This is not a sweep that levels the domain. The test is on their *total* error
        and each pass takes the largest of them, so the cleanup stops partway down the
-       ranking and sub-intervals whose error is already negligible are never reached.
+       ranking and regions whose error is already negligible are never reached.
        What it drains towards is the caller's own tolerance, so that the part of the
        domain still being subdivided is inside the whole error budget and the
        extrapolation is left accounting for the frozen part alone. Cleanup also ends
@@ -867,7 +935,7 @@ def _accelerate_full(
     4. Otherwise raise the depth budget by one, unfreeze the difficult region, and begin
        the next round against a mesh allowed to localize one level further.
 
-    Which sub-interval to bisect is therefore settled at the *end* of an iteration
+    Which region to bisect is therefore settled at the *end* of an iteration
     rather than the start, which is why it is carried in the state rather than
     recomputed from the error estimates. Whether the extrapolated value is returned at
     all is not settled here; see ``_accept_extrapolation``.
@@ -877,20 +945,50 @@ def _accelerate_full(
     skips if all elements don't need it.
     """
     # --- Setup: the ranking, the gating flags, and the unlocalized error ------------
-    # The acceleration needs the sub-intervals ranked by error estimate, not just the
-    # worst one: once it starts extrapolating it walks down the ranking looking for a
-    # sub-interval that is still worth bisecting.
-    order = jnp.argsort(-state["e_arr"])
-    # The pointer must never sit below the sub-interval just bisected, or the walk would
+    # The acceleration needs regions ranked by error estimate, not just the worst one:
+    # once it starts extrapolating it walks down the ranking looking for a region that
+    # is still worth bisecting. Only a few positions in that ranking are ever read, so
+    # they are located directly instead of by ordering the whole array. Ordering it
+    # costs more than everything else the loop does put together, and the cost grows
+    # with the *capacity* rather than with the regions in play, so a caller who leaves
+    # generous headroom pays for slots that are still empty.
+    #
+    # Regions carrying equal estimates are ranked by index, lowest first, and every
+    # query below breaks ties that way.
+    worst = jnp.argmax(state["e_arr"])
+    # The pointer must never sit below the region just bisected, or the walk would
     # start past an error larger than any it can then find. Bisection does not always
-    # reduce an error estimate (two halves of an unresolved sub-interval can between
+    # reduce an error estimate (two halves of an unresolved region can between
     # them report more error than their parent did) so slot `i` may have moved *up*
     # the ranking, and the pointer is clamped to follow it up when it does.
     bisect_next_err_rank = jnp.minimum(
-        state["bisect_next_err_rank"], jnp.argmax(order == i)
+        state["bisect_next_err_rank"], _err_rank_of(state["e_arr"], i)
     )
     state["bisect_next_err_rank"] = bisect_next_err_rank
-    bisect_next = order[bisect_next_err_rank]
+
+    def at_head(_):
+        """The pointer sits at the head, where locating it takes no search at all."""
+        return worst, jnp.ones(max_nregion, bool)
+
+    def walked_down(_):
+        """The pointer has walked down the ordering, so its estimate must be found."""
+        err_ptr = _err_at_rank(state["e_arr"], bisect_next_err_rank)
+        # Regions sharing the pointer's estimate are separated by index, so the pointer
+        # picks out one of them and the rest of that group ranks below it.
+        tied = state["e_arr"] == err_ptr
+        among_tied = jnp.cumsum(tied) - 1
+        at_ptr = bisect_next_err_rank - jnp.count_nonzero(state["e_arr"] > err_ptr)
+        return (
+            jnp.argmax(tied & (among_tied == at_ptr)),
+            (state["e_arr"] < err_ptr) | (tied & (among_tied >= at_ptr)),
+        )
+
+    # A pointer still at the head is the common case, and by far the cheaper one, so it
+    # is branched on rather than folded into the general path. Batched, the search runs
+    # if any element needs it, which is harmless: it is correct at the head too.
+    bisect_next, ranked_below_ptr = jax.lax.cond(
+        unvmap_any(bisect_next_err_rank != 0), walked_down, at_head, None
+    )
 
     # Everything below is skipped on an iteration that reached the tolerance or raised a
     # flag: in both cases the run is over and the mesh result is the one that will be
@@ -899,7 +997,7 @@ def _accelerate_full(
     proceed = ~converged & (state["status"] == STATUS.normal)
     active = proceed & ~state["no_accel"]
 
-    # The error still sitting in sub-intervals that are not yet localized, ie those the
+    # The error still sitting in regions that are not yet localized, ie those the
     # subdivision has not yet driven down to the current depth. The parent's share
     # leaves it, and the children's returns only if they are still large enough to be
     # worth subdividing.
@@ -908,7 +1006,7 @@ def _accelerate_full(
     err_unlocalized = jnp.where(active, err_unlocalized, state["err_unlocalized"])
 
     # --- 1. Has the mesh localized? -------------------------------------------------
-    # While the worst sub-interval can still be subdivided within the current depth
+    # While the worst region can still be subdivided within the current depth
     # budget there is more to be had from refining the mesh, and this stays the ordinary
     # adaptive loop.
     can_bisect = (state["level"][bisect_next] + 1) <= state["level_max"]
@@ -920,7 +1018,7 @@ def _accelerate_full(
     bisect_next_err_rank = jnp.where(begin, 1, bisect_next_err_rank)
 
     # --- 2. Is something else worth bisecting first? --------------------------------
-    # Before extrapolating, look further down the ranking for a sub-interval that still
+    # Before extrapolating, look further down the ranking for a region that still
     # has room to bisect within the current depth budget. Bisecting one of those brings
     # the unlocalized error down without re-refining the region the table is already
     # extrapolating past; refining that region instead would move the running total by
@@ -928,16 +1026,17 @@ def _accelerate_full(
     # smoothly converging one the epsilon algorithm assumes. The search starts at the
     # pointer and runs no further than the subdivisions still available, since lower
     # ranks can never be reached before the budget runs out.
-    last = state["ninter"]
-    jupbnd = jnp.where(last > 2 + max_ninter // 2, max_ninter + 3 - last, last)
-    ranks = jnp.arange(max_ninter)
-    can_bisect_ranked = (state["level"][order] + 1) <= state["level_max"]
-    candidate = can_bisect_ranked & (ranks >= bisect_next_err_rank) & (ranks < jupbnd)
+    last = nregion
+    jupbnd = jnp.where(last > 2 + max_nregion // 2, max_nregion + 3 - last, last)
+    # Everything ranked at or below the pointer. `begin` moved the pointer to rank one,
+    # which is every region but the worst.
+    ranked_below = jnp.where(begin, jnp.arange(max_nregion) != worst, ranked_below_ptr)
+    candidate = ranked_below & ((state["level"] + 1) <= state["level_max"])
     # A table already known to be running on a stagnant sequence skips the search: more
     # subdivision has been shown not to help it.
     #
     # The threshold is floored at the roundoff level. It decides when the error left in
-    # the unlocalized sub-intervals has become small enough that extrapolating past them
+    # the unlocalized regions has become small enough that extrapolating past them
     # is worthwhile, which is a control decision rather than a convergence test, and a
     # caller asking for a tolerance below what the arithmetic can deliver (`epsabs=0`
     # as shorthand for "do your best") would otherwise leave it permanently false.
@@ -951,10 +1050,17 @@ def _accelerate_full(
         state["err_accel_target"], _ROUNDOFF_FLOOR * epmach * norm(state["area"])
     )
     search = ~state["roundoff_in_table"] & (err_unlocalized > accel_target)
-    found = active & search & ~keep_bisecting & jnp.any(candidate)
-    found_rank = jnp.argmax(candidate)
+    # The first candidate the walk would reach is the one with the largest estimate,
+    # since the walk runs down the ranking; `jupbnd` is then applied to its rank.
+    found_region = jnp.argmax(
+        jnp.where(candidate, state["e_arr"], -jnp.inf).astype(state["e_arr"].dtype)
+    )
+    found_rank = _err_rank_of(state["e_arr"], found_region)
+    found = (
+        active & search & ~keep_bisecting & jnp.any(candidate) & (found_rank < jupbnd)
+    )
     bisect_next_err_rank = jnp.where(found, found_rank, bisect_next_err_rank)
-    bisect_next = jnp.where(found, order[found_rank], bisect_next)
+    bisect_next = jnp.where(found, found_region, bisect_next)
 
     # --- 3. Is the extrapolation good enough to stop on? ----------------------------
     take_step = active & ~keep_bisecting & ~found
@@ -1035,7 +1141,7 @@ def _accelerate_full(
     # go back to the largest error, allow the subdivision one more level of
     # depth, and let the mesh localize further before the next extrapolation.
     reset = take_step & ~done
-    bisect_next = jnp.where(reset, order[0], bisect_next)
+    bisect_next = jnp.where(reset, worst, bisect_next)
     bisect_next_err_rank = jnp.where(reset, 0, bisect_next_err_rank)
     accelerating &= ~reset
     level_max = jnp.where(reset, state["level_max"] + 1, state["level_max"])
@@ -1046,7 +1152,7 @@ def _accelerate_full(
     # `_replay_solve`; the slot this bisection created labels the step.
     n_append = state["n_append"] + take_step
     updates = {
-        "append_mask": state["append_mask"].at[state["ninter"] - 1].set(take_step),
+        "append_mask": state["append_mask"].at[nregion - 1].set(take_step),
         "n_append": n_append,
         "accel_ncall": jnp.where(improved, n_append, state["accel_ncall"]),
         "bisect_next": bisect_next,
@@ -1087,10 +1193,11 @@ def _accept_extrapolation(state, mesh_y, norm):
     # be gained by replacing it with a heuristic. Without this a table fed early, while
     # the mesh was still coarse, can displace a converged answer with a much worse one
     # and still report success.
-    have_accel = jnp.isfinite(state["accel_err"]) & (mesh_err > state["err_bnd"])
+    table_spoke = jnp.isfinite(state["accel_err"])
+    have_accel = table_spoke & (mesh_err > state["err_bnd"])
     # Where the table was running on a sequence that had stopped improving, its own
     # estimate understates the error by whatever was still outstanding in the
-    # sub-intervals it had passed over, since the extrapolation assumed that outstanding
+    # regions it had passed over, since the extrapolation assumed that outstanding
     # amount would be recovered by the trend. Add it back.
     accel_err = jnp.where(
         state["roundoff_in_table"],
@@ -1136,7 +1243,14 @@ def _accept_extrapolation(state, mesh_y, norm):
     testable = state["sign_known"] | (
         jnp.maximum(scale_accel, scale_mesh) > _CANCELLATION_FRAC * state["abs_total"]
     )
-    divergent = have_accel & ~use_mesh & ~untestable & testable & diverging
+    # Whether the table is believed enough to *return* its value is `have_accel`, and it
+    # rightly says no on a run the mesh converged by itself. Whether the table has
+    # anything to *say* is a different question with a different answer: a divergent
+    # integral makes the running total and its error estimate run away together, so
+    # their ratio comes back inside any relative tolerance long before the value means
+    # anything, and the run exits reporting success. The verdict is therefore read off
+    # whenever the table produced one, and only the choice of value is gated.
+    divergent = table_spoke & ~untestable & testable & diverging
 
     # Roundoff detected inside the table, where the subdivision itself reported nothing.
     state["status"] = escalate(
@@ -1619,6 +1733,7 @@ def _adaptive_solve(
                 epsabs,
                 epsrel,
                 epmach,
+                state["ninter"],
                 max_ninter,
             )
         return state
@@ -1628,4 +1743,14 @@ def _adaptive_solve(
     y = jnp.sum(state["r_arr"], axis=0)
     if extrapolate:
         state, y = _accept_extrapolation(state, y, _norm)
+
+    # A total or an error estimate that has left the range of the arithmetic. The mask
+    # already replaces a non-finite *integrand* value, so what is left is the sum itself
+    # running away, which no tolerance test can see: an infinite total satisfies any
+    # relative bound and a nan satisfies none of the tests that would raise a flag, so
+    # either way the run reports success over a number that is not one. This route needs
+    # no extrapolation, which is what makes it the one that covers the routines that do
+    # not extrapolate.
+    overflowed = ~(jnp.all(jnp.isfinite(y)) & jnp.all(jnp.isfinite(state["err_sum"])))
+    state["status"] = escalate(state["status"], STATUS.divergent, overflowed)
     return y, state

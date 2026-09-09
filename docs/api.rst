@@ -19,8 +19,25 @@ Adaptive integration of a callable function or method
     adaptive_quadrature
 
 
+Adaptive integration over a region in several dimensions
+--------------------------------------------------------
+
+See :doc:`cubature` for which rule to use at which dimension, and for the regions
+``interval`` can describe.
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+
+    cubegm
+    adaptive_cubature
+
+
 Quadrature Rules
 ----------------
+
+One dimensional rules, taken by :func:`~quadax.adaptive_quadrature` and used to build
+tensor product cubature rules.
 
 .. autosummary::
     :toctree: _api/
@@ -32,6 +49,22 @@ Quadrature Rules
     GaussKronrodRule
     ClenshawCurtisRule
     TanhSinhRule
+
+
+Cubature Rules
+--------------
+
+Rules over a box in several dimensions, taken by
+:func:`~quadax.adaptive_cubature`.
+
+.. autosummary::
+    :toctree: _api/
+    :recursive:
+    :template: class.rst
+
+    AbstractCubatureRule
+    GenzMalikRule
+    TensorProductRule
 
 
 .. _adjoints-api:

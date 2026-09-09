@@ -2,6 +2,31 @@ Changelog
 =========
 
 
+v0.3.1
+------
+- Added cubature: globally adaptive integration over a region in several dimensions,
+  with an error estimate, in the shape of the one dimensional routines.
+  - `quadax.cubegm` is the one to reach for, using an efficient fully symmetric
+    Genz-Malik rule with Bernsten-Epselid error estimation. The integrand takes an
+    abscissa of shape `(ndim,)`.
+  - `quadax.adaptive_cubature` is the same routine with the local rule left to the
+    caller, which is how to reach a `quadax.TensorProductRule`. The rules are
+    `quadax.GenzMalikRule` (degree 7, 9, 11 or 13) and `quadax.TensorProductRule`,
+    which applies a one dimensional rule along each axis, optionally a different one
+    per axis.
+  - Limits are given as an array of shape `(ndim, 2)` or as one entry per axis, the
+    latter carrying breakpoints, which may differ in number between axes. An axis may
+    be unbounded on either side or both.
+  - An entry of the per axis form may instead be a callable giving that axis' limits as
+    a function of the coordinates before it, in the manner of `scipy.integrate.nquad`,
+    so the region need not be a box. Axis `k` may depend only on axes `0` to `k-1`,
+    which makes the order of the axes significant. A limit the callable returns may be
+    unbounded, and any breakpoints it returns may move with the coordinates too, which
+    is how a feature lying along a curve is marked; such a breakpoint costs no boundary
+    term, since it does not move in the coordinates that are actually integrated over.
+    Derivatives are supported as usual, with either adjoint.
+
+
 v0.3.0
 ------
 - Added `quadax.tanhsinh`, tanh-sinh quadrature on a uniformly refined mesh, and

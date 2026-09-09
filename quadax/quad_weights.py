@@ -1,6 +1,9 @@
 """Quadrature nodes and weights."""
 
 import functools
+import itertools
+from fractions import Fraction
+from typing import NamedTuple
 
 import numpy as np
 
@@ -901,3 +904,560 @@ def get_tanhsinh_table(order: int, tmax: float):
     wh *= 2 / wh.sum()
     wl *= 2 / wl.sum()
     return xh, wh, wl
+
+
+def _even_classes(degree: int, ndim: int):
+    """Representative exponent vectors of the fully symmetric monomial classes.
+
+    A fully symmetric rule integrates every monomial with an odd exponent exactly,
+    both sides being zero by cancellation, so only the even ones constrain the weights.
+    Permuting a monomial's exponents does not give a new constraint either, the rule
+    being symmetric under exactly those permutations. What is left is the partitions of
+    each even total degree into at most ``ndim`` even parts, one representative apiece.
+    """
+    out = []
+
+    def rec(remaining, largest, current):
+        out.append(tuple(current))
+        for part in range(min(remaining, largest), 1, -2):
+            if len(current) < ndim:
+                rec(remaining - part, part, current + [part])
+
+    rec(degree - degree % 2, degree, [])
+    return sorted(set(out))
+
+
+def _distinct_permutations(padded):
+    """The distinct arrangements of a multiset.
+
+    Generated directly rather than by filtering all ``len(padded)!`` orderings, which
+    is what an orbit of a rule in more than a handful of dimensions would otherwise
+    cost: a pattern with few active coordinates has very few distinct arrangements but
+    factorially many orderings.
+    """
+    values = sorted(set(padded), key=repr)
+    counts = [padded.count(v) for v in values]
+    out = []
+
+    def rec(current):
+        if len(current) == len(padded):
+            out.append(tuple(current))
+            return
+        for i, value in enumerate(values):
+            if counts[i]:
+                counts[i] -= 1
+                rec(current + [value])
+                counts[i] += 1
+
+    rec([])
+    return out
+
+
+def _moment_system(orbits, ndim: int, degree: int):
+    """The equations a fully symmetric rule of the given degree has to satisfy.
+
+    One equation per monomial class and one unknown per orbit, since every node of an
+    orbit carries the same weight. Built over the rationals: the equations involve only
+    even powers of the coordinates, whose squares are exact, so the whole system is
+    exact and its solution is the weights with no rounding anywhere.
+    """
+    mat, rhs = [], []
+    for alpha in _even_classes(degree, ndim):
+        exponents = tuple(alpha) + (0,) * (ndim - len(alpha))
+        # Integral of the monomial over the cube, the product of 2/(k+1) over exponents.
+        value = Fraction(1)
+        for e in exponents:
+            value *= Fraction(2, e + 1)
+        rhs.append(value)
+        row = []
+        for orbit in orbits:
+            total = Fraction(0)
+            for point, count in orbit.items():
+                term = Fraction(count)
+                for v, e in zip(point, exponents):
+                    term *= v ** (e // 2)
+                total += term
+            row.append(total)
+        mat.append(row)
+    return mat, rhs
+
+
+def _orbit_weights(orbits, ndim: int, degree: int):
+    """Weights making a fully symmetric rule exact to ``degree``, and the residual.
+
+    The system is overdetermined, there being more monomial classes than orbits, and is
+    consistent only because the generators were chosen to make it so. So it is solved
+    rather than fitted: the weights come from as many equations as there are unknowns
+    and the rest are left over, and the residual reports how far those are from being
+    satisfied. Being exact arithmetic the residual is zero for the right generators and
+    nonzero for any others, which is what lets the caller check a table it has just
+    built rather than trust the constants behind it.
+    """
+    mat, rhs = _moment_system(orbits, ndim, degree)
+    nrow, ncol = len(mat), len(orbits)
+    aug = [list(row) + [b] for row, b in zip(mat, rhs)]
+    pivots: list[int] = []
+    # gaussian elimination using exact int/fractions to avoid roundoff due to ill
+    # conditioning. Still very fast (<0.2s for ndim=10)
+    for col in range(ncol):
+        sel = next((i for i in range(len(pivots), nrow) if aug[i][col]), None)
+        if sel is None:
+            continue
+        row = len(pivots)
+        aug[row], aug[sel] = aug[sel], aug[row]
+        aug[row] = [x / aug[row][col] for x in aug[row]]
+        for i in range(nrow):
+            if i != row and aug[i][col]:
+                factor = aug[i][col]
+                aug[i] = [x - factor * y for x, y in zip(aug[i], aug[row])]
+        pivots.append(col)
+    errorif(
+        len(pivots) < ncol,
+        RuntimeError,
+        f"The moment equations for ndim={ndim}, degree={degree} do not determine the "
+        f"weights: {len(pivots)} independent equations for {ncol} orbits. Two orbits "
+        "would have to coincide for that, so the generators are not distinct.",
+    )
+    weights = [Fraction(0)] * ncol
+    for r, col in enumerate(pivots):
+        weights[col] = aug[r][ncol]
+    residual = max(
+        (abs(aug[i][ncol]) for i in range(len(pivots), nrow)), default=Fraction(0)
+    )
+    return weights, residual
+
+
+def _fs_orbit(lam, ndim: int):
+    """Every point reachable from ``lam`` by permuting and flipping coordinates.
+
+    ``lam`` gives the generators carried by the active coordinates, shortest first, and
+    is padded with zeros out to ``ndim``. Zero coordinates take no sign, so the orbit is
+    the set of distinct points rather than a product of all sign choices.
+    """
+    padded = tuple(lam) + (0.0,) * (ndim - len(lam))
+    points = set()
+    for perm in _distinct_permutations(padded):
+        signs = itertools.product(*[(1.0, -1.0) if v else (1.0,) for v in perm])
+        points.update(tuple(s * v for s, v in zip(sign, perm)) for sign in signs)
+    return np.array(sorted(points), dtype=float).reshape(-1, ndim)
+
+
+def _fs_orbit_squares(lam2, ndim: int):
+    """The same orbit as squared coordinates, with the sign changes collapsed.
+
+    Only even powers of the coordinates appear in the moment equations, so a node and
+    its sign changes contribute alike and are carried as one point with a multiplicity.
+    """
+    padded = tuple(lam2) + (Fraction(0),) * (ndim - len(lam2))
+    return {
+        perm: 2 ** sum(1 for v in perm if v) for perm in _distinct_permutations(padded)
+    }
+
+
+def _fs_partitions(m: int, ndim: int):
+    """Partitions of the integers ``0`` through ``m`` into at most ``ndim`` parts.
+
+    One partition per orbit of the rule. Its parts index the generators the orbit's
+    active coordinates carry, so a partition and the generator sequence together name
+    an orbit. Written nonincreasing, since a partition and its rearrangements generate
+    the same fully symmetric orbit.
+    """
+    out = []
+
+    def rec(remaining, largest, current):
+        out.append(tuple(current))
+        for part in range(min(remaining, largest), 0, -1):
+            if len(current) < ndim:
+                rec(remaining - part, part, current + [part])
+
+    rec(m, m, [])
+    return sorted(set(out))
+
+
+def _esym(values, k: int):
+    """``k``-th elementary symmetric polynomial of ``values``."""
+    if k < 0 or k > len(values):
+        return Fraction(0)
+    return sum(
+        functools.reduce(lambda a, b: a * b, c, Fraction(1))
+        for c in itertools.combinations(values, k)
+    )
+
+
+def _fs_generators(nlam: int, delta2: Fraction):
+    """Squared generators of the imbedded fully symmetric family, ``delta`` aside.
+
+    The whole family follows from the single free generator ``delta``. Requiring the
+    rule to integrate exactly the polynomial vanishing at the first ``p`` generators
+    gives one equation per index, and that equation is linear in the newest squared
+    generator given the ones before it, so the sequence unrolls by substitution. Solved
+    over the rationals because the generators come out rational in ``delta**2`` and
+    rounding them would move nodes off the moment equations they are meant to satisfy.
+    """
+    lam2: list[Fraction] = []
+    for p in range(2, nlam + 2):
+        rhs = Fraction(1, 3**p)
+        for prev in lam2:
+            rhs *= 1 - prev / delta2
+        const = sum(
+            (-1) ** k * _esym(lam2, k) / (2 * (p - k) + 1) for k in range(p - 1)
+        )
+        coef = sum(
+            (-1) ** k * _esym(lam2, k - 1) / (2 * (p - k) + 1) for k in range(1, p)
+        )
+        lam2.append((rhs - const) / (coef + rhs / delta2))
+    return lam2
+
+
+# The free constant of the family, per degree. Every generator, and through it every
+# node and weight, follows from this one number, so it is the only constant here that
+# was chosen rather than derived.
+#
+# Each degree needs one more generator than the one below it, and the sequence a given
+# delta produces eventually leaves the cube, so no single value serves every degree.
+# 9/19 is the classical Genz-Malik choice, reproducing the rule of [1]_ exactly, and its
+# generators stay inside the cube through degree 11; at degree 13 the next one lands
+# outside, where the rule would sample beyond the region it is integrating over. Degree
+# 13 therefore takes the value tabulated in [2]_, whose sequence reaches one generator
+# further.
+#
+# The degrees are free to disagree because nothing passes between them. Each table is
+# built on its own, and the error estimate comes from an embedded rule sharing that
+# table's nodes rather than from the rule of any other degree.
+_FS_DELTA2 = {
+    7: Fraction(9, 19),
+    9: Fraction(9, 19),
+    11: Fraction(9, 19),
+    13: Fraction(4707, 10000),
+}
+
+GENZ_MALIK_DEGREES = tuple(sorted(_FS_DELTA2))
+
+# Squared generator of the extra orbit the error estimate adds to the rule's own nodes,
+# per degree. The rule integrates the same way with or without it, its weight there
+# being zero; it is carried so that the top null rule level is two dimensional rather
+# than one, which is what an estimate over a space of null rules needs.
+#
+# The value is free apart from having to differ from the generators already in the
+# family: an orbit that nearly coincides with an existing one contributes a nearly
+# dependent null rule and the second dimension is worth nothing. Each entry sits in a
+# gap of that degree's generator sequence, chosen by measuring the resulting estimate
+# against the leading term of the rule's error; the choice is a broad optimum, so the
+# distance from the neighboring generators matters more than the exact value.
+_FS_MU2 = {
+    7: Fraction(7, 10),
+    9: Fraction(2, 5),
+    11: Fraction(4, 5),
+    13: Fraction(1, 20),
+}
+
+
+def _fs_orbit_data(ndim: int, degree: int):
+    """The orbits of the imbedded family, as nodes and as squared coordinates.
+
+    One orbit per partition, plus the corner orbit at ``delta`` that raises the degree
+    the last two. Only ``delta`` is chosen; the generators follow from it. The two views
+    come from the one generator list so they cannot drift apart: the squared coordinates
+    are what the moment equations see, the nodes are where the integrand is evaluated.
+    """
+    m = (degree - 1) // 2
+    delta2 = _FS_DELTA2[degree]
+    squares = [Fraction(0)] + _fs_generators(m - 1, delta2)
+    patterns = _fs_partitions(m - 1, ndim)
+    lam = [float(v) ** 0.5 for v in squares]
+    orbits = [_fs_orbit([lam[j] for j in p], ndim) for p in patterns]
+    orbits.append(_fs_orbit([float(delta2) ** 0.5] * ndim, ndim))
+    exact = [_fs_orbit_squares([squares[j] for j in p], ndim) for p in patterns]
+    exact.append(_fs_orbit_squares([delta2] * ndim, ndim))
+    return orbits, exact, squares, lam
+
+
+def _orbit_nullspace(orbits, ndim: int, degree: int):
+    """Basis of the fully symmetric rules that integrate every polynomial to zero.
+
+    One unknown per orbit, as in ``_orbit_weights``, but solving the homogeneous system:
+    the result annihilates every monomial of total degree at most ``degree`` rather than
+    reproducing its integral. Exact arithmetic throughout, so a vector returned here
+    annihilates those monomials exactly rather than to within a residual.
+    """
+    mat, _ = _moment_system(orbits, ndim, degree)
+    ncol = len(orbits)
+    aug = [list(row) for row in mat]
+    pivots: list[int] = []
+    for col in range(ncol):
+        sel = next((i for i in range(len(pivots), len(aug)) if aug[i][col]), None)
+        if sel is None:
+            continue
+        row = len(pivots)
+        aug[row], aug[sel] = aug[sel], aug[row]
+        aug[row] = [x / aug[row][col] for x in aug[row]]
+        for i in range(len(aug)):
+            if i != row and aug[i][col]:
+                factor = aug[i][col]
+                aug[i] = [x - factor * y for x, y in zip(aug[i], aug[row])]
+        pivots.append(col)
+    basis = []
+    for free in (c for c in range(ncol) if c not in pivots):
+        vec = [Fraction(0)] * ncol
+        vec[free] = Fraction(1)
+        for r, col in enumerate(pivots):
+            vec[col] = -aug[r][free]
+        basis.append(vec)
+    return basis
+
+
+def _null_levels(exact, sizes_per_orbit, ndim: int, degree: int, levels: int = 3):
+    """Null rules on a Genz-Malik node set, graded by the degree they annihilate.
+
+    Level ``0`` annihilates polynomials up to ``degree - 2``, and each level after it
+    two degrees lower, orthogonal to every level above. So the levels are a
+    decomposition of the node values into contributions of decreasing polynomial
+    degree, and the ratio of one level to the next measures how fast that sequence
+    decays, which is what tells an error estimate whether the rule is resolving the
+    integrand at all.
+
+    Takes the orbits' squared coordinates and their sizes, so that a level is solved
+    for over one unknown per orbit and then expanded onto the nodes. Returns the rows,
+    orthonormal and levels concatenated in order, and how many belong to each level.
+    """
+
+    def expand(vec):
+        return np.repeat(np.array([float(x) for x in vec]), sizes_per_orbit)
+
+    rows: list[np.ndarray] = []
+    sizes = []
+    for level in range(levels):
+        space = _orbit_nullspace(exact, ndim, degree - 2 - 2 * level)
+        taken = 0
+        for vec in space:
+            # Against the levels above as well as the rest of this one, so that a level
+            # holds only what the levels of higher degree do not already account for.
+            w = expand(vec)
+            for prev in rows:
+                w = w - np.dot(w, prev) * prev
+            norm = float(np.linalg.norm(w))
+            if norm > 1e-10 * max(float(np.linalg.norm(expand(vec))), 1e-300):
+                rows.append(w / norm)
+                taken += 1
+        sizes.append(taken)
+    return np.array(rows), tuple(sizes)
+
+
+class GenzMalikTable(NamedTuple):
+    """A Genz-Malik rule, the rule embedded in it, and its null rules.
+
+    Attributes
+    ----------
+    x : ndarray, shape(npts, ndim)
+        Nodes on the reference cube.
+    wh : ndarray, shape(npts,)
+        Weights of the degree ``degree`` rule.
+    wl : ndarray, shape(npts,)
+        Weights of the embedded degree ``degree - 2`` rule, zero on the nodes it does
+        not use.
+    wsplit : ndarray, shape(ndim, npts)
+        Row ``k`` combines the nodes along axis ``k`` into a fourth difference; see
+        :func:`get_genz_malik_table`.
+    nulls : ndarray, shape(nnull, npts)
+        The null rules, one per row, levels concatenated in order of descending degree.
+    null_sizes : tuple of int
+        How many rows belong to each level, summing to ``nnull``.
+    rho : ndarray, shape(ncand,)
+        Combinations of the two rows of the top level at which the largest error
+        estimate in their span can occur; see :func:`get_genz_malik_table`.
+    l1 : ndarray, shape(ncand,)
+        The 1-norm of the top level combination at each entry of ``rho``.
+    l1_top : float
+        The 1-norm of the first row of the top level alone, the limit of large ``rho``.
+
+    """
+
+    x: np.ndarray
+    wh: np.ndarray
+    wl: np.ndarray
+    wsplit: np.ndarray
+    nulls: np.ndarray
+    null_sizes: tuple[int, ...]
+    rho: np.ndarray
+    l1: np.ndarray
+    l1_top: float
+
+
+@functools.lru_cache
+def get_genz_malik_table(ndim: int, degree: int = 7) -> GenzMalikTable:
+    """Genz-Malik cubature nodes and weights, built in float64 on the host.
+
+    A fully symmetric rule on the reference cube ``[-1, 1]**ndim``, of the given
+    polynomial degree, with an embedded rule two degrees lower sharing its nodes, and
+    null rules for estimating the error of the pair. In numpy rather than with ``jnp``
+    ops so that the table does not inherit whatever the JAX default dtype happens to be.
+
+    The weights are solved for from the moment equations rather than transcribed, and
+    the residual of that solve is checked here. Only the generators are constants, so a
+    wrong one shows up as a residual far above machine epsilon and raises, rather than
+    quietly producing a rule of lower degree than it claims.
+
+    Parameters
+    ----------
+    ndim : int
+        Dimension of the cube.
+    degree : int
+        Polynomial degree of the rule, one of ``GENZ_MALIK_DEGREES``.
+
+    Returns
+    -------
+    table : GenzMalikTable
+        The nodes, the weights of both rules, the split indicator and the null rules,
+        all over the same node set.
+
+    Notes
+    -----
+    The nodes fall into fully symmetric orbits: the center, one orbit per partition
+    of the degree into generators, the corners, and one more orbit that only the null
+    rules use. Degree 7 has six orbits and ``2**ndim + 2*ndim**2 + 4*ndim + 1`` nodes;
+    each higher degree adds orbits with more coordinates active at once, and the count
+    grows quickly with both degree and dimension. The embedded rule uses every orbit
+    but the corners and the null rule nodes.
+
+    The generators are not transcribed but solved for, from the one free parameter of
+    the family, following [2]_. That parameter is chosen per degree, as the generators
+    a given value produces stay inside the cube only so far.
+
+    Each row of ``wsplit`` is the second difference along one axis at the two scales the
+    axis orbits provide, combined so the two agree on any quadratic. What is left
+    corresponds to the fourth derivative along that axis, which is what makes it a
+    measure of where a region is worth cutting rather than of how large the integral is.
+    The rows sum to zero, so a constant registers as nothing at all.
+
+    A null rule is a set of weights that integrates low degree polynomials to zero, so
+    applied to an integrand it reports what the rule cannot resolve rather than what it
+    can. The rows of a level are orthonormal, which makes the norm of that level's
+    values a property of the node values alone rather than of the basis chosen for it.
+
+    On the rule's own nodes the top level would be one dimensional at every degree and
+    dimension, the rule being interpolatory with a single orbit to spare, so it would be
+    the difference of the two embedded rules up to scale. The extra orbit is what makes
+    it two dimensional. A single null rule can happen to be near blind to a given
+    integrand, reporting far less error than the rule made; over a space of them that
+    coincidence needs every direction to fail at once, which is much rarer. The lower
+    levels are wider still and need no help.
+
+    ``rho``, ``l1`` and ``l1_top`` support estimating the error as the largest value any
+    null rule in the span of the top level produces, each measured against the 1-norm of
+    its own weights, following [3]_. That maximum is a ratio of a linear function to a
+    piecewise linear convex one, so it is monotone between the points where the 1-norm
+    turns and can only be attained at one of them or in the limit. The weights are
+    constant on an orbit, so those points number one per orbit and are fixed by the
+    weights alone.
+
+    Because the estimate divides by the 1-norm of the weights it carries the scale of
+    the node set with it, unlike a norm taken over an orthonormal basis, and needs much
+    less of a dimension dependent coefficient to put it on the scale of an integral.
+
+    References
+    ----------
+    .. [1] A. C. Genz, A. A. Malik. "Remarks on algorithm 006 : An adaptive algorithm
+           for numerical integration Over an N-dimensional rectangular region". Journal
+           of Computational and Applied Mathematics, vol. 6, no. 4, 1980, pp. 295-302.
+    .. [2] A. C. Genz, A. A. Malik. "An imbedded family of fully symmetric numerical
+           integration rules". SIAM Journal on Numerical Analysis, vol. 20, no. 3,
+           1983, pp. 580-588
+    .. [3] J. Berntsen, T. O. Espelid, A. Genz. "An adaptive algorithm for the
+           approximate calculation of multiple integrals". ACM Transactions on
+           Mathematical Software, vol. 17, no. 4, 1991, pp. 437-451.
+
+    """
+    errorif(
+        ndim < 1,
+        ValueError,
+        f"a cubature rule needs at least one dimension, got ndim={ndim}.",
+    )
+    errorif(
+        degree not in GENZ_MALIK_DEGREES,
+        NotImplementedError,
+        f"degree {degree} is not implemented, should be one of "
+        f"{list(GENZ_MALIK_DEGREES)}.",
+    )
+
+    orbits, exact, squares, lam = _fs_orbit_data(ndim, degree)
+
+    wh_orbit, res_h = _orbit_weights(exact, ndim, degree)
+    # The embedded rule is the same node set minus the corners, so its weights solve the
+    # same equations two degrees lower over one orbit fewer.
+    wl_orbit, res_l = _orbit_weights(exact[:-1], ndim, degree - 2)
+    # There is a residual to check only where the monomial classes outnumber the
+    # orbits, which is every dimension above one. Over a single axis the system is
+    # square, one equation per even power and one unknown per generator, so any
+    # distinct set of generators solves it and yields a rule of the claimed degree;
+    # the check passes there without having looked at anything. The constants are
+    # shared across dimensions, so a wrong one is still caught, just not at ndim 1.
+    errorif(
+        max(res_h, res_l) != 0,
+        RuntimeError,
+        f"The Genz-Malik generators for ndim={ndim}, degree={degree} do not satisfy "
+        f"the moment equations, leaving residuals {res_h} and {res_l}. The arithmetic "
+        "here is exact, so a nonzero residual means the generators are wrong and the "
+        "rule would not have the degree it claims.",
+    )
+
+    # The orbit the null rules need. Both rules are given zero weight on it, so the
+    # value they return is what it would be without it and only the error estimate
+    # sees the extra nodes.
+    mu2 = _FS_MU2[degree]
+    orbits = list(orbits) + [_fs_orbit([float(mu2) ** 0.5], ndim)]
+    exact = list(exact) + [_fs_orbit_squares([mu2], ndim)]
+
+    sizes = np.array([len(o) for o in orbits])
+    xh = np.concatenate(orbits)
+    wh = np.repeat([float(w) for w in wh_orbit] + [0.0], sizes)
+    wl = np.repeat([float(w) for w in wl_orbit] + [0.0, 0.0], sizes)
+
+    # Fourth difference along each axis, as weights on the nodes it reads. The ratio is
+    # what makes the two scales cancel on a quadratic: the second difference at the
+    # first generator picks up its square, the one at the second picks up theirs, so
+    # scaling by their ratio makes the two agree there and leaves the quartic behind.
+    #
+    # The two generators used are the ones every member of the family shares, so the
+    # difference is the same operator whatever the degree. The nodes are located by
+    # value rather than by position, the orbits having no reason to be laid out in any
+    # particular order.
+    index = {tuple(map(float, x)): i for i, x in enumerate(xh)}
+    ratio = float(squares[2] / squares[1])
+    wsplit = np.zeros((ndim, len(xh)))
+    center = np.zeros(ndim)
+    for k in range(ndim):
+        wsplit[k, index[tuple(center)]] = -2.0 * (1.0 - ratio)
+        for sign in (1.0, -1.0):
+            for j, weight in ((2, 1.0), (1, -ratio)):
+                node = np.zeros(ndim)
+                node[k] = sign * lam[j]
+                wsplit[k, index[tuple(node)]] = weight
+
+    nulls, null_sizes = _null_levels(exact, sizes, ndim, degree)
+    errorif(
+        null_sizes[0] < 2,
+        RuntimeError,
+        f"The extra orbit for ndim={ndim}, degree={degree} left the top null rule "
+        f"level {null_sizes[0]} dimensional rather than 2, so it coincides with an "
+        "orbit the rule already has and its generator is a bad choice.",
+    )
+
+    # Where the 1-norm of ``rho * nulls[0] + nulls[1]`` turns: one per orbit, at the
+    # value that zeroes that orbit's weight. Taken on the orbits rather than the nodes
+    # since the weights are constant across an orbit.
+    first = np.cumsum(np.concatenate([[0], sizes[:-1]]))
+    top, second = nulls[0], nulls[1]
+    rho = sorted({float(-second[j] / top[j]) for j in first if top[j] != 0})
+    l1 = [float(np.abs(r * top + second).sum()) for r in rho]
+
+    return GenzMalikTable(
+        xh,
+        wh,
+        wl,
+        wsplit,
+        nulls,
+        null_sizes,
+        np.array(rho),
+        np.array(l1),
+        float(np.abs(top).sum()),
+    )

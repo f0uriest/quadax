@@ -400,6 +400,11 @@ def _record(
 ) -> EpsilonTable:
     """Store the extrapolation and estimate how far it still is from the limit.
 
+    An extrapolation that has not moved from the last one stored is not stored, so that
+    the three kept are values the table actually moved through. It is still reported on:
+    the estimate is the spread of the current extrapolation against those three, taken
+    afresh every call.
+
     QUADPACK [2] reports the spread of the three most recent extrapolated values. That
     says how far the sequence has recently *moved*, which is not the same as how far it
     still has to *go*, and using it as if it were is optimistic by exactly the amount
@@ -456,6 +461,31 @@ def _record(
     est = jnp.where(have_three & signal, jnp.maximum(est, tail), est)
     est = jnp.maximum(est, ERR_FLOOR * epmach * norm(result))
 
+    # An extrapolation that has not moved from the last one kept says nothing new about
+    # the limit, and does not join them. The recursion returns an entry it already holds
+    # whenever it finds three of them equal to machine accuracy, so a table that has
+    # saturated answers with the same value for every term it is fed afterwards. Rolling
+    # those in fills all three slots with one value, whose spread is zero however far
+    # that value still is from the limit, and the error estimate would then fall to the
+    # floor below on a run that had not converged at all. Keeping the three values the
+    # table actually moved through leaves the spread measuring movement that happened.
+    # The threshold is the floor itself, since movement under it is not resolved by the
+    # estimate either way, and it is measured against the newest value kept rather than
+    # against the previous call's, so that a drift of a fraction of it per call
+    # accumulates and is eventually kept instead of being discarded forever.
+    #
+    # What a repeat withholds is a place in the record. It does not withhold the
+    # reading: `est` above is the spread of this extrapolation against the three values
+    # currently kept, and that is the figure to report whether or not this one joins
+    # them. Holding the previous pass's figure instead would hold the record it was
+    # measured against, which is one roll further back and so one value staler. On a
+    # table that settles early that stale value is from before it settled, orders away
+    # from where it has arrived, and since no later pass can displace it the estimate
+    # can never come down - a table that has plainly converged goes on reporting the
+    # width of its early wandering. Recomputing narrows only as far as the three kept
+    # allow, which is the bound refusing the repeat entry was there to preserve.
+    moved = d2 > ERR_FLOOR * epmach * norm(result)
+    keep = have_three & ~moved
     # Roll the newest in and the oldest out.
     last = jnp.where(
         have_three,
@@ -463,5 +493,8 @@ def _record(
         state.last_results.at[jnp.minimum(state.n_calls - 1, 2)].set(result),
     )
     return state._replace(
-        last_results=last, result=result, abserr=est, abserr_sharp=sharp
+        last_results=jnp.where(keep, state.last_results, last),
+        result=result,
+        abserr=est,
+        abserr_sharp=sharp,
     )

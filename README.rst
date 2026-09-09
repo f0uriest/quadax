@@ -18,10 +18,10 @@ quadax is a library for numerical quadrature and integration using JAX.
 - Globally adaptive Gauss-Kronrod and Clenshaw-Curtis quadrature for smooth integrands (similar to ``scipy.integrate.quad``)
 - Adaptive tanh-sinh quadrature for singular or near singular integrands.
 - Quadrature from sampled values using trapezoidal and Simpsons methods.
+- Globally adaptive cubature over a region in several dimensions, whose limits may depend on the other coordinates (similar to ``scipy.integrate.nquad``).
 
 Coming soon:
 
-- N-D quadrature (cubature)
 - QMC methods
 - Integration with weight functions
 - Sparse grids (maybe, need to play with data structures and JAX)

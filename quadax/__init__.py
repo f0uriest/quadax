@@ -3,7 +3,13 @@
 from . import _version
 from ._status import STATUS
 from .adaptive import adaptive_quadrature, quadcc, quadgk, quadts
+from .adaptive_cube import adaptive_cubature, cubegm
 from .adjoint import AbstractAdjoint, DirectAdjoint, LeibnizAdjoint
+from .fixed_cubature import (
+    AbstractCubatureRule,
+    GenzMalikRule,
+    TensorProductRule,
+)
 from .fixed_order import (
     AbstractQuadratureRule,
     ClenshawCurtisRule,
@@ -20,11 +26,16 @@ __all__ = [
     "quadcc",
     "quadgk",
     "quadts",
+    "cubegm",
+    "adaptive_cubature",
     "AbstractQuadratureRule",
     "ClenshawCurtisRule",
     "GaussKronrodRule",
     "NestedRule",
     "TanhSinhRule",
+    "AbstractCubatureRule",
+    "GenzMalikRule",
+    "TensorProductRule",
     "AbstractAdjoint",
     "DirectAdjoint",
     "LeibnizAdjoint",

@@ -298,6 +298,48 @@ class TestExtrapolation:
         # there and carry a message
         assert quadax.STATUS[info.status].message.strip()
 
+    def test_divergence_is_reported_even_where_the_tolerance_was_met(self):
+        """A relative tolerance is no defense against a total that runs away.
+
+        The running total and its error estimate diverge together, so their ratio comes
+        back inside any relative tolerance long before the value means anything and the
+        subdivision exits reporting success. Whether the table's value is *used* rightly
+        turns on that exit; what it has to *say* does not, and here the two disagree by
+        three hundred orders of magnitude.
+        """
+        y, info = quadgk(
+            lambda t: jnp.exp(-jnp.abs(t) - 2 * t),
+            jnp.array([-jnp.inf, jnp.inf]),
+            epsabs=0.0,
+            epsrel=1e-8,
+            max_ninter=300,
+        )
+        assert float(info.err) <= 1e-8 * abs(complex(y)), (
+            "the tolerance was not met, so this is not the case under test"
+        )
+        assert int(info.status) == quadax.STATUS.divergent
+
+    @pytest.mark.parametrize("method", [quadax.quadgk, quadax.quadcc, quadax.quadts])
+    def test_a_total_that_leaves_the_range_is_flagged(self, method):
+        """``int_0^inf exp(x) dx``, which overflows rather than merely growing.
+
+        The mask covers a non-finite value of the *integrand*, so a non-finite total is
+        the sum itself running away. Nothing downstream can see it: an infinite total
+        satisfies any relative bound, and a nan satisfies none of the comparisons that
+        would raise a flag, so the run reports success over a number that is not one.
+        Swept over the routines because the test that catches this cannot live in the
+        extrapolation, which ``quadts`` does not do by default.
+        """
+        y, info = method(
+            lambda t: jnp.exp(t),
+            jnp.array([0.0, jnp.inf]),
+            epsabs=0.0,
+            epsrel=1e-8,
+            max_ninter=300,
+        )
+        assert not (np.isfinite(complex(y)) and np.isfinite(float(info.err)))
+        assert int(info.status) == quadax.STATUS.divergent
+
     def test_no_asymptotic_structure_falls_back(self):
         """``sin(1/x)`` has no trend to extrapolate, so the table must not win.
 
