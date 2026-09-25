@@ -710,7 +710,7 @@ class TestErrors:
 
 
 # The dtype of `interval` is the statement of what precision the user wants. The tests
-# below pin the four dtypes described by `quadax.utils.DTypes`: the abscissa the
+# below pin the four dtypes described by `quadax._utils.DTypes`: the abscissa the
 # integrand is called with, the integrand values and returned integral, the error
 # estimate, and the default tolerances.
 

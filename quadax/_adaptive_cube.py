@@ -12,8 +12,7 @@ import numpy as np
 from jax.typing import ArrayLike
 
 from . import _acceleration
-from ._status import STATUS, error_if_flagged, escalate
-from .adaptive import (
+from ._adaptive import (
     _MIN_WIDTH,
     _NO_PROGRESS,
     _ROUNDOFF_ACCEL_LIMIT,
@@ -22,7 +21,7 @@ from .adaptive import (
     _accept_extrapolation,
     _at_roundoff_floor,
 )
-from .adjoint import (
+from ._adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     LeibnizAdjoint,
@@ -36,8 +35,9 @@ from .adjoint import (
     build_box_integrand,
     closure_convert,
 )
-from .fixed_cubature import AbstractCubatureRule, GenzMalikRule
-from .utils import (
+from ._fixed_cubature import AbstractCubatureRule, GenzMalikRule
+from ._status import STATUS, error_if_flagged, escalate
+from ._utils import (
     _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _as_box_intervals,

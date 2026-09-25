@@ -21,8 +21,12 @@ from quadax import (
     LeibnizAdjoint,
     adaptive_quadrature,
 )
-from quadax.adaptive_cube import adaptive_cubature, cubegm
-from quadax.fixed_cubature import AbstractCubatureRule, GenzMalikRule, TensorProductRule
+from quadax._adaptive_cube import adaptive_cubature, cubegm
+from quadax._fixed_cubature import (
+    AbstractCubatureRule,
+    GenzMalikRule,
+    TensorProductRule,
+)
 
 from . import problems_nd as pnd
 

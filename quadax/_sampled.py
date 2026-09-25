@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 
-from .utils import wrap_jit
+from ._utils import wrap_jit
 
 
 def _tupleset(t: tuple, i: int, value: Any) -> tuple:

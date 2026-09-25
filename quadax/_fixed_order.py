@@ -8,13 +8,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .quad_weights import (
+from ._quad_weights import (
     get_cc_table,
     get_fejer2_table,
     get_tanhsinh_table,
     gk_weights,
 )
-from .utils import (
+from ._utils import (
     _ROUNDOFF_FLOOR,
     _real_dtype,
     check_size,

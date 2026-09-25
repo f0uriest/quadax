@@ -7,7 +7,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .utils import errorif
+from ._utils import errorif
 
 kronrod_15_weights = np.array(
     [
@@ -887,7 +887,7 @@ def get_tanhsinh_table(order: int, tmax: float):
     """Tanh-sinh nodes and weights on ``[-tmax, tmax]``, built in float64 on the host.
 
     ``tmax`` is a parameter rather than being derived here because it depends on the
-    precision the nodes will be *used* at; see ``quadax.utils.tanhsinh_tmax``.
+    precision the nodes will be *used* at; see ``quadax._utils.tanhsinh_tmax``.
     """
     errorif(order % 2 != 1, ValueError, "tanh-sinh order must be odd")
 
