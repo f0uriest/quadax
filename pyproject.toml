@@ -36,9 +36,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-  "equinox >= 0.11.0, < 0.14",
-  "jax >= 0.5.0, < 0.12",
-  "numpy >= 1.25.0, < 2.6",
+  "equinox >= 0.11.0",
+  "jax >= 0.5.0",
+  "numpy >= 1.25.0",
 ]
 dynamic = ["version"]
 
