@@ -23,8 +23,8 @@ from quadax import (
     romberg,
     tanhsinh,
 )
-from quadax.adaptive import _adaptive_solve
-from quadax.adjoint import (
+from quadax._adaptive import _adaptive_solve
+from quadax._adjoint import (
     _frozen_replay,
     _replay_solve,
     _UnrolledDirectAdjoint,

@@ -1,4 +1,4 @@
-"""Tests for the fixed order quadrature rules in quadax/fixed_order.py.
+"""Tests for the fixed order quadrature rules in quadax/_fixed_order.py.
 
 Each rule has a defining property, and these tests pin it down:
 

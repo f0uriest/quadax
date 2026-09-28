@@ -25,6 +25,12 @@ v0.3.1
     is how a feature lying along a curve is marked; such a breakpoint costs no boundary
     term, since it does not move in the coordinates that are actually integrated over.
     Derivatives are supported as usual, with either adjoint.
+- The submodules `adaptive`, `adaptive_cube`, `adjoint`, `fixed_cubature`,
+  `fixed_order`, `quad_weights`, `romberg`, `sampled` and `utils` are now private, renamed
+  with a leading underscore. They were never part of the public API, which is everything
+  in the documentation and all of which is importable from `quadax` directly. Importing
+  them by the old names, e.g. `from quadax.adaptive import quadgk`, still works but
+  emits a `DeprecationWarning`, and will stop working in a future release.
 
 
 v0.3.0

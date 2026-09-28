@@ -66,7 +66,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .utils import _real_dtype, tree_where
+from ._utils import _real_dtype, tree_where
 
 # Cap on the number of partial sums the table holds. Never reached in practice: the
 # adaptive loop stops at the sub-interval width floor after ~48 bisections at float64,

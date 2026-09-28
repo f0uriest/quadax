@@ -19,8 +19,7 @@ from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 from . import _acceleration
-from ._status import STATUS, error_if_flagged, escalate, withdraw
-from .adjoint import (
+from ._adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     QuadratureOps,
@@ -34,13 +33,14 @@ from .adjoint import (
     build_integrand,
     closure_convert,
 )
-from .fixed_order import (
+from ._fixed_order import (
     AbstractQuadratureRule,
     ClenshawCurtisRule,
     GaussKronrodRule,
     TanhSinhRule,
 )
-from .utils import (
+from ._status import STATUS, error_if_flagged, escalate, withdraw
+from ._utils import (
     _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _real_dtype,

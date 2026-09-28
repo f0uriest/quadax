@@ -9,9 +9,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from .fixed_order import _ERR_INFLATION, NestedRule, _dot
-from .quad_weights import get_genz_malik_table
-from .utils import _ROUNDOFF_FLOOR, _real_dtype, check_size, errorif, wrap_func
+from ._fixed_order import _ERR_INFLATION, NestedRule, _dot
+from ._quad_weights import get_genz_malik_table
+from ._utils import _ROUNDOFF_FLOOR, _real_dtype, check_size, errorif, wrap_func
 
 # Coefficient on the extrapolated null rule value in the Genz-Malik error estimate,
 # per degree.

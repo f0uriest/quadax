@@ -10,8 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
-from ._status import STATUS, error_if_flagged, escalate
-from .adjoint import (
+from ._adjoint import (
     AbstractAdjoint,
     DirectAdjoint,
     QuadratureOps,
@@ -20,7 +19,8 @@ from .adjoint import (
     build_integrand,
     closure_convert,
 )
-from .utils import (
+from ._status import STATUS, error_if_flagged, escalate
+from ._utils import (
     _ROUNDOFF_FLOOR,
     QuadratureInfo,
     _pnorm,

@@ -17,7 +17,7 @@ from jax.flatten_util import ravel_pytree
 from jax.interpreters import ad, batching, mlir
 
 from . import _acceleration
-from .utils import (
+from ._utils import (
     _real_dtype,
     check_size,
     map_box,

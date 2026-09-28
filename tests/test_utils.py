@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from jax import config
 
-from quadax.utils import (
+from quadax._utils import (
     _map_tail,
     apply_mapping,
     box_corners,
@@ -387,3 +387,25 @@ class TestAbscissaShape:
         _, interval_t = map_box(lambda x: jnp.sum(x), [[0, 1], [0, 1]])
         for axis in interval_t:
             assert jnp.issubdtype(axis.dtype, jnp.floating)
+
+
+def test_renamed_submodules():
+    """Submodules made private still import by their old names, with a warning."""
+    # The old names exist only at runtime and are hidden from static type checkers.
+    import quadax.romberg  # pyright: ignore[reportMissingImports]
+
+    with pytest.warns(DeprecationWarning, match="quadax.adaptive"):
+        from quadax.adaptive import (  # pyright: ignore[reportMissingImports]
+            _adaptive_solve,
+            quadgk,
+        )
+    assert quadgk is quadax.quadgk
+    assert callable(_adaptive_solve)
+    # an old module name that is also a public function still resolves to the function
+    with pytest.warns(DeprecationWarning, match="quadax.romberg"):
+        from quadax.romberg import rombergts  # pyright: ignore[reportMissingImports]
+    assert rombergts is quadax.rombergts
+    assert quadax.romberg is quadax._romberg.romberg
+    with pytest.warns(DeprecationWarning, match="quadax.utils"):
+        utils = quadax.utils  # pyright: ignore[reportAttributeAccessIssue]
+        assert utils.map_interval is map_interval

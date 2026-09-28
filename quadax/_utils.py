@@ -544,7 +544,7 @@ def box_corners(interval: Sequence[jax.Array]) -> tuple[jax.Array, jax.Array]:
     Parameters
     ----------
     interval : sequence of Array
-        One interval per axis, as returned by :func:`~quadax.utils.map_box`.
+        One interval per axis, as returned by :func:`~quadax._utils.map_box`.
 
     Returns
     -------
@@ -588,7 +588,7 @@ def map_box(fun: Callable[..., jax.Array], interval, args: tuple = ()):
         Transformed integrand, taking ``x`` of shape ``(ndim,)``.
     interval_t : tuple of Array
         One interval per axis, finite along every axis, each as long as the
-        corresponding entry of ``interval``. Use :func:`~quadax.utils.box_corners` to
+        corresponding entry of ``interval``. Use :func:`~quadax._utils.box_corners` to
         recover the two corners.
 
     Notes

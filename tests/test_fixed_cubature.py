@@ -31,12 +31,12 @@ import numpy as np
 import pytest
 
 from quadax import ClenshawCurtisRule, GaussKronrodRule, TanhSinhRule, quadgk
-from quadax.fixed_cubature import (
+from quadax._fixed_cubature import (
     AbstractCubatureRule,
     GenzMalikRule,
     TensorProductRule,
 )
-from quadax.quad_weights import (
+from quadax._quad_weights import (
     _FS_DELTA2,
     _fs_generators,
     _fs_orbit_squares,
@@ -44,7 +44,7 @@ from quadax.quad_weights import (
     _orbit_weights,
     get_genz_malik_table,
 )
-from quadax.utils import box_corners, map_box
+from quadax._utils import box_corners, map_box
 
 from .problems import ULP_ATOL, ULP_RTOL, real_dtypes
 
