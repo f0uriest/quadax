@@ -31,6 +31,9 @@ v0.3.1
   in the documentation and all of which is importable from `quadax` directly. Importing
   them by the old names, e.g. `from quadax.adaptive import quadgk`, still works but
   emits a `DeprecationWarning`, and will stop working in a future release.
+- Bumped maximum jax version to 0.12.x
+- Added support for Python 3.15, and dropped support for Python 3.10. The minimum
+  supported Python version is now 3.11.
 
 
 v0.3.0
