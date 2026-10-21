@@ -29,6 +29,7 @@ from quadax._fixed_cubature import (
 )
 
 from . import problems_nd as pnd
+from .problems import ULP_ATOL, ULP_RTOL
 
 # XLA before jax 0.7.0 compiles the boundary term over a box to something that returns
 # NaN when it is differentiated twice with a reverse pass on the outside. The program
@@ -331,23 +332,9 @@ class TestExtrapolation:
 class TestOneDimension:
     """A box of one axis, where the cubature and the one dimensional routines meet."""
 
-    @pytest.mark.parametrize(
-        "fun,interval",
-        [
-            (lambda t: jnp.abs(t - 1 / 3), [0.0, 1.0]),
-            (lambda t: jnp.exp(-t), [0.0, np.inf]),
-        ],
-        ids=["kink", "semi-infinite"],
-    )
-    def test_it_reduces_to_the_one_dimensional_routine(self, fun, interval):
-        """Over one axis both loops build the same mesh and return the same value.
-
-        A tensor product of a single rule is that rule, so nothing but the subdivision
-        can differ, and the values and region counts have to agree exactly. The error
-        estimates need not: the cubature loop adds a term for the disagreement between
-        a region and the two it is cut into that the one dimensional loop has no
-        counterpart for, so they agree only to within it.
-        """
+    @staticmethod
+    def _solve_both(fun, interval):
+        """Solve with the cubature loop over a single axis and with the 1D loop."""
         rule = GaussKronrodRule(15)
         tol = 1e-10
         y_nd, nd = adaptive_cubature(
@@ -369,9 +356,42 @@ class TestOneDimension:
             max_ninter=500,
         )
         assert nd.status == STATUS.normal and one.status == STATUS.normal
-        assert y_nd == y_1d
-        assert int(nd.info["nregion"]) == int(one.info["ninter"])
+        return y_nd, nd, y_1d, one
+
+    @pytest.mark.parametrize(
+        "fun,interval",
+        [
+            (lambda t: jnp.abs(t - 1 / 3), [0.0, 1.0]),
+            (lambda t: jnp.exp(-t), [0.0, np.inf]),
+        ],
+        ids=["kink", "semi-infinite"],
+    )
+    def test_it_reduces_to_the_one_dimensional_routine(self, fun, interval):
+        """Over one axis both loops return the same value.
+
+        A tensor product of a single rule is that rule, so nothing but the subdivision
+        can differ. The two loops are compiled as separate programs, so the values
+        agree to within roundoff rather than bit for bit. The error estimates agree
+        less closely: the cubature loop adds a term for the disagreement between a
+        region and the two it is cut into that the one dimensional loop has no
+        counterpart for, so they agree only to within it.
+        """
+        y_nd, nd, y_1d, one = self._solve_both(fun, interval)
+        np.testing.assert_allclose(y_nd, y_1d, rtol=ULP_RTOL, atol=ULP_ATOL)
         np.testing.assert_allclose(float(nd.err), float(one.err), rtol=0.05)
+
+    def test_it_builds_the_one_dimensional_mesh(self):
+        """Over one axis both loops cut the same number of regions.
+
+        Where the stopping test or the extrapolation is close to a decision, a
+        difference in the last bit of a region's value can move the run by a
+        bisection, so this uses an integrand whose subdivision is not near any such
+        threshold.
+        """
+        _, nd, _, one = self._solve_both(
+            lambda t: jnp.exp(-50 * (t - 0.3) ** 2), [0.0, 1.0]
+        )
+        assert int(nd.info["nregion"]) == int(one.info["ninter"])
 
     @pytest.mark.parametrize("transform", [jax.jacfwd, jax.jacrev], ids=["fwd", "rev"])
     def test_the_leibniz_boundary_term_reduces_too(self, transform):
