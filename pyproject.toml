@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 name = "quadax"
 description = "Numerical quadrature with JAX"
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Rory Conlin", email = "mail@fouriest.net" }]
@@ -28,16 +28,17 @@ classifiers = [
   "Intended Audience :: Science/Research",
   "Natural Language :: English",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Topic :: Scientific/Engineering",
   "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
   "equinox >= 0.11.0, < 0.14",
-  "jax >= 0.5.0, < 0.12",
+  "jax >= 0.5.0, < 0.13",
   "numpy >= 1.25.0, < 2.6",
 ]
 dynamic = ["version"]
@@ -121,7 +122,7 @@ exclude = ["quadax/_version.py", "docs/*", "build/*", "setup.py"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 extend-exclude = ["docs", "build", "local", "quadax/_version.py"]
 
 [tool.ruff.lint]
