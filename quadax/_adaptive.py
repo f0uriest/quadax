@@ -168,7 +168,8 @@ def quadgk(
         An upper bound on the number of sub-intervals used in the adaptive
         algorithm.
     order : int
-        Order of local integration rule, one of 15, 21, 31, 41, 51, 61.
+        Order of local integration rule. Any odd order from 3 to 2001; see
+        :class:`~quadax.GaussKronrodRule`.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
