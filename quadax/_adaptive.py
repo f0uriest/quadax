@@ -829,7 +829,7 @@ def _err_rank_of(e_arr, region):
     )
 
 
-def _err_at_rank(e_arr, rank):
+def _err_at_rank(e_arr: jax.Array, rank: ArrayLike):
     """The error estimate holding `rank` in the descending ordering of `e_arr`.
 
     Only a handful of ranks are ever wanted per pass, so this searches for the one
@@ -986,6 +986,7 @@ def _accelerate_full(
     # A pointer still at the head is the common case, and by far the cheaper one, so it
     # is branched on rather than folded into the general path. Batched, the search runs
     # if any element needs it, which is harmless: it is correct at the head too.
+    bisect_next: jax.Array
     bisect_next, ranked_below_ptr = jax.lax.cond(
         unvmap_any(bisect_next_err_rank != 0), walked_down, at_head, None
     )
@@ -1052,10 +1053,9 @@ def _accelerate_full(
     search = ~state["roundoff_in_table"] & (err_unlocalized > accel_target)
     # The first candidate the walk would reach is the one with the largest estimate,
     # since the walk runs down the ranking; `jupbnd` is then applied to its rank.
-    found_region = jnp.argmax(
-        jnp.where(candidate, state["e_arr"], -jnp.inf).astype(state["e_arr"].dtype)
-    )
-    found_rank = _err_rank_of(state["e_arr"], found_region)
+    e_arr: jax.Array = state["e_arr"]
+    found_region = jnp.argmax(jnp.where(candidate, e_arr, -jnp.inf).astype(e_arr.dtype))
+    found_rank = _err_rank_of(e_arr, found_region)
     found = (
         active & search & ~keep_bisecting & jnp.any(candidate) & (found_rank < jupbnd)
     )
@@ -1176,7 +1176,7 @@ def _accelerate_full(
     return state
 
 
-def _accept_extrapolation(state, mesh_y, norm):
+def _accept_extrapolation(state, mesh_y, norm) -> tuple[dict, jax.Array]:
     """Choose between the extrapolated value and the mesh sum, once the loop has ended.
 
     The extrapolated value is not automatically preferred. It carries no rigorous bound,

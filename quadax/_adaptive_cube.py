@@ -545,7 +545,7 @@ def _cubature_solve(
     interval,
     kwargs,
     *,
-    rule,
+    rule: AbstractCubatureRule,
     epsabs,
     epsrel,
     max_nregion,

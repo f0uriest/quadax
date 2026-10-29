@@ -646,7 +646,7 @@ class GenzMalikRule(NestedCubatureRule):
         # 2-norm over its rules, which is what the ratio test below compares. The rows
         # of a level are orthonormal, so this depends on the node values alone and not
         # on the basis chosen to span the level.
-        levels = []
+        levels: list[jax.Array] = []
         start = 0
         for size in self._null_sizes:
             block = values[start : start + size]
