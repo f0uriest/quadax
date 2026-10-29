@@ -1278,16 +1278,27 @@ def _accept_extrapolation(state, mesh_y, norm):
 def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     """State of the subdivision loop before the initial sub-intervals are evaluated.
 
-    The mesh holds the sub-intervals ``interval`` was given with, and every running
-    quantity is at its identity. ``shape`` and the three dtypes are those of the
-    integrand's value, the abscissae and the error estimates respectively.
+    The mesh holds the sub-intervals ``interval`` was given with, those of zero width
+    left out, and every running quantity is at its identity. ``shape`` and the three
+    dtypes are those of the integrand's value, the abscissae and the error estimates
+    respectively.
 
     Extrapolation state is present only when ``extrapolate`` is set, so that a run
     without it traces to a loop carrying none of it.
     """
+    # A sub-interval of zero width contributes nothing and is never bisected, so giving
+    # it a slot would only take one from the subdivision budget. The nonempty ones are
+    # moved to the front, in order, and the rest of the slots start out unused. Which
+    # ones are empty is only known from the values of the breakpoints, so the count is
+    # traced and the slots stay sized for all of them.
+    nonempty = interval[1:] != interval[:-1]
+    perm = jnp.argsort(~nonempty, stable=True)
+    keep = nonempty[perm]
+    nseg = len(interval) - 1
+
     state = {}
     state["neval"] = 0  # number of evaluations of local quadrature rule
-    state["ninter"] = len(interval) - 1  # current number of intervals
+    state["ninter"] = jnp.sum(nonempty)  # current number of intervals
     state["r_arr"] = jnp.zeros(
         (max_ninter, *shape), ytype
     )  # local results from each interval
@@ -1300,8 +1311,12 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     state["f_arr"] = jnp.zeros(
         (max_ninter, *shape), etype
     )  # local est. of integral of abs(fun) from each interval
-    state["a_arr"] = state["a_arr"].at[: state["ninter"]].set(interval[:-1])
-    state["b_arr"] = state["b_arr"].at[: state["ninter"]].set(interval[1:])
+    state["a_arr"] = (
+        state["a_arr"].at[:nseg].set(jnp.where(keep, interval[:-1][perm], 0))
+    )
+    state["b_arr"] = (
+        state["b_arr"].at[:nseg].set(jnp.where(keep, interval[1:][perm], 0))
+    )
     state["roundoff1"] = 0  # for keeping track of roundoff errors
     state["roundoff2"] = 0  # for keeping track of roundoff errors
     state["status"] = STATUS.normal  # why the run stopped
@@ -1314,13 +1329,9 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     # it was carved out of, and the fractions of the way along it that its ends lie at.
     # These are what stay fixed when a limit or breakpoint moves, so recording them lets
     # the mesh be rebuilt as a smooth function of `interval` by gather and rescale.
-    state["owner"] = (
-        jnp.zeros(max_ninter, int)
-        .at[: state["ninter"]]
-        .set(jnp.arange(state["ninter"]))
-    )
+    state["owner"] = jnp.zeros(max_ninter, int).at[:nseg].set(jnp.where(keep, perm, 0))
     state["frac_a"] = jnp.zeros(max_ninter, xtype)
-    state["frac_b"] = jnp.zeros(max_ninter, xtype).at[: state["ninter"]].set(1.0)
+    state["frac_b"] = jnp.zeros(max_ninter, xtype).at[:nseg].set(keep.astype(xtype))
 
     if not extrapolate:
         return state
@@ -1373,7 +1384,8 @@ def _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate):
     # and the birth times are indexed by the slot a bisection creates, which is
     # unique to that step; `birth` is indexed by slot and holds the birth time of
     # whatever occupies it now. Time is counted in sub-intervals rather than steps,
-    # so it starts at the initial count.
+    # so it starts at the initial count, which is recorded because it is traced.
+    state["n_init"] = state["ninter"]
     state["birth"] = jnp.full(max_ninter, state["ninter"], int)
     state["p_owner"] = jnp.zeros(max_ninter, int)
     state["p_frac_a"] = jnp.zeros(max_ninter, xtype)
@@ -1440,6 +1452,9 @@ def _adaptive_solve(
     state = _init_state(interval, shape, xtype, ytype, etype, max_ninter, extrapolate)
 
     def init_body(i, state):
+        # Slots past the first `ninter` are empty, and the rule returns zeros for
+        # those without evaluating the integrand, so they count for nothing.
+        live = i < state["ninter"]
         a = state["a_arr"][i]
         b = state["b_arr"][i]
         result, abserr, intabs, intmmn = intfun(vfunc, a, b, ())
@@ -1460,7 +1475,7 @@ def _adaptive_solve(
                 state["ndin"].at[i].set((abserr >= variation) & (variation != 0))
             )
 
-        state["neval"] += 1
+        state["neval"] += live
         state["r_arr"] = state["r_arr"].at[i].set(result)
         state["e_arr"] = state["e_arr"].at[i].set(abserr)
         state["f_arr"] = state["f_arr"].at[i].set(intabs)
@@ -1469,7 +1484,17 @@ def _adaptive_solve(
         state["s_arr"] = state["s_arr"].at[i].set(state["area"])
         return state
 
-    state = jax.lax.fori_loop(0, state["ninter"], init_body, state)
+    # The loop runs over every slot an initial sub-interval could occupy, a static
+    # count, so that it stays reverse differentiable. Once past the nonempty ones, for
+    # every batch element at once, the rest are skipped.
+    state = jax.lax.fori_loop(
+        0,
+        len(interval) - 1,
+        lambda i, state: jax.lax.cond(
+            unvmap_any(i < state["ninter"]), init_body, lambda i, s: s, i, state
+        ),
+        state,
+    )
 
     state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
     # check for roundoff error - error too big but relative error is small

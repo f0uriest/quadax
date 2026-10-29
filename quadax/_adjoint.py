@@ -1,7 +1,6 @@
 """Adjoint methods controlling how derivatives of quadrature are computed."""
 
 import abc
-import math
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import NamedTuple
@@ -410,8 +409,11 @@ class _ReplayRecord(NamedTuple):
     running total, which is what lets the whole sequence of running totals be rebuilt.
     Both the parent arrays and the birth times are indexed by the slot the bisection
     created, which is unique to that step, so the step needs no separate counter.
+    ``n_init`` is the number of regions the subdivision started from, the point on the
+    timeline where the first term of the sequence is read.
     """
 
+    n_init: jax.Array
     owner: jax.Array
     frac_a: jax.Array
     frac_b: jax.Array
@@ -438,19 +440,6 @@ class _ReplayRecord(NamedTuple):
 def _frozen_replay(state):
     """The parts of an accelerated solve that do not vary smoothly with the limits."""
     return _ReplayRecord(**{name: state[name] for name in _ReplayRecord._fields})
-
-
-def _n_initial(interval):
-    """How many pieces the breakpoints cut the domain into before any subdivision.
-
-    ``interval`` is a single array of breakpoints in one dimension and one such array
-    per axis over a box, the same two forms the solves themselves take, so the count is
-    the number of sub-intervals in the first case and the size of their grid in the
-    second.
-    """
-    if isinstance(interval, (jax.Array, np.ndarray)):
-        return interval.shape[0] - 1
-    return math.prod(len(axis) - 1 for axis in interval)
 
 
 def _replay_solve(
@@ -503,7 +492,6 @@ def _replay_solve(
     # region of the final subdivision never dies. A parent dies at the step that
     # bisected it, which is the step that created slot `n`, so at `n + 1`. Unused slots
     # carry a zero value and cannot disturb either sum.
-    n_init = _n_initial(interval)
     timeline = jnp.zeros((nslot + 2, *shape), ytype)
     timeline = timeline.at[frozen.birth].add(v_mesh)
     timeline = timeline.at[frozen.p_birth].add(v_parent)
@@ -515,7 +503,7 @@ def _replay_solve(
     # everything else is parked in a slot that is never read.
     unused = nslot + 1
     position = jnp.cumsum(frozen.append_mask)
-    sequence = jnp.zeros((nslot + 2, *shape), ytype).at[0].set(running[n_init])
+    sequence = jnp.zeros((nslot + 2, *shape), ytype).at[0].set(running[frozen.n_init])
     sequence = sequence.at[jnp.where(frozen.append_mask, position, unused)].set(
         running[jnp.arange(nslot) + 1]
     )

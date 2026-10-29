@@ -2,6 +2,18 @@ Changelog
 =========
 
 
+v0.3.2
+------
+- Pieces of zero width in the initial subdivision, from repeated breakpoints in
+  `interval`, no longer count against `max_ninter` in the adaptive quadrature routines,
+  nor regions of zero extent against `max_nregion` in the adaptive cubature routines.
+  The whole budget is now available to the subdivision, which makes it practical to pad
+  breakpoints to a fixed length, eg to `vmap` over problems with differing numbers of
+  them. The budget must still be at least the number of pieces the breakpoints
+  describe, empty ones included. Empty pieces are also left out of `ninter`, `nregion`
+  and `neval`, and of the sub-intervals or regions reported with `full_output`.
+
+
 v0.3.1
 ------
 - Added cubature: globally adaptive integration over a region in several dimensions,

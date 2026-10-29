@@ -564,6 +564,24 @@ def test_truncated_result_is_still_a_partition(quad):
     np.testing.assert_allclose(a[1:], b[:-1], atol=1e-14)
 
 
+@pytest.mark.parametrize("extrapolate", [False, True])
+def test_zero_width_pieces_leave_the_budget_alone(extrapolate):
+    """Repeated breakpoints add pieces of zero width, which take none of max_ninter.
+
+    The budget is one the run exhausts, so any slot the empty pieces held would show
+    up as fewer bisections and a different answer.
+    """
+    fun = lambda t: 1.0 / jnp.sqrt(jnp.abs(t - 0.3) + 1e-9)
+    kw = dict(max_ninter=12, full_output=True, extrapolate=extrapolate)
+    y1, info1 = quadgk(fun, jnp.array([0.0, 0.5, 1.0]), **kw)
+    y2, info2 = quadgk(fun, jnp.array([0.0, 0.0, 0.5, 0.5, 1.0, 1.0]), **kw)
+    assert info1.status == quadax.STATUS.max_ninter
+    assert y1 == y2
+    assert info1.err == info2.err
+    assert info1.neval == info2.neval
+    assert info1.info["ninter"] == info2.info["ninter"]
+
+
 @pytest.mark.parametrize("max_ninter", [22, 23, 24, 25, 26])
 def test_converged_iteration_exits_clean(max_ninter):
     """Meeting the tolerance as the budget runs out is not a failure.
