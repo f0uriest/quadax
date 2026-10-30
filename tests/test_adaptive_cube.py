@@ -1029,6 +1029,29 @@ class TestConstruction:
                 GenzMalikRule(3, 7), lambda x: jnp.sum(x), jnp.array([[0.0, 1.0]] * 2)
             )
 
+    @pytest.mark.parametrize("extrapolate", [False, True])
+    def test_regions_of_zero_extent_leave_the_budget_alone(self, extrapolate):
+        """Repeated breakpoints add regions of zero extent, which take no slots.
+
+        The budget is one the run exhausts, so any slot the empty regions held would
+        show up as fewer cuts and a different answer.
+        """
+        fun = lambda x: 1.0 / jnp.sqrt(jnp.abs(x[0] - 0.3) + 1e-9) * jnp.exp(x[1])
+        kw = dict(max_nregion=20, full_output=True, extrapolate=extrapolate)
+        y1, info1 = cubegm(
+            fun, [jnp.array([0.0, 0.5, 1.0]), jnp.array([0.0, 1.0])], **kw
+        )
+        y2, info2 = cubegm(
+            fun,
+            [jnp.array([0.0, 0.0, 0.5, 0.5, 1.0]), jnp.array([0.0, 1.0, 1.0])],
+            **kw,
+        )
+        assert info1.status == STATUS.max_nregion
+        assert y1 == y2
+        assert info1.err == info2.err
+        assert info1.neval == info2.neval
+        assert info1.info["nregion"] == info2.info["nregion"]
+
     def test_a_budget_below_the_breakpoint_grid_is_rejected(self):
         with pytest.raises(ValueError, match="max_nregion"):
             cubegm(

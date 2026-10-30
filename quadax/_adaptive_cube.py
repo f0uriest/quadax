@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from equinox.internal import unvmap_any
 from jax.typing import ArrayLike
 
 from . import _acceleration
@@ -418,9 +419,10 @@ def _init_cubature_state(
 ):
     """State of the subdivision loop before the initial regions are evaluated.
 
-    The mesh holds the regions the breakpoints on each axis cut the box into, and every
-    running quantity is at its identity. ``shape`` and the three dtypes are those of the
-    integrand's value, the abscissae and the error estimates respectively.
+    The mesh holds the regions the breakpoints on each axis cut the box into, those of
+    zero extent left out, and every running quantity is at its identity. ``shape`` and
+    the three dtypes are those of the integrand's value, the abscissae and the error
+    estimates respectively.
     """
     ndim = len(interval)
     # Breakpoints cut each axis into cells, and the initial mesh is their tensor grid.
@@ -431,10 +433,20 @@ def _init_cubature_state(
         np.meshgrid(*[np.arange(n) for n in ncells], indexing="ij"), axis=-1
     ).reshape(-1, ndim)
     n_init = idx.shape[0]
+    a_init = jnp.stack([interval[k][idx[:, k]] for k in range(ndim)], axis=-1)
+    b_init = jnp.stack([interval[k][idx[:, k] + 1] for k in range(ndim)], axis=-1)
+    # A region with no extent along any one axis contributes nothing and is never cut,
+    # so giving it a slot would only take one from the subdivision budget. The nonempty
+    # ones are moved to the front, in order, and the rest of the slots start out
+    # unused. Which ones are empty is only known from the values of the breakpoints, so
+    # the count is traced and the slots stay sized for all of them.
+    nonempty = jnp.all(a_init != b_init, axis=-1)
+    perm = jnp.argsort(~nonempty, stable=True)
+    keep = nonempty[perm][:, None]
 
     state = {}
     state["neval"] = 0  # number of applications of the local cubature rule
-    state["nregion"] = n_init  # current number of regions
+    state["nregion"] = jnp.sum(nonempty)  # current number of regions
     state["r_arr"] = jnp.zeros((max_nregion, *shape), ytype)  # result from each region
     state["e_arr"] = jnp.zeros(max_nregion, etype)  # error est. from each region
     state["a_arr"] = jnp.zeros(
@@ -450,16 +462,8 @@ def _init_cubature_state(
     # rather than recomputed because the body needs it for the region it selects, not
     # for the one it has just evaluated.
     state["d_arr"] = jnp.zeros((max_nregion, ndim), etype)
-    state["a_arr"] = (
-        state["a_arr"]
-        .at[:n_init]
-        .set(jnp.stack([interval[k][idx[:, k]] for k in range(ndim)], axis=-1))
-    )
-    state["b_arr"] = (
-        state["b_arr"]
-        .at[:n_init]
-        .set(jnp.stack([interval[k][idx[:, k] + 1] for k in range(ndim)], axis=-1))
-    )
+    state["a_arr"] = state["a_arr"].at[:n_init].set(jnp.where(keep, a_init[perm], 0))
+    state["b_arr"] = state["b_arr"].at[:n_init].set(jnp.where(keep, b_init[perm], 0))
     state["status"] = STATUS.normal  # why the run stopped
     # Explicitly typed rather than left as weak python floats: these are `scan` carries,
     # so their dtype has to match what the loop body writes back into them.
@@ -471,9 +475,17 @@ def _init_cubature_state(
     # along that cell its two corners lie at. These are what stay fixed when a limit or
     # a breakpoint moves, so recording them lets the mesh be rebuilt as a smooth
     # function of `interval` by gather and rescale.
-    state["owner"] = jnp.zeros((max_nregion, ndim), int).at[:n_init].set(idx)
+    state["owner"] = (
+        jnp.zeros((max_nregion, ndim), int)
+        .at[:n_init]
+        .set(jnp.where(keep, jnp.asarray(idx)[perm], 0))
+    )
     state["frac_a"] = jnp.zeros((max_nregion, ndim), xtype)
-    state["frac_b"] = jnp.zeros((max_nregion, ndim), xtype).at[:n_init].set(1.0)
+    state["frac_b"] = (
+        jnp.zeros((max_nregion, ndim), xtype)
+        .at[:n_init]
+        .set(jnp.broadcast_to(keep, (n_init, ndim)).astype(xtype))
+    )
 
     if not extrapolate:
         return state
@@ -528,8 +540,9 @@ def _init_cubature_state(
     # the birth times are indexed by the slot a cut creates, which is unique to that
     # step; `birth` is indexed by slot and holds the birth time of whatever occupies it
     # now. Time is counted in regions rather than steps, so it starts at the initial
-    # count.
-    state["birth"] = jnp.full(max_nregion, n_init, int)
+    # count, which is recorded because it is traced.
+    state["n_init"] = state["nregion"]
+    state["birth"] = jnp.full(max_nregion, state["nregion"], int)
     state["p_owner"] = jnp.zeros((max_nregion, ndim), int)
     state["p_frac_a"] = jnp.zeros((max_nregion, ndim), xtype)
     state["p_frac_b"] = jnp.zeros((max_nregion, ndim), xtype)
@@ -599,6 +612,9 @@ def _cubature_solve(
     )
 
     def init_body(i, state):
+        # Slots past the first `nregion` are empty, and the rule returns zeros for
+        # those without evaluating the integrand, so they count for nothing.
+        live = i < state["nregion"]
         a = state["a_arr"][i]
         b = state["b_arr"][i]
         result, abserr, intabs, intmmn, split = intfun(vfunc, a, b, ())
@@ -618,7 +634,7 @@ def _cubature_solve(
                 state["ndin"].at[i].set((abserr >= variation) & (variation != 0))
             )
 
-        state["neval"] += 1
+        state["neval"] += live
         state["r_arr"] = state["r_arr"].at[i].set(result)
         state["e_arr"] = state["e_arr"].at[i].set(abserr)
         state["f_arr"] = state["f_arr"].at[i].set(intabs)
@@ -627,7 +643,17 @@ def _cubature_solve(
         state["err_sum"] = jnp.sum(state["e_arr"])
         return state
 
-    state = jax.lax.fori_loop(0, state["nregion"], init_body, state)
+    # The loop runs over every slot an initial region could occupy, a static count, so
+    # that it stays reverse differentiable. Once past the nonempty ones, for every batch
+    # element at once, the rest are skipped.
+    state = jax.lax.fori_loop(
+        0,
+        math.prod(len(axis) - 1 for axis in interval),
+        lambda i, state: jax.lax.cond(
+            unvmap_any(i < state["nregion"]), init_body, lambda i, s: s, i, state
+        ),
+        state,
+    )
 
     state["err_bnd"] = jnp.maximum(epsabs, epsrel * _norm(state["area"]))
     # check for roundoff error - error too big but relative error is small
