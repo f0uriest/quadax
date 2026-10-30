@@ -10,20 +10,18 @@ integrals the test suite covers it is both the most reliable and usually the che
 on smooth and non-smooth integrands alike. Reach for something else only when it has a
 specific reason to be a poor fit:
 
-- **Is the integrand expensive, with a singularity at an endpoint, or an infinite
-  interval?** Try :func:`~quadax.quadts`. Where the double exponential map suits the
-  integrand it reaches a given tolerance in a fraction of the evaluations the
-  subdivision needs, but it is also the method most likely to stop short: the map has a
-  truncation floor that no amount of refinement gets past, and below that tolerance it
-  gives up and says so. That trade is worth taking when an integrand evaluation is the
-  dominant cost and the singular behavior is mild (around ``x**-0.5`` or less in double
-  precision).
+- **Does the integrand have a singularity at an endpoint?** Stay with
+  :func:`~quadax.quadgk`. Its convergence acceleration (``extrapolate=True``, the
+  default) is built for algebraic and logarithmic endpoint singularities, and generally
+  reaches the tolerance in fewer evaluations than a double exponential method such as
+  :func:`~quadax.quadts`, which also has a truncation floor that no amount of
+  refinement gets past.
 
 - **Is the interval infinite and** :func:`~quadax.quadgk` **struggling?**
   :func:`~quadax.tanhsinh` is the most robust option on infinite intervals, at several
-  times the cost. It applies the same double exponential substitution as
-  :func:`~quadax.quadts` but refines a uniform mesh instead of subdividing, which is
-  what lets it keep going where the adaptive version stops short.
+  times the cost. It applies a double exponential substitution and refines a uniform
+  mesh rather than subdividing, which lets it keep going where adaptive subdivision
+  stops short.
 
 - **Do you want a method with minimal overhead for smooth integrands?**
   :func:`~quadax.romberg` refines the whole interval uniformly rather than subdividing
