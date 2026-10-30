@@ -44,7 +44,7 @@ def _dot(w, f):
     return jnp.einsum("n,n...->...", w, f)
 
 
-def _endpoint_mass(d0, d1, f0, f1):
+def _endpoint_mass(d0: jax.Array, d1: jax.Array, f0: jax.Array, f1: jax.Array):
     """Mass of an integrand between an endpoint and the nearest node to it.
 
     Models ``|f|`` as ``C * d**-p`` in the distance ``d`` from the endpoint, fits ``p``

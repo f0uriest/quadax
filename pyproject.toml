@@ -57,8 +57,8 @@ docs = [
 ]
 lint = [
   # keep this pin in sync with .pre-commit-config.yaml and .github/workflows/ruff.yml
-  "ruff == 0.16.4",
-  "pre-commit < 4.7",
+  "ruff == 0.17.3",
+  "pre-commit < 4.8",
   "pyright < 1.2",
 ]
 # everything needed to develop quadax: `pip install -e ".[dev]"`

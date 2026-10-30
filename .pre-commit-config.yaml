@@ -11,13 +11,13 @@ repos:
   # ruff replaces black, isort, flake8 (+ docstrings/eradicate/isort plugins),
   # and pyupgrade. Keep the rev in sync with the pin in pyproject.toml.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.4
+    rev: v0.17.3
     hooks:
       - id: ruff-check
         args: ["--fix"]
       - id: ruff-format
   - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.411
+    rev: v1.1.414
     hooks:
     - id: pyright
       additional_dependencies: ["jax", "equinox", "pytest"]

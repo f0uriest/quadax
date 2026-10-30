@@ -303,7 +303,7 @@ def _build_tanhsinh(interval, args, consts, *, f_conv, safe=False):
     return wrap_func(fun_m, (), interval_m.dtype, safe=safe), interval_m
 
 
-def _outermost(x, f, opos, oval):
+def _outermost(x: jax.Array, f: jax.Array, opos: jax.Array, oval: jax.Array):
     """Fold a batch of nodes into the outermost one either side that returned a value.
 
     Which node that is cannot be read off the sweep's shape, so it is carried as a
