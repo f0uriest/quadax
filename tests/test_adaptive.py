@@ -703,10 +703,11 @@ class TestErrors:
         with pytest.raises(ValueError, match="is not enough for"):
             quadgk(lambda t: t, jnp.array([0.0, 0.2, 0.4, 0.6, 0.8, 1.0]), max_ninter=2)
 
-    def test_unsupported_rule_order(self):
-        """Only the tabulated Gauss-Kronrod orders are available."""
-        with pytest.raises(NotImplementedError, match="not implemented"):
-            GaussKronrodRule(order=7)
+    @pytest.mark.parametrize("order", [1, 20, 2003])
+    def test_unsupported_rule_order(self, order):
+        """A Gauss-Kronrod rule has an odd number of nodes, from 3 to 2001."""
+        with pytest.raises(ValueError, match="must be odd and between 3 and 2001"):
+            GaussKronrodRule(order=order)
 
 
 # The dtype of `interval` is the statement of what precision the user wants. The tests

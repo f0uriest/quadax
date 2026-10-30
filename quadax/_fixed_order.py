@@ -11,8 +11,8 @@ import jax.numpy as jnp
 from ._quad_weights import (
     get_cc_table,
     get_fejer2_table,
+    get_gk_table,
     get_tanhsinh_table,
-    gk_weights,
 )
 from ._utils import (
     _ROUNDOFF_FLOOR,
@@ -445,7 +445,10 @@ class GaussKronrodRule(NestedRule):
     Parameters
     ----------
     order : int
-        Order of integration scheme, one of 15, 21, 31, 41, 51, 61.
+        Number of nodes of the Kronrod rule. Any odd order from 3 to 2001; an order
+        ``2n + 1`` rule embeds the ``n`` point Gauss rule and is exact to polynomial
+        degree ``3n + 1``. Orders 15, 21, 31, 41, 51 and 61 are tabulated and others
+        are constructed on first use.
     norm : int, callable
         Norm to use for measuring error for vector valued integrands. No effect if the
         integrand is scalar valued. If an int, uses p-norm of the given order, otherwise
@@ -466,17 +469,8 @@ class GaussKronrodRule(NestedRule):
         batch_size: int | None = None,
     ):
         self._norm = norm
-
-        try:
-            self._xh, self._wh, self._wl = (
-                jnp.array(gk_weights[order]["xk"]),
-                jnp.array(gk_weights[order]["wk"]),
-                jnp.array(gk_weights[order]["wg"]),
-            )
-        except KeyError as e:
-            raise NotImplementedError(
-                f"order {order} not implemented, should be one of {gk_weights.keys()}"
-            ) from e
+        xh, wh, wl = get_gk_table(order)
+        self._xh, self._wh, self._wl = jnp.asarray(xh), jnp.asarray(wh), jnp.asarray(wl)
         check_size(batch_size)
         self._batch_size = (
             None if batch_size is None else min(batch_size, len(self._xh))

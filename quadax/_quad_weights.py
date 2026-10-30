@@ -777,6 +777,145 @@ gk_weights = {
 }
 
 
+def _kronrod_recurrence(n: int) -> np.ndarray:
+    """Recurrence coefficients of the Legendre Jacobi-Kronrod matrix.
+
+    Returns ``beta_0, ..., beta_2n``, the squared off diagonal of the symmetric
+    tridiagonal matrix whose eigenvalues are the ``2n + 1`` Kronrod nodes extending the
+    ``n`` point Gauss-Legendre rule, with ``beta_0`` the total mass of the weight. The
+    diagonal is zero by symmetry.
+
+    A port of Laurie's algorithm [1] specialised to the Legendre weight. ``s`` and ``t``
+    are the two alternating rows of mixed moments from the paper, renormalised at every
+    step; see ``_rescale``.
+
+    References
+    ----------
+    .. [1] D. P. Laurie. "Calculation of Gauss-Kronrod quadrature rules". Mathematics
+           of Computation 66 (219), 1133-1145, 1997. doi:10.1090/S0025-5718-97-00861-2
+    """
+    beta = np.zeros(2 * n + 1)
+    beta[0] = 2.0
+    # The first ``3n/2`` coefficients are those of the Legendre weight itself, and
+    # the algorithm fills in the rest.
+    j = np.arange(1, (3 * n + 1) // 2 + 1, dtype=float)
+    beta[1 : len(j) + 1] = j**2 / (4 * j**2 - 1)
+
+    s = np.zeros(n // 2 + 2)
+    t = np.zeros(n // 2 + 2)
+    t[1] = beta[n + 1]
+    for m in range(n - 1):
+        u = 0.0
+        for k in range((m + 1) // 2, -1, -1):
+            u += beta[k + n + 1] * s[k] - beta[m - k] * s[k + 1]
+            s[k + 1] = u
+        s, t = _rescale(t, s)
+    s[1 : n // 2 + 2] = s[: n // 2 + 1].copy()
+    for m in range(n - 1, 2 * n - 2):
+        u = 0.0
+        for k in range(m + 1 - n, (m - 1) // 2 + 1):
+            j = n - 1 - (m - k)
+            u -= beta[k + n + 1] * s[j + 1] - beta[m - k] * s[j + 2]
+            s[j + 1] = u
+        k = (m + 1) // 2
+        if 2 * k != m:
+            j = n - (m - k + 2)
+            beta[k + n + 1] = s[j + 1] / s[j + 2]
+        s, t = _rescale(t, s)
+    return beta
+
+
+def _rescale(s: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Scale both rows of mixed moments by a common power of two, to order one.
+
+    The moments shrink by roughly a factor of 4 per step, which underflows float64
+    beyond a few hundred Gauss points. The recurrence is linear and homogeneous in the
+    pair of rows and only ever takes ratios within a row, so a common scaling leaves
+    the coefficients unchanged, and a power of two leaves them unchanged exactly.
+    """
+    _, exponent = np.frexp(max(np.abs(s).max(), np.abs(t).max()))
+    return np.ldexp(s, -exponent), np.ldexp(t, -exponent)
+
+
+def _orthonormal_polynomials(x: np.ndarray, beta: np.ndarray, m: int):
+    """Evaluate the orthonormal polynomials of a zero diagonal Jacobi matrix at ``x``.
+
+    Returns the characteristic polynomial of the leading ``m x m`` block (up to a
+    constant factor), its derivative, and ``sum_{k<m} p_k(x)**2`` over the orthonormal
+    polynomials ``p_k``. At a zero of the first, the reciprocal of the last is the
+    Gauss weight of the ``m`` point rule there.
+    """
+    sqrt_beta = np.sqrt(beta)
+    p_prev, p = np.zeros_like(x), np.full_like(x, 1 / sqrt_beta[0])
+    dp_prev, dp = np.zeros_like(x), np.zeros_like(x)
+    sum_squares = p**2
+    for k in range(m):
+        b = sqrt_beta[k] if k > 0 else 0.0
+        p_next = x * p - b * p_prev
+        dp_next = p + x * dp - b * dp_prev
+        if k < m - 1:
+            p_next, dp_next = p_next / sqrt_beta[k + 1], dp_next / sqrt_beta[k + 1]
+            sum_squares = sum_squares + p_next**2
+        p_prev, p, dp_prev, dp = p, p_next, dp, dp_next
+    return p, dp, sum_squares
+
+
+# Largest Gauss-Kronrod order that is constructed. Within one row of Laurie's mixed
+# moments the entries span roughly ``n`` bits for ``n`` Gauss points, which a common
+# rescaling cannot bring inside float64 beyond about order 2150. Construction time also
+# grows as the square of the order and the eigenvalue solve as its cube, and a rule this
+# large is already exact to degree 3001.
+_GK_MAX_ORDER = 2001
+
+
+@functools.lru_cache
+def get_gk_table(order: int):
+    """Gauss-Kronrod nodes and weights, built in float64 on the host.
+
+    Returns the ``order`` Kronrod nodes in ascending order, their weights, and the
+    weights of the embedded ``(order - 1) // 2`` point Gauss rule on the same nodes,
+    which are zero at the nodes the Gauss rule does not use.
+
+    ``order`` must be odd and between 3 and 2001.
+    """
+    errorif(
+        order < 3 or order > _GK_MAX_ORDER or order % 2 != 1,
+        ValueError,
+        f"Gauss-Kronrod order must be odd and between 3 and {_GK_MAX_ORDER}, "
+        f"got order={order}.",
+    )
+    # The tabulated orders are correctly rounded from higher precision values, which
+    # the construction below matches only to within an ulp or so.
+    if order in gk_weights:
+        table = gk_weights[order]
+        return table["xk"], table["wk"], table["wg"]
+
+    n = (order - 1) // 2
+    beta = _kronrod_recurrence(n)
+    off_diagonal = np.sqrt(beta[1:])
+    jacobi = np.diag(off_diagonal, 1) + np.diag(off_diagonal, -1)
+    x = np.linalg.eigvalsh(jacobi)
+
+    # The eigenvalues are accurate to an ulp or so, but weights from the first
+    # components of the eigenvectors lose relative accuracy on the small weights near
+    # the endpoints. Polishing the nodes against the characteristic polynomial and
+    # taking each weight from the orthonormal polynomials at its node keeps every
+    # weight accurate to a few ulps, at any order.
+    for _ in range(3):
+        p, dp, _ = _orthonormal_polynomials(x, beta, order)
+        x = x - p / dp
+    wk = 1 / _orthonormal_polynomials(x, beta, order)[2]
+    # The Gauss nodes interlace the Kronrod-only nodes, starting from the second. The
+    # leading ``n x n`` block of the Jacobi-Kronrod matrix is the Gauss one, so the
+    # same evaluation gives the Gauss weights.
+    wg = np.zeros_like(wk)
+    wg[1::2] = 1 / _orthonormal_polynomials(x[1::2], beta, n)[2]
+
+    # Symmetric by construction rather than by the rounding of the two halves
+    # happening to agree, with the middle node exactly zero.
+    return (x - x[::-1]) / 2, (wk + wk[::-1]) / 2, (wg + wg[::-1]) / 2
+
+
 def _check_chebyshev_order(order: int, rule: str, multiple: int):
     """Reject an order that would build a malformed rule, for both Chebyshev tables.
 

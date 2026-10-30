@@ -2,6 +2,14 @@ Changelog
 =========
 
 
+v0.3.2
+------
+- `quadax.GaussKronrodRule` and `quadax.quadgk` now accept any odd order from 3
+  to 2001 rather than only 15, 21, 31, 41, 51 and 61. Orders without a stored table are
+  constructed on first use with Laurie's algorithm and cached. An order outside that
+  range now raises a `ValueError` rather than a `NotImplementedError`.
+
+
 v0.3.1
 ------
 - Added cubature: globally adaptive integration over a region in several dimensions,
