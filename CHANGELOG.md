@@ -4,6 +4,14 @@ Changelog
 
 v0.3.2
 ------
+- Pieces of zero width in the initial subdivision, from repeated breakpoints in
+  `interval`, no longer count against `max_ninter` in the adaptive quadrature routines,
+  nor regions of zero extent against `max_nregion` in the adaptive cubature routines.
+  The whole budget is now available to the subdivision, which makes it practical to pad
+  breakpoints to a fixed length, eg to `vmap` over problems with differing numbers of
+  them. The budget must still be at least the number of pieces the breakpoints
+  describe, empty ones included. Empty pieces are also left out of `ninter`, `nregion`
+  and `neval`, and of the sub-intervals or regions reported with `full_output`.
 - `quadax.GaussKronrodRule` and `quadax.quadgk` now accept any odd order from 3
   to 2001 rather than only 15, 21, 31, 41, 51 and 61. Orders without a stored table are
   constructed on first use with Laurie's algorithm and cached. An order outside that
