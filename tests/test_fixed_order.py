@@ -125,7 +125,17 @@ def assert_not_exact(rule, interval, degree, threshold):
 
 # The algebraic degree of exactness of each Gauss-Kronrod order: with ``n = (order - 1)
 # / 2`` embedded Gauss points the Kronrod rule is exact to degree ``3n + 1``.
-GAUSS_KRONROD_DEGREE = {15: 22, 21: 31, 31: 46, 41: 61, 51: 76, 61: 91}
+# Orders 7 and 101 are not tabulated, and cover the construction of the rule.
+GAUSS_KRONROD_DEGREE = {
+    7: 10,
+    15: 22,
+    21: 31,
+    31: 46,
+    41: 61,
+    51: 76,
+    61: 91,
+    101: 151,
+}
 
 
 @pytest.mark.parametrize("order", GAUSS_KRONROD_DEGREE)
