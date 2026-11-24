@@ -6,6 +6,8 @@ whether or not it does, is the error it reports a bound on the error it made. Ev
 below that tests one mechanism the battery cannot isolate.
 """
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -1037,7 +1039,9 @@ class TestConstruction:
         show up as fewer cuts and a different answer.
         """
         fun = lambda x: 1.0 / jnp.sqrt(jnp.abs(x[0] - 0.3) + 1e-9) * jnp.exp(x[1])
-        kw = dict(max_nregion=20, full_output=True, extrapolate=extrapolate)
+        kw: dict[str, Any] = dict(
+            max_nregion=20, full_output=True, extrapolate=extrapolate
+        )
         y1, info1 = cubegm(
             fun, [jnp.array([0.0, 0.5, 1.0]), jnp.array([0.0, 1.0])], **kw
         )

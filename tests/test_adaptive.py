@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import warnings
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -572,7 +573,7 @@ def test_zero_width_pieces_leave_the_budget_alone(extrapolate):
     up as fewer bisections and a different answer.
     """
     fun = lambda t: 1.0 / jnp.sqrt(jnp.abs(t - 0.3) + 1e-9)
-    kw = dict(max_ninter=12, full_output=True, extrapolate=extrapolate)
+    kw: dict[str, Any] = dict(max_ninter=12, full_output=True, extrapolate=extrapolate)
     y1, info1 = quadgk(fun, jnp.array([0.0, 0.5, 1.0]), **kw)
     y2, info2 = quadgk(fun, jnp.array([0.0, 0.0, 0.5, 0.5, 1.0, 1.0]), **kw)
     assert info1.status == quadax.STATUS.max_ninter
